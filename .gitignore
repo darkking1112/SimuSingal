@@ -5,6 +5,10 @@ __pycache__/
 
 # C extensions
 *.so
+*.dll
+
+# Local application workspaces
+workspace_data/
 
 # Distribution / packaging
 .Python

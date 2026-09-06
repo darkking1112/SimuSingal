@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69", "wheel", "Cython>=3,<4"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simusignal"
+version = "0.1.0"
+description = "Offline scientific data workbench and generic event simulation prototype"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26,<3", "simpy>=4.1,<5"]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.6,<7", "pyqtgraph>=0.13,<0.15"]
+dev = ["pytest>=8,<10", "Cython>=3,<4", "build>=1,<2", "pyinstaller>=6,<7"]
+
+[project.scripts]
+simusignal = "simusignal.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = ["gui: requires PySide6 and an offscreen Qt platform", "native: builds a local C shared library"]
