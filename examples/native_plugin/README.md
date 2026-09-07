@@ -2,7 +2,7 @@
 
 本示例只复制 float32 数组，用于验证通用 C ABI、调用约定、输出容量检查和子进程调用，不包含信号算法。它与[生产插件接口草案](../../docs/核心模块二进制化与原生插件接口方案.md)中的完整 SDK 分开命名。
 
-基础工作台现已通过 `simusignal.plugins` 接入本演示 ABI。库编译完成后，执行 `python -m simusignal plugin-manifest 动态库路径 清单路径` 生成本机清单，再在界面选择清单，或运行 `python -m simusignal native ASSET_ID 清单路径`。清单应位于动态库目录或其上级目录；库更新后需重新生成摘要。完整示例命令见[项目 README](../../README.md)。
+基础工作台现已通过 `signal_analysis.plugins` 接入本演示 ABI。库编译完成后，执行 `python -m signal_analysis plugin-manifest 动态库路径 清单路径` 生成本机清单，再在界面选择清单，或运行 `python -m signal_analysis native ASSET_ID 清单路径`。清单应位于动态库目录或其上级目录；库更新后需重新生成摘要。完整示例命令见[项目 README](../../README.md)。
 
 文件包括 [C 头文件](demo_api.h)、[C 实现](demo_plugin.c)、[CMake 构建文件](CMakeLists.txt)和 [Python 宿主](host.py)。示例宿主只依赖 Python 标准库，无需 NumPy 或 Qt。
 
@@ -38,7 +38,7 @@ python examples/native_plugin/host.py build/native-demo/Release/demo_plugin.dll
 
 宿主先启动子进程，子进程才加载本机库。库加载失败或 Python 层错误会返回任务失败；本机崩溃通过退出码处理；超过 10 秒终止子进程。此示例只测试固定的小数组，不是通用生产插件加载器。
 
-独立 `host.py` 保持最小示例形式。工作台已实现基础清单检查、任务超时/取消、日志阈值及冻结程序 worker 入口；正式 ABI 生命周期、插件安装管理、完整资源配额和依赖链验证仍需补齐。`host.py` 使用脚本路径启动 worker；打包应用采用 `simusignal.tasks` 的同一可执行文件 worker 入口。
+独立 `host.py` 保持最小示例形式。工作台已实现基础清单检查、任务超时/取消、日志阈值及冻结程序 worker 入口；正式 ABI 生命周期、插件安装管理、完整资源配额和依赖链验证仍需补齐。`host.py` 使用脚本路径启动 worker；打包应用采用 `common.tasks` 的同一可执行文件 worker 入口。
 
 ## 本轮验证记录
 

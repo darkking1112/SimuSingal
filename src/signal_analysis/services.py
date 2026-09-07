@@ -5,7 +5,6 @@ from pathlib import Path
 from .core_api import analyze, make_demo
 from .dataio import read_samples
 from .plugins import call_demo_plugin
-from .simulation import Scenario, simulate
 from .storage import Workspace
 
 
@@ -31,7 +30,4 @@ def execute(request):
                                         asset["name"] + " · 原生复制", f"parent:{asset['id']}")
         return workspace.save_run("native", {"plugin": manifest,
                                              "derived_asset_id": derived["id"]}, asset_id=asset["id"])
-    if action == "simulate":
-        result = simulate(Scenario(**request.get("scenario", {})))
-        return workspace.save_run("simulation", result)
     raise ValueError(f"不支持的任务类型：{action}")

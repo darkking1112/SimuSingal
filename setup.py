@@ -13,7 +13,7 @@ class BuildPy(build_py):
         super().run()
         if compile_core:
             # A previous source build may have left this file in build_lib.
-            (Path(self.build_lib) / "simusignal" / "_numeric.py").unlink(missing_ok=True)
+            (Path(self.build_lib) / "signal_analysis" / "_numeric.py").unlink(missing_ok=True)
 
     def find_package_modules(self, package, package_dir):
         modules = super().find_package_modules(package, package_dir)
@@ -26,7 +26,7 @@ extensions = []
 if compile_core:
     from Cython.Build import cythonize
     extensions = cythonize(
-        [Extension("simusignal._numeric", ["src/simusignal/_numeric.py"])],
+        [Extension("signal_analysis._numeric", ["src/signal_analysis/_numeric.py"])],
         build_dir="build/cython",
         compiler_directives={"language_level": 3, "binding": True},
     )

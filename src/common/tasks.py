@@ -8,7 +8,7 @@ import sys
 import time
 import uuid
 
-from .storage import Workspace, utc_now
+from .storage import utc_now
 
 
 class JobError(RuntimeError):
@@ -24,21 +24,22 @@ def write_json(path, data):
     temporary.replace(path)
 
 
-def worker_command(request_path, response_path):
+def worker_command(request_path, response_path, worker_module):
     if getattr(sys, "frozen", False):
         return [sys.executable, "worker", str(request_path), str(response_path)]
-    return [sys.executable, "-m", "simusignal", "worker", str(request_path), str(response_path)]
+    return [sys.executable, "-m", worker_module, "worker", str(request_path), str(response_path)]
 
 
-def run_job(request, timeout=30.0, cancel=None):
+def run_job(request, *, worker_module, timeout=30.0, cancel=None):
     if not 0 < timeout <= 3600:
         raise ValueError("任务超时应在 (0,3600] 秒内")
-    workspace = Workspace(request["workspace"])
+    workspace_root = Path(request["workspace"]).expanduser().resolve()
+    (workspace_root / "jobs").mkdir(parents=True, exist_ok=True)
     job_id = uuid.uuid4().hex
-    folder = workspace.root / "jobs" / job_id
+    folder = workspace_root / "jobs" / job_id
     folder.mkdir()
     request_path, response_path = folder / "request.json", folder / "response.json"
-    write_json(request_path, {**request, "workspace": str(workspace.root)})
+    write_json(request_path, {**request, "workspace": str(workspace_root)})
     status = {"job_id": job_id, "action": request["action"], "state": "running", "started": utc_now()}
     write_json(folder / "status.json", status)
     env = os.environ.copy()
@@ -51,7 +52,7 @@ def run_job(request, timeout=30.0, cancel=None):
     process = None
     try:
         with (folder / "worker.log").open("wb") as log:
-            process = subprocess.Popen(worker_command(request_path, response_path),
+            process = subprocess.Popen(worker_command(request_path, response_path, worker_module),
                                        stdout=log, stderr=log, env=env)
             deadline = time.monotonic() + timeout
             while process.poll() is None:
@@ -83,12 +84,11 @@ def run_job(request, timeout=30.0, cancel=None):
         write_json(folder / "status.json", status)
 
 
-def worker_main(request_path, response_path):
+def worker_main(request_path, response_path, execute):
     # Suppress core dump files for the trusted native-demo crash tests on Unix.
     if os.name == "posix":
         import resource
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    from .services import execute
     try:
         request = json.loads(Path(request_path).read_text(encoding="utf-8"))
         response = {"ok": True, "result": execute(request)}

@@ -1,8 +1,8 @@
 # 两个项目的 Python 技术方案总览
 
-版本：V1.2，设计及基础实现记录。更新日期：2026-09-06。
+版本：V1.3，设计及分项目实现记录。更新日期：2026-09-07。
 
-已实现 0.1.0 基础工程，运行方法见 [README](../README.md)，每个源码、构建及测试文件见[基础工程实现与文件说明](基础工程实现与文件说明.md)。下文保留完整目标架构；未实现的目标不作为当前能力。
+已实现 0.2.0 分项目基础工程，运行方法见 [README](../README.md)，每个源码、构建及测试文件见[基础工程实现与文件说明](基础工程实现与文件说明.md)。下文保留完整目标架构；未实现的目标不作为当前能力。
 
 ## 1. 文档入口与结论
 
@@ -32,7 +32,7 @@
 
 共用库只维护稳定的软件基础能力；避免把两个项目的业务表、实验配置和模型假设绑定在一起。初期采用单仓库、独立 Python 包和独立发布入口，具备明确需求后再决定是否拆仓库。
 
-完整业务扩展建议目录如下。基础版实际采用 `src/simusignal` 包，数值、仿真、界面及公共模块分别放在独立文件内，详细映射见实现说明：
+以下目录已实际落地。两个业务拥有独立包、命令行、桌面入口、测试及发布清单；`common` 不导入业务包。逐文件映射见实现说明：
 
 ```text
 src/
@@ -40,14 +40,14 @@ src/
   signal_analysis/    # 导入、分析插件、标注、教学测评
   communication_sim/  # 场景、抽象模型、事件、回放
 apps/
-  analysis_desktop/
-  simulation_desktop/
+  analysis_desktop/    # main.py、独立 pyproject.toml、项目说明
+  simulation_desktop/  # main.py、独立 pyproject.toml、项目说明
 tests/
   common/
   analysis/
   simulation/
-benchmarks/
-packaging/
+benchmarks/           # 两项目独立基础流程基准
+packaging/            # projects.json：两个独立打包目标
 docs/
 ```
 
@@ -71,7 +71,7 @@ docs/
 
 PySide6 是 Qt 的 Python 绑定；PyQtGraph 面向科学图形；NumPy 的内存映射支持访问大文件片段；SimPy 是离散事件框架。这些是工具能力依据，表中的组合方式是本方案的工程判断。[Qt for Python](https://doc.qt.io/qtforpython-6)、[PyQtGraph](https://pyqtgraph.readthedocs.io/en/latest/)、[NumPy memmap](https://numpy.org/doc/stable/reference/generated/numpy.memmap.html)、[SimPy](https://simpy.readthedocs.io/en/stable/index.html)。
 
-ONNX Runtime 的后端支持取决于安装包和平台；PyInstaller 不是跨平台交叉编译器。不能因开发机运行成功，就宣称麒麟、其他处理器或 GPU 已兼容。[ONNX Runtime 后端](https://onnxruntime.ai/docs/execution-providers/)、[PyInstaller 官方手册](https://www.pyinstaller.org/en/stable/)。
+ONNX Runtime 的后端支持取决于安装包和平台；PyInstaller 不是跨平台交叉编译器。[ONNX Runtime 后端](https://onnxruntime.ai/docs/execution-providers/)、[PyInstaller 官方手册](https://www.pyinstaller.org/en/stable/)。
 
 ## 4. 应优先关闭的需求缺口
 
@@ -94,4 +94,4 @@ ONNX Runtime 的后端支持取决于安装包和平台；PyInstaller 不是跨�
 
 每个项目分别维护“需求编号 → 软件模块 → 测试用例 → 结果证据”的追踪表。测试报告应包含数据版本、配置摘要、模型版本、依赖版本、硬件、耗时和失败样本，不能仅交付界面截图。
 
-当前已实现共享桌面工作台、CLI、通用数值算法、资产管理、消息队列演示、原生复制插件接入、数值核心编译及自动化测试。两个业务目前以工作台标签页呈现，暂未拆成独立发布包。正式算法 SDK、专用模型、设备适配及原始项目性能指标仍待实现或验证；具体范围以[基础工程实现说明](基础工程实现与文件说明.md)为准。
+当前已实现两个独立桌面应用与 CLI，包含通用数值算法、资产管理、消息队列演示、原生复制插件接入、数值核心编译及自动化测试。分析默认使用 `workspace_data/analysis`，仿真默认使用 `workspace_data/simulation`；两个目录有项目标识，不能交叉打开。每个 wheel 和桌面产物只包含本项目业务代码与共用基础库。正式算法 SDK、专用模型、设备适配及原始项目性能指标仍待实现或验证；具体范围以[基础工程实现说明](基础工程实现与文件说明.md)为准。

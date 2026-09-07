@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "communication-sim"
+version = "0.2.0"
+description = "Independent generic communication simulation desktop"
+requires-python = ">=3.10"
+dependencies = ["simpy>=4.1,<5"]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.6,<7", "pyqtgraph>=0.13,<0.15"]
+
+[project.scripts]
+communication-sim = "communication_sim.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["common*", "communication_sim*"]

@@ -1,88 +1,119 @@
-# SimuSignal
+# SimuSignal 两项目工作区
 
-基于 Python 的离线数据分析与通用事件仿真基础工程。界面使用 PySide6 / PyQtGraph，核心计算可编译为 Python 二进制扩展，支持外置原生复制示例插件。
+本仓库按方案总览实现 **两个独立应用、一个共用基础库**。
 
-当前版本为 **0.1.0 基础原型**：已有数据导入、数学演示数据、统计与时频图形、消息队列仿真、运行记录和报告。自动调制识别、专用星地协议及正式算法 SDK 尚未实现；界面明确显示对应边界。
+| 项目 | 业务包 | 桌面入口 | 默认数据目录 |
+| --- | --- | --- | --- |
+| 电磁信号分析 | `src/signal_analysis` | `apps/analysis_desktop/main.py` | `workspace_data/analysis` |
+| 通信仿真实验 | `src/communication_sim` | `apps/simulation_desktop/main.py` | `workspace_data/simulation` |
+| 共用基础库 | `src/common` | 无业务启动入口 | 无共享业务数据库 |
 
-## 启动
+## 开发安装与分别启动
 
-需要 Python 3.10 以上。以下命令在仓库根目录执行：
+在仓库根目录执行：
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[gui,dev]'
-python -m simusignal --workspace workspace_data gui
+python -m signal_analysis gui
+python -m communication_sim gui
 ```
 
-Windows 用 `python -m venv .venv` 创建环境，然后在 PowerShell 执行 `.venv\Scripts\Activate.ps1`，其余 Python 命令相同。图形环境不可用时，可使用命令行运行基础流程。
+Windows 用 `python -m venv .venv` 创建环境，PowerShell 中执行 `.venv\Scripts\Activate.ps1` 后使用同样的 Python 命令。根项目只用于统一开发，两套正式发布清单在各自的 `apps` 目录。
 
-当前工作区已安装开发依赖，Linux 可直接执行：
+安装后也可分别运行 `signal-analysis gui`、`communication-sim gui`，或执行两个 `apps/.../main.py`。
+
+## 电磁信号分析项目
+
+支持一维数值 NPY、无表头 CSV（一列实数或两列 I,Q）、数学双音演示、通用统计、频谱/时频/瀑布图、数据备注、运行历史、JSON/HTML 报告和原生复制示例插件。
 
 ```bash
-.venv/bin/python -m simusignal gui
+python -m signal_analysis demo --count 8192 --sample-rate 48000
+python -m signal_analysis import data.npy --sample-rate 48000
+python -m signal_analysis list
+python -m signal_analysis analyze ASSET_ID --nfft 256
+python -m signal_analysis export RUN_ID report.html
 ```
 
-界面操作：生成演示或导入文件 → 选择资产 → 分析 → 查看波形、频谱、时频图和瀑布图 → 保存备注或导出报告。事件仿真页可修改通用队列参数、运行并拖动滑块回放；运行记录页可打开已保存的结果。
+把 ID 替换为前一步输出。单文件限制为 64 MiB，最多 1,000,000 个采样点。采样率明确填写，不猜测未知 BIN 文件。正式检测、三参数估计、调制识别和教学测评尚未实现。
 
-![数据分析工作台](docs/images/analysis-workbench.png)
+![独立分析界面](docs/images/analysis-workbench.png)
 
-![通用事件仿真工作台](docs/images/simulation-workbench.png)
+## 通信仿真项目
 
-## 命令行
-
-`--workspace` 放在子命令前；省略时使用当前目录下的 `workspace_data`。
+提供独立的通用消息中继队列实验、场景参数、事件回放和报告，不显示信号资产侧栏或原生信号插件按钮。
 
 ```bash
-python -m simusignal demo --count 8192 --sample-rate 48000
-python -m simusignal import data.npy --sample-rate 48000
-python -m simusignal list
-python -m simusignal analyze ASSET_ID --nfft 256
-python -m simusignal simulate --messages 12 --duration 3
-python -m simusignal export RUN_ID report.html
+python -m communication_sim simulate --messages 12 --duration 3
+python -m communication_sim list
+python -m communication_sim export RUN_ID simulation.html
 ```
 
-将 `ASSET_ID` / `RUN_ID` 替换为前一步返回的 ID。NPY 必须是一维实数或复数数值数组；CSV 必须无表头，一列为实数，两列为 I,Q。基础版单文件限制为 64 MiB、最多 1,000,000 个采样点，采样率由用户明确填写；不会猜测未知 `.bin` 的含义。
+当前模型为 A→中继队列→B 的通用离散事件演示。专用星地协议、跳频、同步、TDMA、编码和语音模型尚未实现。
 
-## 用户 DLL/SO 示例
+![独立仿真界面](docs/images/simulation-workbench.png)
 
-先按[原生示例说明](examples/native_plugin/README.md)编译，再生成包含本机架构和库摘要的清单：
+## 数据目录与旧数据
+
+两个命令均支持在子命令前指定 `--workspace`，例如：
+
+```bash
+python -m signal_analysis --workspace /tmp/analysis-demo demo
+python -m communication_sim --workspace /tmp/simulation-demo simulate
+```
+
+每个数据目录保存 `project.json` 标识所属项目，仿真数据库不创建分析资产表。
+
+## 原生插件（分析项目）
 
 ```bash
 cmake -S examples/native_plugin -B /tmp/simusignal-native-demo
 cmake --build /tmp/simusignal-native-demo --config Release
-python -m simusignal plugin-manifest /tmp/simusignal-native-demo/libdemo_plugin.so /tmp/simusignal-native-demo/plugin.json
-python -m simusignal native ASSET_ID /tmp/simusignal-native-demo/plugin.json
+python -m signal_analysis plugin-manifest /tmp/simusignal-native-demo/libdemo_plugin.so /tmp/simusignal-native-demo/plugin.json
+python -m signal_analysis native ASSET_ID /tmp/simusignal-native-demo/plugin.json
 ```
 
-也可在数据分析页点击“加载原生复制插件清单”选择 `plugin.json`。只加载用户明确选择、符合演示 ABI 的库；输出作为新资产保存。正式 SDK 的生命周期接口仍以设计草案为准。
+也可在分析界面选择插件清单。Windows 编译步骤见[原生示例说明](examples/native_plugin/README.md)。当前为 `demo_copy_f32` 演示 ABI，正式生命周期 SDK 仍待开发。
 
-## 测试
+## 按项目测试和基准
 
 ```bash
 QT_QPA_PLATFORM=offscreen python -m pytest -q
+python -m pytest tests/common -q
+python -m pytest tests/analysis -q
+python -m pytest tests/simulation -q
+python benchmarks/run_smoke.py analysis
+python benchmarks/run_smoke.py simulation
 ```
 
-Windows PowerShell 先执行 `$env:QT_QPA_PLATFORM="offscreen"`，再运行 `python -m pytest -q`。原生测试需要 CMake 和 C 编译器；Unix 崩溃测试在没有 `cc` 时跳过。GUI 测试缺少图形依赖时跳过，跳过项不能视为通过。
+Windows PowerShell 先设置 `$env:QT_QPA_PLATFORM="offscreen"`。缺少 GUI 依赖或原生编译器的跳过项不能视为通过。基准脚本只记录基础流程耗时，不代表合同性能验收。
 
-## 核心编译和桌面打包
+## 独立构建与发布
 
-Linux 示例；Windows 在设置对应环境变量后执行相同 Python 构建命令，产物名随平台和 Python 版本变化：
+分别构建两个 wheel，源码从总览约定的 `src` 目录收集，项目元数据读取各自 `apps/.../pyproject.toml`：
 
 ```bash
-SIMUSIGNAL_COMPILE_CORE=1 python -m build --wheel --no-isolation
-python scripts/check_binary.py dist/simusignal-0.1.0-cp312-cp312-linux_x86_64.whl
-python scripts/build_desktop.py dist/simusignal-0.1.0-cp312-cp312-linux_x86_64.whl
+python scripts/build_wheels.py analysis --compile-core
+python scripts/build_wheels.py simulation
 ```
 
-Windows 环境变量设置为 `$env:SIMUSIGNAL_COMPILE_CORE="1"`。示例只将 `_numeric.py` 编译为 `.pyd` / `.so`；其他应用层模块仍为 Python。二进制 wheel 不附带该核心 `.py`，核心源码继续保留在源码交付包中。编译并不承诺不可逆向或自动加速。
+分析 wheel 包含 `common + signal_analysis`，核心 `_numeric.py` 编译为扩展并排除明文；仿真 wheel 包含 `common + communication_sim`，不依赖 SimPy 以外的业务计算库。GUI 依赖单独声明。建议在独立虚拟环境安装和升级各项目的 wheel；共用源码随各自 wheel 分发。
 
-`build_desktop.py` 使用传入的编译 wheel 在临时目录构建目录式应用，默认输出到 `dist/SimuSignal`。应用支持同一可执行文件启动后台 worker；插件外置，不必重打主程序。Windows 和麒麟必须在对应目标环境单独构建和验收。
+在 Linux CPython 3.12 上，使用生成的文件名分别构建目录式桌面程序：
 
-## 文档
+```bash
+python scripts/check_binary.py dist/wheels/signal_analysis-0.2.0-cp312-cp312-linux_x86_64.whl
+python scripts/build_desktop.py analysis dist/wheels/signal_analysis-0.2.0-cp312-cp312-linux_x86_64.whl
+python scripts/build_desktop.py simulation dist/wheels/communication_sim-0.2.0-py3-none-any.whl
+```
 
-- [基础工程实现与逐文件说明](docs/基础工程实现与文件说明.md)：实现范围、数据流、所有新增文件、测试和后续工作。
-- [设计总览](docs/Python技术方案总览.md)
-- [电磁信号分析识别系统设计](docs/电磁信号分析识别系统_Python技术方案.md)
-- [某星通信仿真系统设计](docs/某星通信仿真系统_Python技术方案.md)
-- [二进制化与原生插件接口设计](docs/核心模块二进制化与原生插件接口方案.md)
+输出分别为 `dist/SignalAnalysis`、`dist/CommunicationSim`，各自通过自身可执行文件启动 worker，外置插件不要求重打分析程序。Windows/麒麟需单独构建验证。当前仅分析数值模块完成 Cython 编译，仿真模块仍为 Python；源码包继续保留核心源码，不承诺二进制不可逆向。
+
+## 设计与文件说明
+
+- [方案总览与实际目录](docs/Python技术方案总览.md)
+- [逐文件说明、依赖与测试](docs/基础工程实现与文件说明.md)
+- [分析项目设计](docs/电磁信号分析识别系统_Python技术方案.md)
+- [仿真项目设计](docs/某星通信仿真系统_Python技术方案.md)
+- [二进制与原生插件设计](docs/核心模块二进制化与原生插件接口方案.md)

@@ -1,0 +1,14 @@
+{
+  "analysis": {
+    "package": "signal_analysis",
+    "app_dir": "analysis_desktop",
+    "executable": "SignalAnalysis",
+    "exclude": ["communication_sim", "simpy"]
+  },
+  "simulation": {
+    "package": "communication_sim",
+    "app_dir": "simulation_desktop",
+    "executable": "CommunicationSim",
+    "exclude": ["signal_analysis"]
+  }
+}

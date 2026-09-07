@@ -17,7 +17,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="simusignal-binary-test-") as stage:
         with ZipFile(args.wheel) as archive:
             names = archive.namelist()
-            core = [name for name in names if name.startswith("simusignal/_numeric.")]
+            core = [name for name in names if name.startswith("signal_analysis/_numeric.")]
             if len(core) != 1 or not core[0].endswith((".so", ".pyd")):
                 raise RuntimeError(f"wheel 中核心产物不符合要求：{core}")
             if any(name.endswith((".c", ".pyx")) for name in names):
@@ -25,10 +25,10 @@ def main():
             archive.extractall(stage)
         env = os.environ.copy()
         env["PYTHONPATH"] = stage
-        subprocess.run([sys.executable, "-c", "import simusignal._numeric as n; "
+        subprocess.run([sys.executable, "-c", "import signal_analysis._numeric as n; "
                         "assert n.__file__.endswith(('.so','.pyd')), n.__file__; print(n.__file__)"],
                        check=True, env=env, cwd=stage)
-        subprocess.run([sys.executable, "-m", "pytest", str(root / "tests/test_numeric.py"),
+        subprocess.run([sys.executable, "-m", "pytest", str(root / "tests/analysis/test_numeric.py"),
                         "-q", "-o", "pythonpath="], check=True, env=env, cwd=stage)
 
 

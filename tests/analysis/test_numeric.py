@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from simusignal.core_api import analyze, make_demo, validate_samples
+from signal_analysis.core_api import analyze, make_demo, validate_samples
 
 
 def test_constant_statistics_and_psd_energy():

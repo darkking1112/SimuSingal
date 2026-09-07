@@ -10,7 +10,7 @@ import struct
 import numpy as np
 
 from .core_api import validate_samples
-from .storage import file_digest
+from common.storage import file_digest
 
 
 def create_demo_manifest(library, output):

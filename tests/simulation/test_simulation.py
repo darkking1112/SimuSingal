@@ -1,6 +1,6 @@
 import pytest
 
-from simusignal.simulation import Scenario, simulate
+from communication_sim.simulation import Scenario, simulate
 
 
 def test_horizon_includes_exact_delivery_and_causal_order():

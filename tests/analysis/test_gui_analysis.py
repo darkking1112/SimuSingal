@@ -9,7 +9,7 @@ pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 
 from PySide6 import QtWidgets
-from simusignal.gui import MainWindow
+from signal_analysis.gui import MainWindow
 
 
 def wait_job(app, window):
@@ -24,12 +24,13 @@ def wait_job(app, window):
 
 
 @pytest.mark.gui
-def test_gui_workflow_and_replay(tmp_path, monkeypatch):
+def test_analysis_gui_workflow(tmp_path, monkeypatch):
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = MainWindow(tmp_path)
     window.show()
     try:
-        assert window.tabs.count() == 3
+        assert window.tabs.count() == 2
+        assert not hasattr(window, "sim_button")
         window.demo_button.click()
         wait_job(app, window)
         assert window.assets.count() == 1
@@ -41,15 +42,7 @@ def test_gui_workflow_and_replay(tmp_path, monkeypatch):
         window.label.setText("GUI 参考备注")
         window.save_label()
         assert window.selected_asset()["label"] == "GUI 参考备注"
-        window.sim_button.click()
-        wait_job(app, window)
-        assert window.last_result["kind"] == "simulation"
-        window.replay.setValue(0)
-        assert window.event_table.rowCount() == 0
-        window.replay.setValue(len(window.events))
-        assert window.event_table.rowCount() == len(window.events)
-        assert window.history.count() == 2
-        # Switching tabs must export the visible analysis rather than the last simulation.
+        assert window.history.count() == 1
         window.tabs.setCurrentIndex(0)
         output = tmp_path / "analysis.json"
         monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", lambda *args: (str(output), "JSON"))

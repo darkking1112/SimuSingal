@@ -6,11 +6,11 @@ import threading
 
 import pytest
 
-from simusignal.plugins import create_demo_manifest, read_manifest
-from simusignal.storage import Workspace
-from simusignal.tasks import JobError, run_job
+from signal_analysis.plugins import create_demo_manifest, read_manifest
+from signal_analysis.storage import Workspace
+from signal_analysis.tasks import JobError, run_job
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture(scope="module")

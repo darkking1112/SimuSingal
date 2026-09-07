@@ -3,9 +3,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from simusignal.dataio import read_samples
-from simusignal.reports import export_report
-from simusignal.storage import Workspace
+from signal_analysis.dataio import read_samples
+from common.reports import export_report
+from signal_analysis.storage import Workspace
 
 
 def test_import_complex_csv_and_npy(tmp_path):
@@ -61,7 +61,7 @@ def test_invalid_import_does_not_create_asset(tmp_path):
 def test_failed_run_does_not_leave_success_artifact(tmp_path):
     import sqlite3
     store = Workspace(tmp_path)
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(ValueError):
         store.save_run("analysis", {"summary": {}}, asset_id="missing")
     assert store.list_runs() == []
     assert list((tmp_path / "runs").iterdir()) == []
