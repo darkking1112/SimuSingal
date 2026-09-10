@@ -9,3 +9,5 @@
 使用生成的 wheel 执行 `python scripts/build_desktop.py analysis WHEEL_PATH`，输出 `dist/SignalAnalysis`。建议在独立虚拟环境安装正式 wheel：`python -m pip install 'WHEEL_PATH[gui]'`，把占位符换成真实文件路径。
 
 功能、原生插件及测试说明见[根 README](../../README.md)和[设计文档](../../docs/电磁信号分析识别系统_Python技术方案.md)。
+
+SigMF 读写依赖官方 `sigmf==1.11.1`，已纳入正式包依赖。生成页可导出 `.sigmf-meta` / `.sigmf-data` 双文件，导入自动采用元数据采样率。桌面构建按 `packaging/projects.json` 收集 SigMF 及 JSON Schema 资源；构建环境应先安装 wheel 及其依赖，再运行打包脚本。

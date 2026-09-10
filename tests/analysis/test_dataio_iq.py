@@ -79,7 +79,7 @@ def test_npy_round_trip(tmp_path, samples):
 
 def test_unknown_format_rejected(tmp_path, samples):
     with pytest.raises(ValueError):
-        write_samples(tmp_path / "iq.bin", samples, "sigmf")
+        write_samples(tmp_path / "iq.bin", samples, "unsupported")
 
 
 def test_endian_mismatch_produces_garbage_not_equality(tmp_path, samples):

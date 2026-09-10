@@ -4,6 +4,7 @@ from pathlib import Path
 
 from .core_api import MODE_NAMES, analyze, generate_iq, make_demo
 from .dataio import read_samples, write_samples
+from .sigmf_io import SIGMF_EXTENSIONS, read_sigmf
 from .plugins import call_demo_plugin
 from .storage import Workspace
 
@@ -23,10 +24,20 @@ def execute(request):
                                      rate, "数学双音演示", "generated:tones_v1")
     if action == "import":
         path = Path(request["path"])
-        samples = read_samples(path, binary_dtype=request.get("binary_dtype"),
-                               endian=request.get("endian", "little"))
-        return workspace.add_samples(samples, request["sample_rate"],
-                                     path.name, str(path.resolve()))
+        metadata = None
+        if path.suffix.lower() in SIGMF_EXTENSIONS:
+            samples, rate, metadata = read_sigmf(path)
+            supplied_rate = request.get("sample_rate")
+            if supplied_rate is not None and float(supplied_rate) != rate:
+                raise ValueError("指定采样率与 SigMF 元数据不一致")
+        else:
+            if request.get("sample_rate") is None:
+                raise ValueError("非 SigMF 格式必须指定采样率 --sample-rate")
+            samples = read_samples(path, binary_dtype=request.get("binary_dtype"),
+                                   endian=request.get("endian", "little"))
+            rate = request["sample_rate"]
+        return workspace.add_samples(samples, rate, path.name, str(path.resolve()),
+                                     metadata={"sigmf": metadata} if metadata is not None else None)
     if action == "generate":
         rate = request["sample_rate"]
         duration = request.get("duration", 0.1)
@@ -35,7 +46,8 @@ def execute(request):
         samples, summary = generate_iq(rate, duration, signals, request.get("noise"), seed)
         name = request.get("name") or _generated_name(signals)
         mode = str(signals[0].get("mode", "noise")) if signals else "noise"
-        asset = workspace.add_samples(samples, rate, name, f"generated:iq_{mode}_v1")
+        asset = workspace.add_samples(samples, rate, name, f"generated:iq_{mode}_v1",
+                                      metadata={"generation": summary})
         result = {"kind": "generate", "id": asset["id"], "name": asset["name"],
                   "sample_rate": asset["sample_rate"], "summary": summary,
                   "export_path": None, "export_format": None}
@@ -45,10 +57,14 @@ def execute(request):
             if fmt:
                 exports = workspace.root / "exports"
                 exports.mkdir(exist_ok=True)
-                path = write_samples(exports / f"{asset['id']}{'.bin' if fmt in ('iq16', 'iq32') else '.' + fmt}",
-                                     samples, fmt, export.get("endian", "little"))
+                extension = ".sigmf-meta" if fmt == "sigmf" else (".bin" if fmt in ("iq16", "iq32") else "." + fmt)
+                path = write_samples(exports / f"{asset['id']}{extension}",
+                                     samples, fmt, export.get("endian", "little"),
+                                     sample_rate=rate, description=name, generation=summary)
                 result["export_path"] = str(path)
                 result["export_format"] = fmt
+                if fmt == "sigmf":
+                    result["export_data_path"] = str(path.with_suffix(".sigmf-data"))
         return result
     if action == "analyze":
         asset, data = workspace.load_samples(request["asset_id"])

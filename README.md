@@ -49,6 +49,16 @@ python -m signal_analysis --workspace /tmp/iqws generate spec.json
 
 `spec.json` 形如 `{"sample_rate": 1e6, "duration": 0.2, "seed": 0, "noise": {"enabled": true, "bandwidth": 1e6, "snr_db": 20}, "signals": [{"mode": "qpsk", "offset": 100000, "power_dbfs": -10, "bandwidth": 200000}], "name": "QPSK测试", "export": {"format": "iq16", "endian": "little"}}`，生成结果保存为工作目录内数据资产并可同时导出到 `exports/`。
 
+SigMF 双文件读写使用正式依赖 `sigmf==1.11.1`：在生成页选择“SigMF 双文件”，或把上述规格中的 `export` 改为 `{"format": "sigmf"}`。输出为同名 `.sigmf-meta`（元数据）与 `.sigmf-data`（小端 complex float32 IQ），两者须一起保存和分发。已有环境更新依赖可运行 `python -m pip install -e ".[gui]"`。
+
+GUI 导入可选择 `.sigmf-meta` 或 `.sigmf-data`，自动读取采样率。CLI 示例：
+
+```bash
+python -m signal_analysis import path/to/recording.sigmf-meta
+```
+
+SigMF 不必指定 `--sample-rate`；显式指定时必须与文件一致。其他格式仍需该参数。导入支持单通道 `cf32/cf64/ci16` 的大小端连续 IQ 双文件，内部转换为 complex64；暂不支持 `.sigmf` 归档、多通道或外部数据引用。导入的原始元数据及生成摘要关联资产保存；生成摘要也写入导出文件的 `core:description`，不虚构射频载频。详细限制见设计文档 §4.1。
+
 ![独立分析界面](docs/images/analysis-workbench.png)
 
 ## 通信仿真项目

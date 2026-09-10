@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 
 from .core_api import validate_samples
+from .sigmf_io import SIGMF_EXTENSIONS, read_sigmf, write_sigmf
 
 MAX_FILE_BYTES = 512 * 1024 * 1024
 
@@ -11,7 +12,8 @@ IQ_EXTENSIONS = (".bin", ".raw", ".iq")
 IQ_DTYPES = ("int16", "float32")
 IQ_ENDIANS = ("little", "big")
 
-_EXTENSIONS = {"npy": ".npy", "csv": ".csv", "iq16": ".bin", "iq32": ".bin"}
+_EXTENSIONS = {"npy": ".npy", "csv": ".csv", "iq16": ".bin", "iq32": ".bin",
+               "sigmf": ".sigmf-meta"}
 
 
 def _check_file(path):
@@ -22,7 +24,7 @@ def _check_file(path):
 
 
 def read_samples(path, *, binary_dtype=None, endian="little"):
-    """Read ``.npy`` / headerless ``.csv`` or explicitly-typed IQ binaries.
+    """Read NPY, CSV, explicitly-typed IQ binaries, or a SigMF pair.
 
     Interleaved IQ binaries (``.bin`` / ``.raw`` / ``.iq``) are never guessed
     from the extension: the caller must pass ``binary_dtype`` (int16 or
@@ -30,6 +32,8 @@ def read_samples(path, *, binary_dtype=None, endian="little"):
     """
     path = _check_file(path)
     suffix = path.suffix.lower()
+    if suffix in SIGMF_EXTENSIONS:
+        return read_sigmf(path)[0]
     if suffix == ".npy":
         samples = np.load(path, allow_pickle=False, mmap_mode="r")
     elif suffix == ".csv":
@@ -42,7 +46,7 @@ def read_samples(path, *, binary_dtype=None, endian="little"):
     elif suffix in IQ_EXTENSIONS:
         samples = read_iq_binary(path, binary_dtype, endian)
     else:
-        raise ValueError("基础版只支持 .npy、无表头 .csv 及交织 IQ 二进制（.bin/.raw/.iq）")
+        raise ValueError("支持 .npy、无表头 .csv、交织 IQ（.bin/.raw/.iq）及 SigMF 双文件")
     return validate_samples(samples)
 
 
@@ -67,12 +71,15 @@ def read_iq_binary(path, dtype, endian="little"):
     return samples
 
 
-def write_samples(path, samples, fmt, endian="little"):
-    """Write IQ samples as npy / csv / interleaved int16 or float32 binary.
+def write_samples(path, samples, fmt, endian="little", *, sample_rate=None,
+                  description="", generation=None):
+    """Write IQ as NPY / CSV / binary / official-library SigMF pairs.
 
-    Writes go through a temporary file and are atomically replaced. int16
+    Single-file writes are atomically replaced; SigMF uses its pair adapter. int16
     output scales 1.0 to 32767 and clips out-of-range samples.
     """
+    if fmt == "sigmf":
+        return write_sigmf(path, samples, sample_rate, description, generation)
     data = validate_samples(samples)
     if fmt not in _EXTENSIONS:
         raise ValueError(f"不支持的文件格式：{fmt}，可选：{', '.join(_EXTENSIONS)}")

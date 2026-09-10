@@ -37,6 +37,7 @@ def main():
         env = os.environ.copy()
         env["PYTHONPATH"] = str(stage)
         exclusions = [arg for package in config["exclude"] for arg in ("--exclude-module", package)]
+        collections = [arg for package in config.get("collect_all", []) for arg in ("--collect-all", package)]
         subprocess.run([
             sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir",
             "--name", config["executable"], "--paths", str(stage),
@@ -44,7 +45,7 @@ def main():
             "--exclude-module", "matplotlib", "--exclude-module", "scipy",
             "--exclude-module", "PyQt5", "--exclude-module", "PyQt6",
             "--workpath", str(folder / "work"), "--specpath", str(folder),
-            "--distpath", str(args.output.resolve()), *exclusions,
+            "--distpath", str(args.output.resolve()), *exclusions, *collections,
             str(root / "apps" / config["app_dir"] / "main.py"),
         ], check=True, env=env)
 

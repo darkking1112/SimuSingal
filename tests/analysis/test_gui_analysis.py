@@ -25,6 +25,34 @@ def wait_job(app, window):
 
 
 @pytest.mark.gui
+def test_sigmf_generate_import_gui(tmp_path, monkeypatch):
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(tmp_path)
+    try:
+        from signal_analysis.dataio import write_samples
+        path = write_samples(tmp_path / "reference", np.ones(32), "sigmf", sample_rate=12345)
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
+                            lambda *args: (str(path), ""))
+        window.sample_rate.setValue(48000)
+        window.import_file()
+        wait_job(app, window)
+        assert window.selected_asset()["sample_rate"] == 12345
+        index = window.gen_export_format.findData("sigmf")
+        assert index >= 0
+        window.gen_export_format.setCurrentIndex(index)
+        assert not window.gen_endian.isEnabled()
+        window.gen_duration.setValue(.01)
+        window.generate_iq_clicked()
+        wait_job(app, window)
+        assert len(list((tmp_path / "exports").glob("*.sigmf-meta"))) == 1
+        assert len(list((tmp_path / "exports").glob("*.sigmf-data"))) == 1
+        assert ".sigmf-data" in window.gen_result.text()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.gui
 def test_analysis_gui_workflow(tmp_path, monkeypatch):
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = MainWindow(tmp_path)

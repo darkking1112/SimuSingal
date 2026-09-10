@@ -1,5 +1,6 @@
 """Signal-only asset tables and arrays, extending shared run storage."""
 import uuid
+import json
 import numpy as np
 from common.storage import Workspace as RunWorkspace, file_digest, utc_now
 from .core_api import validate_rate, validate_samples
@@ -18,9 +19,11 @@ class Workspace(RunWorkspace):
                     sample_count INTEGER NOT NULL, created_at TEXT NOT NULL,
                     source TEXT NOT NULL, label TEXT NOT NULL DEFAULT '');
                 CREATE INDEX IF NOT EXISTS idx_assets_name ON assets(name);
+                CREATE TABLE IF NOT EXISTS asset_metadata (
+                    asset_id TEXT PRIMARY KEY REFERENCES assets(id), metadata_json TEXT NOT NULL);
             """)
 
-    def add_samples(self, samples, sample_rate, name, source="generated"):
+    def add_samples(self, samples, sample_rate, name, source="generated", *, metadata=None):
         data = validate_samples(samples)
         rate = validate_rate(sample_rate)
         if not isinstance(name, str) or not name.strip() or len(name) > 200:
@@ -37,11 +40,21 @@ class Workspace(RunWorkspace):
                 conn.execute("INSERT INTO assets VALUES (?,?,?,?,?,?,?,?,?)",
                              (asset_id, name, relative, file_digest(destination), rate,
                               data.size, utc_now(), str(source), ""))
+                if metadata is not None:
+                    conn.execute("INSERT INTO asset_metadata VALUES (?,?)",
+                                 (asset_id, json.dumps(metadata, ensure_ascii=False, allow_nan=False)))
         except BaseException:
             temporary.unlink(missing_ok=True)
             destination.unlink(missing_ok=True)
             raise
         return self.get_asset(asset_id)
+
+    def get_metadata(self, asset_id):
+        self.get_asset(asset_id)
+        with self.connect() as conn:
+            row = conn.execute("SELECT metadata_json FROM asset_metadata WHERE asset_id=?",
+                               (asset_id,)).fetchone()
+        return json.loads(row[0]) if row else {}
 
     def get_asset(self, asset_id):
         with self.connect() as conn:

@@ -17,9 +17,9 @@ def main(argv=None):
     demo = commands.add_parser("demo", help="生成数学双音数据")
     demo.add_argument("--count", type=int, default=8192)
     demo.add_argument("--sample-rate", type=float, default=48000)
-    imp = commands.add_parser("import", help="导入 NPY、无表头 CSV 或交织 IQ 二进制")
+    imp = commands.add_parser("import", help="导入 NPY、CSV、交织 IQ 或 SigMF 双文件")
     imp.add_argument("path")
-    imp.add_argument("--sample-rate", type=float, required=True)
+    imp.add_argument("--sample-rate", type=float, help="非 SigMF 必填；SigMF 自动读取，显式指定时须一致")
     imp.add_argument("--binary-dtype", choices=("int16", "float32"),
                      help="交织 IQ 二进制（.bin/.raw/.iq）的数据类型，必须显式指定")
     imp.add_argument("--endian", choices=("little", "big"), default="little",

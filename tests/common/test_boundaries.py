@@ -15,7 +15,7 @@ def test_static_dependency_boundaries():
                                "signal_analysis": {"communication_sim", "simpy"},
                                "communication_sim": {"signal_analysis"}}.items():
         for path in (ROOT / "src" / package).glob("*.py"):
-            tree = ast.parse(path.read_text())
+            tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 names = []
                 if isinstance(node, ast.Import):

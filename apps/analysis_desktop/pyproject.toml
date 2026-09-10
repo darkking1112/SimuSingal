@@ -7,7 +7,7 @@ name = "signal-analysis"
 version = "0.2.0"
 description = "Independent offline signal analysis desktop"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.26,<3"]
+dependencies = ["numpy>=1.26,<3", "sigmf==1.11.1"]
 
 [project.optional-dependencies]
 gui = ["PySide6>=6.6,<7", "pyqtgraph>=0.13,<0.15"]

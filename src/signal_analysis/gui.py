@@ -18,7 +18,8 @@ MODE_SHORT = {"am": "AM", "fm": "FM", "ssb": "SSB", "ask2": "2ASK", "qpsk": "QPS
               "qam16": "16QAM", "qam64": "64QAM", "fh_rc": "FH遥控", "fh_video": "FH图传"}
 EXPORT_FORMATS = [("不导出（仅内部资产 .npy）", ""), ("NPY 格式 (.npy)", "npy"),
                   ("CSV 两列 I,Q (.csv)", "csv"), ("交织 IQ · int16 (.bin)", "iq16"),
-                  ("交织 IQ · float32 (.bin)", "iq32")]
+                  ("交织 IQ · float32 (.bin)", "iq32"),
+                  ("SigMF 双文件 (.sigmf-meta + .sigmf-data)", "sigmf")]
 # 滚动瀑布图：时间窗内最多保留的帧数与单次刷新最多计算的帧数。
 PLAY_MAX_ROWS = 360
 PLAY_MAX_ROWS_PER_TICK = 64
@@ -481,7 +482,7 @@ class MainWindow(DesktopWindow):
         layout.addWidget(QtWidgets.QLabel("导入 / 演示采样率"))
         rate_row, self.sample_rate = _freq_spin(1, 1e9, 48000, 2)
         layout.addWidget(rate_row)
-        self.import_button = QtWidgets.QPushButton("导入 NPY / CSV")
+        self.import_button = QtWidgets.QPushButton("导入 IQ / SigMF")
         self.import_button.clicked.connect(self.import_file)
         layout.addWidget(self.import_button)
         self.demo_button = QtWidgets.QPushButton("生成数学双音演示")
@@ -920,6 +921,8 @@ class MainWindow(DesktopWindow):
                 lines.append(f"  背景噪声：带宽 {_fmt_hz(noise['bandwidth'])} · 功率 {noise['power_dbfs']:.1f} dBFS")
         if result["export_path"]:
             lines.append(f"导出文件：{result['export_path']}（格式 {result['export_format']}）")
+            if result.get("export_data_path"):
+                lines.append(f"IQ 数据文件：{result['export_data_path']}")
         self.gen_result.setText("\n".join(lines))
 
 
@@ -964,10 +967,12 @@ class MainWindow(DesktopWindow):
 
     def import_file(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "选择离线数据", "",
-                                                        "数据 (*.npy *.csv *.bin *.raw *.iq)")
+                                                        "数据 (*.npy *.csv *.bin *.raw *.iq *.sigmf-meta *.sigmf-data)")
         if not path:
             return
         request = {"sample_rate": self.sample_rate.value()}
+        if Path(path).suffix.lower() in (".sigmf-meta", ".sigmf-data"):
+            request = {}  # The recording owns its sample rate, not the manual input.
         if Path(path).suffix.lower() in (".bin", ".raw", ".iq"):
             dialog = BinaryImportDialog(self)
             if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
