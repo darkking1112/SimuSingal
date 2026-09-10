@@ -26,17 +26,28 @@ Windows 用 `python -m venv .venv` 创建环境，PowerShell 中执行 `.venv\Sc
 
 ## 电磁信号分析项目
 
-支持一维数值 NPY、无表头 CSV（一列实数或两列 I,Q）、数学双音演示、通用统计、频谱/时频/瀑布图、数据备注、运行历史、JSON/HTML 报告和原生复制示例插件。
+支持一维数值 NPY、无表头 CSV（一列实数或两列 I,Q）、交织 IQ 二进制（.bin/.raw/.iq，显式指定 int16/float32 与大小端）、数学双音演示、通用统计、频谱/时频图与星座图/瀑布图、数据备注、运行历史、JSON/HTML 报告和原生复制示例插件。分析有两种方式：一键概览整段数据，或按可调速度实时播放。波形与频谱使用固定显示范围（幅度、时窗、频宽、动态范围），可在界面调整，播放时保持不变。数字/模拟判定为启发式，可在界面手动纠正；实数数据默认只显示非负频率。实时播放的瀑布图为固定时长的滚动窗口，时间窗可选 10 ms～20 s。
 
 ```bash
 python -m signal_analysis demo --count 8192 --sample-rate 48000
 python -m signal_analysis import data.npy --sample-rate 48000
+python -m signal_analysis import iq.bin --sample-rate 48000 --binary-dtype int16 --endian little
 python -m signal_analysis list
 python -m signal_analysis analyze ASSET_ID --nfft 256
 python -m signal_analysis export RUN_ID report.html
 ```
 
-把 ID 替换为前一步输出。单文件限制为 64 MiB，最多 1,000,000 个采样点。采样率明确填写，不猜测未知 BIN 文件。正式检测、三参数估计、调制识别和教学测评尚未实现。
+把 ID 替换为前一步输出。单文件限制为 512 MiB，最多 16,000,000 个采样点。采样率明确填写，不猜测未知 BIN 文件。正式检测、三参数估计、调制识别和教学测评尚未实现。
+
+### 信号 IQ 生成（测试信号源）
+
+界面"IQ 信号生成"页，用于生成测试检测、参数估计与调制识别算法的 IQ 基带信号：支持 AM、FM、SSB、2ASK、QPSK、16QAM、64QAM 与跳频信号（FH-2FSK 模拟遥控链路、FH-OFDM 模拟图传链路）。IQ 为复基带记录，不设置载频，"频点"指基带频率偏移。可设置信号持续时间、采样率、随机种子、每信号功率（dBFS）、目标带宽、频点、跳速、符号速率等；自动按调制样式与目标带宽推导消息带宽、频偏、滚降成形等参数。支持一次 IQ 中包含最多 16 种信号并独立设置参数，以及带限背景噪声（SNR 相对最强信号，或纯噪声时按绝对 dBFS）。可导出 NPY、CSV（两列 I,Q）或交织 IQ 二进制（int16/float32、大小端可选）。
+
+```bash
+python -m signal_analysis --workspace /tmp/iqws generate spec.json
+```
+
+`spec.json` 形如 `{"sample_rate": 1e6, "duration": 0.2, "seed": 0, "noise": {"enabled": true, "bandwidth": 1e6, "snr_db": 20}, "signals": [{"mode": "qpsk", "offset": 100000, "power_dbfs": -10, "bandwidth": 200000}], "name": "QPSK测试", "export": {"format": "iq16", "endian": "little"}}`，生成结果保存为工作目录内数据资产并可同时导出到 `exports/`。
 
 ![独立分析界面](docs/images/analysis-workbench.png)
 

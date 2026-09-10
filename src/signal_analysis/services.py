@@ -2,10 +2,16 @@
 
 from pathlib import Path
 
-from .core_api import analyze, make_demo
-from .dataio import read_samples
+from .core_api import MODE_NAMES, analyze, generate_iq, make_demo
+from .dataio import read_samples, write_samples
 from .plugins import call_demo_plugin
 from .storage import Workspace
+
+
+def _generated_name(signals):
+    styles = sorted({MODE_NAMES.get(str(signal.get("mode", "")), str(signal.get("mode", "")))
+                     for signal in signals})
+    return f"IQ 生成 · {' + '.join(styles)}"
 
 
 def execute(request):
@@ -17,8 +23,33 @@ def execute(request):
                                      rate, "数学双音演示", "generated:tones_v1")
     if action == "import":
         path = Path(request["path"])
-        return workspace.add_samples(read_samples(path), request["sample_rate"],
+        samples = read_samples(path, binary_dtype=request.get("binary_dtype"),
+                               endian=request.get("endian", "little"))
+        return workspace.add_samples(samples, request["sample_rate"],
                                      path.name, str(path.resolve()))
+    if action == "generate":
+        rate = request["sample_rate"]
+        duration = request.get("duration", 0.1)
+        signals = request.get("signals", [])
+        seed = request.get("seed", 0)
+        samples, summary = generate_iq(rate, duration, signals, request.get("noise"), seed)
+        name = request.get("name") or _generated_name(signals)
+        mode = str(signals[0].get("mode", "noise")) if signals else "noise"
+        asset = workspace.add_samples(samples, rate, name, f"generated:iq_{mode}_v1")
+        result = {"kind": "generate", "id": asset["id"], "name": asset["name"],
+                  "sample_rate": asset["sample_rate"], "summary": summary,
+                  "export_path": None, "export_format": None}
+        export = request.get("export")
+        if export:
+            fmt = str(export.get("format", ""))
+            if fmt:
+                exports = workspace.root / "exports"
+                exports.mkdir(exist_ok=True)
+                path = write_samples(exports / f"{asset['id']}{'.bin' if fmt in ('iq16', 'iq32') else '.' + fmt}",
+                                     samples, fmt, export.get("endian", "little"))
+                result["export_path"] = str(path)
+                result["export_format"] = fmt
+        return result
     if action == "analyze":
         asset, data = workspace.load_samples(request["asset_id"])
         summary, arrays = analyze(data, asset["sample_rate"], request.get("nfft", 256))

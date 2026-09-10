@@ -1,29 +1,451 @@
 """Independent signal analysis desktop."""
+import time
+from pathlib import Path
+
 import numpy as np
 from PySide6 import QtCore, QtWidgets
 import pyqtgraph as pg
 from common.gui import DesktopWindow
+from .core_api import MAX_SAMPLES, plan_signal, spectrum_row
 from .storage import Workspace
 from .tasks import run_job
 
+MODE_CHOICES = [("am", "AM 调幅"), ("fm", "FM 调频"), ("ssb", "SSB 单边带"),
+                ("ask2", "2ASK 二进制幅移键控"), ("qpsk", "QPSK 四相相移键控"),
+                ("qam16", "16QAM 正交幅度调制"), ("qam64", "64QAM 正交幅度调制"),
+                ("fh_rc", "跳频 · 遥控链路 (FH-2FSK)"), ("fh_video", "跳频 · 图传链路 (FH-OFDM)")]
+MODE_SHORT = {"am": "AM", "fm": "FM", "ssb": "SSB", "ask2": "2ASK", "qpsk": "QPSK",
+              "qam16": "16QAM", "qam64": "64QAM", "fh_rc": "FH遥控", "fh_video": "FH图传"}
+EXPORT_FORMATS = [("不导出（仅内部资产 .npy）", ""), ("NPY 格式 (.npy)", "npy"),
+                  ("CSV 两列 I,Q (.csv)", "csv"), ("交织 IQ · int16 (.bin)", "iq16"),
+                  ("交织 IQ · float32 (.bin)", "iq32")]
+# 滚动瀑布图：时间窗内最多保留的帧数与单次刷新最多计算的帧数。
+PLAY_MAX_ROWS = 360
+PLAY_MAX_ROWS_PER_TICK = 64
+# 波形图单次刷新最多绘制的样点数（超出则等间隔抽取）。
+PLAY_WAVE_POINTS = 2000
+
+
+def _run_task(request, cancel=None):
+    # 16M 样本的生成与导出可能明显超过默认 30 s 子进程超时。
+    timeout = 600.0 if request.get("action") == "generate" else 30.0
+    return run_job(request, timeout=timeout, cancel=cancel)
+
+
+class UnitSpinBox(QtWidgets.QDoubleSpinBox):
+    """Stores Hz internally; displays the value in kHz / MHz / GHz.
+
+    The unit is shown in a QLabel beside the box (``unit_label``), not inside
+    the input; it switches automatically when the value crosses a boundary.
+    """
+
+    _UNITS = (("GHz", 1e9), ("MHz", 1e6), ("kHz", 1e3), ("Hz", 1.0))
+
+    def __init__(self, minimum, maximum, value, decimals):
+        self._scale = 1.0  # 必须先于 setRange/setDecimals：Qt 内部会调用 textFromValue
+        super().__init__()
+        self.setRange(minimum, maximum)
+        self.setDecimals(decimals)
+        self.unit_label = QtWidgets.QLabel("Hz")
+        self.setValue(value)
+        self._sync_unit()
+        self.setAccelerated(True)
+        self.valueChanged.connect(self._sync_unit)
+
+    def _sync_unit(self, *_):
+        unit, scale = self._UNITS[-1]
+        for candidate, factor in self._UNITS:
+            if abs(self.value()) >= factor:
+                unit, scale = candidate, factor
+                break
+        if scale != self._scale:
+            self._scale = scale
+            self.unit_label.setText(unit)
+            self.setSingleStep(scale)
+            self.update()
+
+    def textFromValue(self, value):
+        return f"{value / self._scale:.{self.decimals()}f}"
+
+    def valueFromText(self, text):
+        return float(text.strip()) * self._scale
+
+
+def _fmt_hz(value):
+    """Format a Hz value with a readable kHz / MHz / GHz unit."""
+    value = float(value)
+    for unit, factor in (("GHz", 1e9), ("MHz", 1e6), ("kHz", 1e3)):
+        if abs(value) >= factor:
+            return f"{value / factor:g} {unit}"
+    return f"{value:g} Hz"
+
+
+def _fmt_span(seconds):
+    """Format a duration in ms / s."""
+    seconds = float(seconds)
+    return f"{seconds * 1000:g} ms" if seconds < 1.0 else f"{seconds:g} s"
+
+
+def _unit_row(spin):
+    """Place a unit label beside a spin box (unit outside the input)."""
+    container = QtWidgets.QWidget()
+    row = QtWidgets.QHBoxLayout(container)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.addWidget(spin)
+    row.addWidget(spin.unit_label)
+    return container
+
+
+def _plain_spin(minimum, maximum, value, decimals, unit=None):
+    """Plain double spin; with ``unit`` the label is placed outside the box."""
+    spin = QtWidgets.QDoubleSpinBox()
+    spin.setRange(minimum, maximum)
+    spin.setDecimals(decimals)
+    spin.setValue(value)
+    if unit is None:
+        return spin
+    spin.unit_label = QtWidgets.QLabel(unit)
+    return _unit_row(spin), spin
+
+
+def _freq_spin(minimum, maximum, value, decimals):
+    """Frequency spin in Hz with a kHz / MHz / GHz unit label outside."""
+    spin = UnitSpinBox(minimum, maximum, value, decimals)
+    return _unit_row(spin), spin
+
+
+class BinaryImportDialog(QtWidgets.QDialog):
+    """Explicit datatype/endian choice for headerless interleaved IQ files."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("交织 IQ 二进制参数")
+        layout = QtWidgets.QFormLayout(self)
+        self.dtype = QtWidgets.QComboBox()
+        self.dtype.addItem("int16（有符号 16 位，按 1/32768 缩放）", "int16")
+        self.dtype.addItem("float32（单精度浮点）", "float32")
+        layout.addRow("数据类型", self.dtype)
+        self.endian = QtWidgets.QComboBox()
+        self.endian.addItem("小端（little-endian）", "little")
+        self.endian.addItem("大端（big-endian）", "big")
+        layout.addRow("字节序", self.endian)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def values(self):
+        return self.dtype.currentData(), self.endian.currentData()
+
+
+class SignalParamsDialog(QtWidgets.QDialog):
+    """Per-mode parameter editor with a live auto-parameter preview."""
+
+    def __init__(self, mode, rate, spec=None, parent=None):
+        super().__init__(parent)
+        self.mode = mode
+        self.rate = rate
+        spec = dict(spec or {})
+        self._source_spec = spec
+        self._last_spec = None
+        self.setWindowTitle(f"信号参数 · {MODE_SHORT[mode]}")
+        form = QtWidgets.QFormLayout(self)
+        offset_row, self.offset = _freq_spin(-rate / 2, rate / 2, spec.get("offset", rate * 0.1), 2)
+        form.addRow("频点（基带偏移）", offset_row)
+        power_row, self.power = _plain_spin(-200.0, 0.0, spec.get("power_dbfs", -10.0), 1, "dBFS")
+        form.addRow("功率", power_row)
+        bw_row, self.bandwidth = _freq_spin(1.0, rate, spec.get("bandwidth", rate / 10.0), 2)
+        if mode in ("fh_rc", "fh_video"):
+            form.addRow(QtWidgets.QLabel("整体频带范围（含最外侧信道边缘）"), bw_row)
+        else:
+            form.addRow("目标带宽", bw_row)
+        if mode == "am":
+            self.depth = _plain_spin(0.01, 1.0, spec.get("depth", 0.8), 2)
+            form.addRow("调制深度", self.depth)
+        elif mode == "fm":
+            msg_auto, msg_row, self.message_bandwidth = self._auto_spin(
+                "消息带宽自动（=带宽/4）", spec, "message_bandwidth",
+                1.0, rate, lambda: self.bandwidth.value() / 4.0)
+            form.addRow(msg_auto, msg_row)
+            dev_auto, dev_row, self.deviation = self._auto_spin(
+                "频偏自动（RMS，标定使占用带宽≈目标带宽）", spec, "deviation",
+                1.0, rate, lambda: 0.19 * self.bandwidth.value())
+            form.addRow(dev_auto, dev_row)
+        elif mode == "ssb":
+            self.side = QtWidgets.QComboBox()
+            self.side.addItem("上边带 USB", "usb")
+            self.side.addItem("下边带 LSB", "lsb")
+            self.side.setCurrentIndex(0 if spec.get("side", "usb") == "usb" else 1)
+            form.addRow("边带", self.side)
+        elif mode == "ask2":
+            self.pulse = QtWidgets.QComboBox()
+            self.pulse.addItem("RRC 成形", "rrc")
+            self.pulse.addItem("矩形脉冲", "rect")
+            self.pulse.setCurrentIndex(0 if spec.get("pulse", "rrc") == "rrc" else 1)
+            form.addRow("脉冲成形", self.pulse)
+            self.alpha = _plain_spin(0.05, 1.0, spec.get("alpha", 0.35), 2)
+            form.addRow("滚降系数 α", self.alpha)
+        elif mode in ("qpsk", "qam16", "qam64"):
+            self.alpha = _plain_spin(0.05, 1.0, spec.get("alpha", 0.35), 2)
+            form.addRow("滚降系数 α", self.alpha)
+        elif mode in ("fh_rc", "fh_video"):
+            hop_row, self.hop_rate = _plain_spin(
+                0.001, rate, spec.get("hop_rate", 100.0 if mode == "fh_rc" else 50.0), 1, "hop/s")
+            form.addRow("跳速", hop_row)
+            self.hop_auto = QtWidgets.QCheckBox("频点集合自动均布（两端频点由中心跨度推导）")
+            self.hop_auto.setChecked(spec.get("hop_points") is None)
+            self.hop_count = QtWidgets.QSpinBox()
+            self.hop_count.setRange(2, 64)
+            self.hop_count.setValue(int(spec.get("hop_count", 8)))
+            self.hop_count.setEnabled(self.hop_auto.isChecked())
+            form.addRow(self.hop_auto, self.hop_count)
+            self.hop_points_edit = QtWidgets.QLineEdit()
+            self.hop_points_edit.setPlaceholderText("如：50000,120000,190000")
+            if spec.get("hop_points") is not None:
+                self.hop_points_edit.setText(", ".join(str(point) for point in spec["hop_points"]))
+            self.hop_points_edit.setEnabled(not self.hop_auto.isChecked())
+            form.addRow("频点列表（Hz）", self.hop_points_edit)
+            span_auto, span_row, self.hop_span = self._auto_spin(
+                "跳频中心跨度自动（=整体频带范围−单跳带宽）", spec, "hop_span",
+                1.0, rate, self._hop_span_default)
+            form.addRow(span_auto, span_row)
+            hopbw_auto, hopbw_row, self.hop_bandwidth = self._auto_spin(
+                "单跳带宽自动（=中心跨度/频点数）", spec, "hop_bandwidth",
+                1.0, rate, self._hop_bandwidth_default)
+            form.addRow(hopbw_auto, hopbw_row)
+            self.hop_auto.toggled.connect(self.hop_count.setEnabled)
+            self.hop_auto.toggled.connect(lambda checked: self.hop_points_edit.setEnabled(not checked))
+            self.hop_auto.toggled.connect(self.refresh_auto)
+            self.hop_rate.valueChanged.connect(self.refresh_auto)
+            self.hop_count.valueChanged.connect(self.refresh_auto)
+            self.hop_points_edit.textChanged.connect(self.refresh_auto)
+            if mode == "fh_rc":
+                dev_auto, dev_row, self.deviation = self._auto_spin(
+                    "每跳 2FSK 频偏自动（=每跳带宽/4）", spec, "deviation",
+                    1.0, rate, lambda: self._hop_bandwidth_now() / 4.0)
+                form.addRow(dev_auto, dev_row)
+                rs_auto, rs_row, self.symbol_rate = self._auto_spin(
+                    "符号速率自动（=每跳带宽/2）", spec, "symbol_rate",
+                    1.0, rate, lambda: self._hop_bandwidth_now() / 2.0)
+                form.addRow(rs_auto, rs_row)
+            else:
+                self.subcarriers = QtWidgets.QSpinBox()
+                self.subcarriers.setRange(8, 1024)
+                self.subcarriers.setValue(int(spec.get("subcarriers", 64)))
+                form.addRow("OFDM 子载波数", self.subcarriers)
+                self.cp_ratio = _plain_spin(0.01, 0.5, spec.get("cp_ratio", 0.25), 2)
+                form.addRow("循环前缀比例", self.cp_ratio)
+        self.auto_label = QtWidgets.QLabel()
+        self.auto_label.setWordWrap(True)
+        self.auto_label.setStyleSheet("background:white;border:1px solid #d8e1ec;border-radius:5px;padding:8px;")
+        form.addRow("自动参数", self.auto_label)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+        for widget in (self.offset, self.power, self.bandwidth):
+            widget.valueChanged.connect(self.refresh_auto)
+        self.refresh_auto()
+
+    def _auto_spin(self, auto_text, spec, key, minimum, maximum, default_fn):
+        auto = QtWidgets.QCheckBox(auto_text)
+        auto.setChecked(key not in spec)
+        spin = UnitSpinBox(minimum, maximum, 0.0, 2)
+        if key in spec:
+            spin.setValue(spec[key])
+        else:
+            try:
+                spin.setValue(default_fn())
+            except ValueError:
+                spin.setValue(minimum)
+        spin.setEnabled(key in spec)
+        auto.toggled.connect(lambda checked, spin=spin, default_fn=default_fn: self._toggle_auto(spin, default_fn, checked))
+        spin.valueChanged.connect(lambda *_: self.refresh_auto())
+        return auto, _unit_row(spin), spin
+
+    def _toggle_auto(self, spin, default_fn, checked):
+        if not checked:
+            try:
+                spin.setValue(default_fn())
+            except ValueError:
+                spin.setValue(spin.minimum())
+        spin.setEnabled(not checked)
+        self.refresh_auto()
+
+    def _hop_points_now(self):
+        if self.hop_auto.isChecked():
+            return None
+        text = self.hop_points_edit.text()
+        points = [float(part) for part in text.replace("，", ",").split(",") if part.strip()]
+        if not points:
+            raise ValueError("请填写频点列表（Hz，逗号分隔）")
+        return points
+
+    def _planned_fh(self):
+        """当前对话框状态（合并原始 spec 中的手动键）经 plan_signal 推导的 FH 规划。"""
+        merged = dict(self._source_spec)
+        merged.update(self.spec())
+        return plan_signal(merged, self.rate)
+
+    def _hop_span_default(self):
+        return self._planned_fh()["hop_span"]
+
+    def _hop_bandwidth_default(self):
+        return self._planned_fh()["hop_bandwidth"]
+
+    def _hop_bandwidth_now(self):
+        try:
+            return self._planned_fh()["hop_bandwidth"]
+        except ValueError:
+            points = self._hop_points_now()
+            count = self.hop_count.value() if points is None else len(points)
+            return self.bandwidth.value() / max(2, count)
+
+    def _add_fh_keys(self, common):
+        span_spin = getattr(self, "hop_span", None)
+        if span_spin is not None and span_spin.isEnabled():
+            common["hop_span"] = span_spin.value()
+        bw_spin = getattr(self, "hop_bandwidth", None)
+        if bw_spin is not None and bw_spin.isEnabled():
+            common["hop_bandwidth"] = bw_spin.value()
+
+    def spec(self):
+        common = {"mode": self.mode, "offset": self.offset.value(),
+                  "power_dbfs": self.power.value(), "bandwidth": self.bandwidth.value()}
+        if self.mode == "am":
+            common["depth"] = self.depth.value()
+        elif self.mode == "fm":
+            if self.message_bandwidth.isEnabled():
+                common["message_bandwidth"] = self.message_bandwidth.value()
+            if self.deviation.isEnabled():
+                common["deviation"] = self.deviation.value()
+        elif self.mode == "ssb":
+            common["side"] = self.side.currentData()
+        elif self.mode == "ask2":
+            common["pulse"] = self.pulse.currentData()
+            if common["pulse"] == "rrc":
+                common["alpha"] = self.alpha.value()
+        elif self.mode in ("qpsk", "qam16", "qam64"):
+            common["alpha"] = self.alpha.value()
+        elif self.mode == "fh_rc":
+            common["hop_rate"] = self.hop_rate.value()
+            points = self._hop_points_now()
+            if points is None:
+                common["hop_count"] = self.hop_count.value()
+            else:
+                common["hop_points"] = points
+            dev = getattr(self, "deviation", None)
+            if dev is not None and dev.isEnabled():
+                common["deviation"] = dev.value()
+            rs = getattr(self, "symbol_rate", None)
+            if rs is not None and rs.isEnabled():
+                common["symbol_rate"] = rs.value()
+            self._add_fh_keys(common)
+        elif self.mode == "fh_video":
+            common["hop_rate"] = self.hop_rate.value()
+            points = self._hop_points_now()
+            if points is None:
+                common["hop_count"] = self.hop_count.value()
+            else:
+                common["hop_points"] = points
+            if hasattr(self, "subcarriers"):
+                common["subcarriers"] = self.subcarriers.value()
+                common["cp_ratio"] = self.cp_ratio.value()
+            self._add_fh_keys(common)
+        return common
+
+    def refresh_auto(self, *_):
+        try:
+            plan = plan_signal(self.spec(), self.rate)
+        except ValueError as exc:
+            self.auto_label.setStyleSheet(
+                "background:#fdecea;border:1px solid #e0a4a1;border-radius:5px;padding:8px;color:#a03a35;")
+            self.auto_label.setText(f"参数无效：{exc}")
+            return
+        self.auto_label.setStyleSheet(
+            "background:white;border:1px solid #d8e1ec;border-radius:5px;padding:8px;")
+        mode = plan["mode"]
+        if mode == "am":
+            text = (f"消息带宽 {_fmt_hz(plan['message_bandwidth'])} → "
+                    f"实际带宽 {_fmt_hz(plan['bandwidth_actual'])}")
+        elif mode == "fm":
+            text = (f"消息带宽 {_fmt_hz(plan['message_bandwidth'])}，RMS 频偏 {_fmt_hz(plan['deviation'])} → "
+                    f"占用带宽 ≈ {_fmt_hz(plan['bandwidth_actual'])}")
+        elif mode == "ssb":
+            text = f"{plan['side'].upper()}，实际带宽 {_fmt_hz(plan['bandwidth_actual'])}"
+        elif mode in ("ask2", "qpsk", "qam16", "qam64"):
+            text = (f"{plan['pulse'].upper()}，符号速率 {_fmt_hz(plan['symbol_rate'])}，"
+                    f"每符号 {plan['sps']} 个采样 → 实际带宽 {_fmt_hz(plan['bandwidth_actual'])}")
+        elif mode == "fh_rc":
+            text = (f"{len(plan['hop_points'])} 个频点，中心跨度 {_fmt_hz(plan['hop_span'])}，"
+                    f"单跳带宽 {_fmt_hz(plan['hop_bandwidth'])} → 整体频带范围 {_fmt_hz(plan['bandwidth_actual'])}；"
+                    f"2FSK 频偏 {_fmt_hz(plan['deviation'])}，符号速率 {_fmt_hz(plan['symbol_rate'])}")
+        else:
+            text = (f"{len(plan['hop_points'])} 个频点，中心跨度 {_fmt_hz(plan['hop_span'])}，"
+                    f"单跳带宽 {_fmt_hz(plan['hop_bandwidth'])} → 整体频带范围 {_fmt_hz(plan['bandwidth_actual'])}；"
+                    f"{plan['subcarriers']} 个子载波（QPSK），间隔 {_fmt_hz(plan['subcarrier_spacing'])}，"
+                    f"FFT {plan['fft_size']} 点 + CP {plan['cp_samples']} 点")
+        self.auto_label.setText(f"自动推导：{text}")
+
+    def accept(self):
+        try:
+            spec = self.spec()
+            plan_signal(spec, self.rate)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "参数无效", str(exc))
+            return
+        self._last_spec = spec
+        super().accept()
+
+    def result(self):
+        return dict(self._last_spec or {})
+
+
 class MainWindow(DesktopWindow):
     page_title = "数据分析"
-    run_task = staticmethod(run_job)
+    run_task = staticmethod(_run_task)
 
     def __init__(self, workspace):
         self.asset_limit = 100
-        super().__init__(Workspace(workspace), "电磁信号分析 · SignalAnalysis", "离线数据 · 通用统计与时频展示 · 原生插件")
+        super().__init__(Workspace(workspace), "电磁信号分析 · SignalAnalysis",
+                         "离线数据 · 通用统计与时频展示 · IQ 信号生成 · 原生插件")
+        self.tabs.insertTab(1, self.build_generator(), "IQ 信号生成")
+        self.last_result = None
+        self._play_data = None
+        self._play_rate = 1.0
+        self._play_pos = 0
+        self._play_last = 0.0
+        self._play_paused = False
+        self._play_buffer = None
+        self._play_times = []
+        self._play_real = False
+        self._play_level_hi = None
+        self._range_syncing = False
+        self.play_timer = QtCore.QTimer(self)
+        self.play_timer.setInterval(33)
+        self.play_timer.timeout.connect(self._on_playback_tick)
         self.refresh_assets()
 
     def build_page(self):
         return self.build_analysis()
 
     def job_buttons(self):
-        return (self.demo_button, self.import_button, self.analyze_button, self.native_button)
+        return (self.demo_button, self.import_button, self.analyze_button, self.native_button,
+                self.generate_button)
 
     def result_ready(self, result):
         self.refresh_assets()
-        if "kind" in result:
+        if result.get("kind") == "generate":
+            self.last_result = result
+            self.show_generation_result(result)
+            for row in range(self.assets.count()):
+                item = self.assets.item(row)
+                if item.data(QtCore.Qt.ItemDataRole.UserRole)["id"] == result["id"]:
+                    self.assets.setCurrentItem(item)
+                    break
+        elif "kind" in result:
             self.display_result(result)
         else:
             for row in range(self.assets.count()):
@@ -56,11 +478,9 @@ class MainWindow(DesktopWindow):
         save = QtWidgets.QPushButton("保存备注")
         save.clicked.connect(self.save_label)
         layout.addWidget(save)
-        layout.addWidget(QtWidgets.QLabel("导入 / 演示采样率（Hz）"))
-        self.sample_rate = QtWidgets.QDoubleSpinBox()
-        self.sample_rate.setRange(1, 1e9)
-        self.sample_rate.setValue(48000)
-        layout.addWidget(self.sample_rate)
+        layout.addWidget(QtWidgets.QLabel("导入 / 演示采样率"))
+        rate_row, self.sample_rate = _freq_spin(1, 1e9, 48000, 2)
+        layout.addWidget(rate_row)
         self.import_button = QtWidgets.QPushButton("导入 NPY / CSV")
         self.import_button.clicked.connect(self.import_file)
         layout.addWidget(self.import_button)
@@ -78,27 +498,121 @@ class MainWindow(DesktopWindow):
         layout = QtWidgets.QVBoxLayout(box)
         bar = QtWidgets.QHBoxLayout()
         bar.addWidget(QtWidgets.QLabel("通用统计与时频展示 · 识别模型尚未配置"), 1)
+        bar.addWidget(QtWidgets.QLabel("信号判定"))
+        self.class_combo = QtWidgets.QComboBox()
+        self.class_combo.addItems(["自动", "数字", "模拟"])
+        self.class_combo.currentIndexChanged.connect(lambda *_: self._apply_display_mode())
+        bar.addWidget(self.class_combo)
+        bar.addWidget(QtWidgets.QLabel("频率显示"))
+        self.freq_view = QtWidgets.QComboBox()
+        self.freq_view.addItems(["自动", "双边", "仅正频率"])
+        self.freq_view.currentIndexChanged.connect(lambda *_: self._apply_display_mode())
+        bar.addWidget(self.freq_view)
         bar.addWidget(QtWidgets.QLabel("FFT 点数"))
         self.nfft = QtWidgets.QComboBox()
         self.nfft.addItems(["128", "256", "512", "1024", "2048"])
         self.nfft.setCurrentText("256")
+        self.nfft.currentIndexChanged.connect(self._on_playback_nfft)
         bar.addWidget(self.nfft)
+        self.analyze_mode = QtWidgets.QComboBox()
+        self.analyze_mode.addItems(["概览分析", "实时播放"])
+        self.analyze_mode.currentIndexChanged.connect(self._on_analyze_mode)
+        bar.addWidget(self.analyze_mode)
         self.analyze_button = QtWidgets.QPushButton("分析所选数据")
         self.analyze_button.setObjectName("primary")
         self.analyze_button.clicked.connect(self.analyze_selected)
         bar.addWidget(self.analyze_button)
         layout.addLayout(bar)
+        span_bar = QtWidgets.QHBoxLayout()
+        span_bar.addWidget(QtWidgets.QLabel("显示范围"))
+        self.range_follow = QtWidgets.QCheckBox("范围随数据")
+        self.range_follow.setChecked(True)
+        self.range_follow.setToolTip("勾选时按当前数据定标波形幅度与频谱频宽；手动改动任一数值即切换为固定范围。"
+                                     "无论哪种方式，播放过程中范围都保持不变。")
+        self.range_follow.stateChanged.connect(self._on_range_follow)
+        span_bar.addWidget(self.range_follow)
+        span_bar.addWidget(QtWidgets.QLabel("波形幅度 ±"))
+        self.amp_max = QtWidgets.QDoubleSpinBox()
+        self.amp_max.setRange(1e-5, 1e6)
+        self.amp_max.setDecimals(4)
+        self.amp_max.setSingleStep(0.05)
+        self.amp_max.setValue(1.0)
+        self.amp_max.setToolTip("波形纵轴固定为 ±该值（任意单位）")
+        self.amp_max.valueChanged.connect(self._on_range_edited)
+        span_bar.addWidget(self.amp_max)
+        span_bar.addWidget(QtWidgets.QLabel("波形时窗"))
+        self.wave_span = QtWidgets.QComboBox()
+        self.wave_span.addItems(["整个记录", "10 ms", "20 ms", "50 ms", "100 ms", "200 ms",
+                                 "500 ms", "1 s", "2 s", "5 s"])
+        self.wave_span.setToolTip("概览显示记录起点起该时长；播放时显示最近该时长的数据，"
+                                 "「整个记录」在播放时跟随瀑布时间窗")
+        self.wave_span.currentIndexChanged.connect(self._on_range_edited)
+        span_bar.addWidget(self.wave_span)
+        span_bar.addWidget(QtWidgets.QLabel("频谱频宽 ±"))
+        spec_row, self.spec_span = _freq_spin(0.0, 5e8, 0.0, 2)
+        self.spec_span.setToolTip("频谱横轴固定为 ±该频宽；0 表示整个基带（±采样率/2）")
+        self.spec_span.valueChanged.connect(self._on_range_edited)
+        span_bar.addWidget(spec_row)
+        span_bar.addWidget(QtWidgets.QLabel("频谱动态范围"))
+        db_row, self.spec_db_span = _plain_spin(10.0, 200.0, 80.0, 0, "dB")
+        self.spec_db_span.setToolTip("频谱纵轴与瀑布色标固定为 [峰值 − 该值, 峰值]")
+        self.spec_db_span.valueChanged.connect(self._on_range_edited)
+        span_bar.addWidget(db_row)
+        span_bar.addStretch(1)
+        layout.addLayout(span_bar)
+        self.play_bar = QtWidgets.QWidget()
+        self.play_bar.setVisible(False)
+        play_layout = QtWidgets.QHBoxLayout(self.play_bar)
+        play_layout.setContentsMargins(0, 0, 0, 0)
+        self.play_button = QtWidgets.QPushButton("▶ 播放")
+        self.play_button.clicked.connect(self._start_playback)
+        play_layout.addWidget(self.play_button)
+        self.pause_button = QtWidgets.QPushButton("暂停")
+        self.pause_button.setEnabled(False)
+        self.pause_button.clicked.connect(self._toggle_pause)
+        play_layout.addWidget(self.pause_button)
+        self.stop_button = QtWidgets.QPushButton("停止")
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(lambda: self._stop_playback())
+        play_layout.addWidget(self.stop_button)
+        play_layout.addWidget(QtWidgets.QLabel("速度"))
+        self.play_speed = QtWidgets.QComboBox()
+        self.play_speed.addItems(["0.1×", "0.25×", "0.5×", "1×", "2×", "4×", "8×", "10×"])
+        self.play_speed.setCurrentText("1×")
+        play_layout.addWidget(self.play_speed)
+        play_layout.addWidget(QtWidgets.QLabel("时间窗"))
+        self.play_window = QtWidgets.QComboBox()
+        self.play_window.addItems(["10 ms", "20 ms", "50 ms", "100 ms", "200 ms", "500 ms",
+                                   "1 s", "2 s", "5 s", "10 s", "20 s"])
+        self.play_window.setCurrentText("200 ms")
+        self.play_window.currentIndexChanged.connect(self._on_playback_window)
+        play_layout.addWidget(self.play_window)
+        self.play_progress = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.play_progress.setRange(0, 1000)
+        self.play_progress.sliderReleased.connect(self._seek_playback)
+        play_layout.addWidget(self.play_progress, 1)
+        layout.addWidget(self.play_bar)
         grid = QtWidgets.QGridLayout()
         self.wave = pg.PlotWidget(title="I / Q 波形（预览）")
         self.wave.setLabel("bottom", "时间", units="s")
         self.wave.setLabel("left", "幅度（任意单位）")
         self.wave.addLegend()
-        self.spectrum = pg.PlotWidget(title="双边平均功率谱密度")
+        self.spectrum = pg.PlotWidget(title="平均功率谱密度")
         self.spectrum.setLabel("bottom", "基带频率偏移", units="Hz")
         self.spectrum.setLabel("left", "PSD（dB，参考 1 任意单位²/Hz）")
         self.time_frequency = pg.PlotWidget(title="时频图")
         self.time_frequency.setLabel("bottom", "时间", units="s")
         self.time_frequency.setLabel("left", "基带频率偏移", units="Hz")
+        self.constellation = pg.PlotWidget(title="星座图（数字信号判定）")
+        self.constellation.setLabel("bottom", "同相分量 I")
+        self.constellation.setLabel("left", "正交分量 Q")
+        self.const_scatter = pg.ScatterPlotItem(size=2, pen=None,
+                                                brush=pg.mkBrush(35, 101, 179, 120))
+        self.constellation.addItem(self.const_scatter)
+        self.constellation.hide()
+        self.tf_stack = QtWidgets.QStackedWidget()
+        self.tf_stack.addWidget(self.time_frequency)
+        self.tf_stack.addWidget(self.constellation)
         self.waterfall = pg.PlotWidget(title="瀑布图（离线历史）")
         self.waterfall.setLabel("bottom", "基带频率偏移", units="Hz")
         self.waterfall.setLabel("left", "时间", units="s")
@@ -109,7 +623,7 @@ class MainWindow(DesktopWindow):
         color_map = pg.colormap.get("viridis")
         for item in (self.tf_image, self.waterfall_image):
             item.setLookupTable(color_map.getLookupTable())
-        for index, plot in enumerate((self.wave, self.spectrum, self.time_frequency, self.waterfall)):
+        for index, plot in enumerate((self.wave, self.spectrum, self.tf_stack, self.waterfall)):
             grid.addWidget(plot, index // 2, index % 2)
         layout.addLayout(grid, 1)
         self.summary = QtWidgets.QPlainTextEdit()
@@ -129,11 +643,289 @@ class MainWindow(DesktopWindow):
         return box
 
 
+    def build_generator(self):
+        box = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(box)
+        intro = QtWidgets.QLabel("生成用于测试检测、参数估计与调制识别算法的 IQ 基带信号。"
+                                 "IQ 为复基带记录，不设置载频：\"频点\"指基带频率偏移；"
+                                 "频率值以 Hz / kHz / MHz 显示（单位在输入框外）。"
+                                 "可一次包含多种信号并独立设置参数，自动按目标带宽推导调制参数。")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        layout.addWidget(self._build_global_row())
+        layout.addWidget(self._build_noise_group())
+        layout.addWidget(self._build_signal_table(), 1)
+        layout.addWidget(self._build_export_row())
+        self.gen_result = QtWidgets.QLabel("尚未生成")
+        self.gen_result.setWordWrap(True)
+        self.gen_result.setStyleSheet(
+            "background:white;border:1px solid #d8e1ec;border-radius:5px;padding:8px;")
+        layout.addWidget(self.gen_result)
+        self.iq_signals = []
+        self._last_suggested_name = ""
+        self.update_gen_controls()
+        return box
+
+
+    def _build_global_row(self):
+        group = QtWidgets.QGroupBox("全局参数")
+        row = QtWidgets.QHBoxLayout(group)
+        rate_label = QtWidgets.QLabel("采样率")
+        rate_row, self.gen_rate = _freq_spin(1.0, 1e9, 1_000_000.0, 2)
+        self.gen_rate.setToolTip("所有信号的统一采样率")
+        duration_label = QtWidgets.QLabel("持续时间")
+        duration_row, self.gen_duration = _plain_spin(0.000001, 3600.0, 0.1, 6, "s")
+        self.gen_count_label = QtWidgets.QLabel()
+        seed_label = QtWidgets.QLabel("随机种子")
+        self.gen_seed = _plain_spin(0.0, 2 ** 32 - 1, 0.0, 0)
+        self.gen_seed.setToolTip("相同种子产生完全一致的信号")
+        for widget in (rate_label, rate_row, duration_label, duration_row,
+                       self.gen_count_label, seed_label, self.gen_seed):
+            row.addWidget(widget)
+        row.addStretch()
+        self.gen_rate.valueChanged.connect(self.update_gen_count)
+        self.gen_duration.valueChanged.connect(self.update_gen_count)
+        return group
+
+
+    def _build_noise_group(self):
+        group = QtWidgets.QGroupBox("背景噪声")
+        row = QtWidgets.QHBoxLayout(group)
+        self.gen_noise_enabled = QtWidgets.QCheckBox("启用")
+        self.gen_noise_enabled.setChecked(True)
+        self.gen_noise_enabled.toggled.connect(self.update_gen_controls)
+        row.addWidget(self.gen_noise_enabled)
+        row.addWidget(QtWidgets.QLabel("噪声带宽"))
+        noise_bw_row, self.gen_noise_bw = _freq_spin(1.0, 1e9, 1_000_000.0, 2)
+        self.gen_noise_bw.setToolTip("双侧带限带宽；等于采样率时为全带白噪声")
+        row.addWidget(noise_bw_row)
+        row.addWidget(QtWidgets.QLabel("SNR（相对最强信号）"))
+        snr_row, self.gen_snr = _plain_spin(-10.0, 80.0, 20.0, 1, "dB")
+        row.addWidget(snr_row)
+        row.addWidget(QtWidgets.QLabel("噪声功率（无信号时）"))
+        noise_power_row, self.gen_noise_power = _plain_spin(-200.0, 0.0, -20.0, 1, "dBFS")
+        self.gen_noise_power.setEnabled(False)
+        row.addWidget(noise_power_row)
+        row.addStretch()
+        return group
+
+
+    def _build_signal_table(self):
+        group = QtWidgets.QGroupBox("信号列表（最多 16 个，各信号独立参数）")
+        layout = QtWidgets.QVBoxLayout(group)
+        bar = QtWidgets.QHBoxLayout()
+        bar.addWidget(QtWidgets.QLabel("添加样式"))
+        self.gen_mode_combo = QtWidgets.QComboBox()
+        for key, label in MODE_CHOICES:
+            self.gen_mode_combo.addItem(label, key)
+        bar.addWidget(self.gen_mode_combo)
+        add = QtWidgets.QPushButton("添加信号…")
+        add.clicked.connect(self.add_signal_clicked)
+        bar.addWidget(add)
+        edit = QtWidgets.QPushButton("编辑参数…")
+        edit.clicked.connect(self.edit_signal_clicked)
+        bar.addWidget(edit)
+        remove = QtWidgets.QPushButton("删除选中")
+        remove.clicked.connect(self.remove_signal_clicked)
+        bar.addWidget(remove)
+        bar.addStretch()
+        layout.addLayout(bar)
+        self.gen_signals = QtWidgets.QTableWidget(0, 5)
+        self.gen_signals.setHorizontalHeaderLabels(["调制样式", "频点", "功率", "带宽", "参数摘要"])
+        self.gen_signals.horizontalHeader().setStretchLastSection(True)
+        self.gen_signals.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.gen_signals.horizontalHeader().setSectionResizeMode(
+            4, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.gen_signals.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.gen_signals.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.gen_signals.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        layout.addWidget(self.gen_signals, 1)
+        return group
+
+
+    def _build_export_row(self):
+        group = QtWidgets.QGroupBox("资产与导出")
+        row = QtWidgets.QHBoxLayout(group)
+        row.addWidget(QtWidgets.QLabel("资产名称"))
+        self.gen_name = QtWidgets.QLineEdit()
+        self.gen_name.setPlaceholderText("留空自动命名，如：IQ 生成 · QPSK + AM")
+        row.addWidget(self.gen_name, 1)
+        row.addWidget(QtWidgets.QLabel("导出格式"))
+        self.gen_export_format = QtWidgets.QComboBox()
+        for label, fmt in EXPORT_FORMATS:
+            self.gen_export_format.addItem(label, fmt)
+        self.gen_export_format.currentIndexChanged.connect(self.update_gen_controls)
+        row.addWidget(self.gen_export_format)
+        row.addWidget(QtWidgets.QLabel("字节序"))
+        self.gen_endian = QtWidgets.QComboBox()
+        self.gen_endian.addItem("小端", "little")
+        self.gen_endian.addItem("大端", "big")
+        self.gen_endian.setEnabled(False)
+        row.addWidget(self.gen_endian)
+        self.generate_button = QtWidgets.QPushButton("生成 IQ 信号")
+        self.generate_button.setObjectName("primary")
+        self.generate_button.clicked.connect(self.generate_iq_clicked)
+        row.addWidget(self.generate_button)
+        return group
+
+
+    def update_gen_controls(self, *_):
+        has_signals = bool(self.iq_signals)
+        self.gen_snr.setEnabled(self.gen_noise_enabled.isChecked() and has_signals)
+        self.gen_noise_power.setEnabled(self.gen_noise_enabled.isChecked() and not has_signals)
+        fmt = self.gen_export_format.currentData()
+        self.gen_endian.setEnabled(fmt in ("iq16", "iq32"))
+        self._suggest_name()
+        self.update_gen_count()
+
+
+    def update_gen_count(self, *_):
+        rate = self.gen_rate.value()
+        count = int(round(rate * self.gen_duration.value()))
+        valid = 1 <= count <= MAX_SAMPLES
+        color = "#23374d" if valid else "#c0392b"
+        self.gen_count_label.setText(f"预计 {count:,} 个复采样（上限 {MAX_SAMPLES:,}）")
+        self.gen_count_label.setStyleSheet(f"color:{color};")
+        if self.iq_signals:
+            for row in range(self.gen_signals.rowCount()):
+                item = self.gen_signals.item(row, 4)
+                if item is not None:
+                    item.setText(self._describe_signal(self.iq_signals[row]))
+
+
+    def _suggest_name(self):
+        if not self.iq_signals:
+            return
+        styles = " + ".join(sorted(MODE_SHORT[signal["mode"]] for signal in self.iq_signals))
+        suggestion = f"IQ 生成 · {styles}"
+        if not self.gen_name.text() or self.gen_name.text() == self._last_suggested_name:
+            self.gen_name.setText(suggestion)
+        self._last_suggested_name = suggestion
+
+
+    def _describe_signal(self, spec):
+        try:
+            plan = plan_signal(spec, self.gen_rate.value())
+        except ValueError as exc:
+            return f"参数无效：{exc}"
+        if plan["mode"] == "am":
+            return (f"深度 {plan['depth']:g} · 消息带宽 {_fmt_hz(plan['message_bandwidth'])} · "
+                    f"实际带宽 {_fmt_hz(plan['bandwidth_actual'])}")
+        if plan["mode"] == "fm":
+            return (f"消息带宽 {_fmt_hz(plan['message_bandwidth'])} · RMS 频偏 {_fmt_hz(plan['deviation'])} · "
+                    f"占用带宽 ≈ {_fmt_hz(plan['bandwidth_actual'])}")
+        if plan["mode"] == "ssb":
+            return f"{plan['side'].upper()} · 实际带宽 {_fmt_hz(plan['bandwidth_actual'])}"
+        if plan["mode"] in ("ask2", "qpsk", "qam16", "qam64"):
+            return (f"{plan['pulse'].upper()} α={plan['alpha']:g} · 符号速率 {_fmt_hz(plan['symbol_rate'])} · "
+                    f"实际带宽 {_fmt_hz(plan['bandwidth_actual'])}")
+        if plan["mode"] == "fh_rc":
+            return (f"跳速 {plan['hop_rate']:g} hop/s · {len(plan['hop_points'])} 频点 · "
+                    f"中心跨度 {_fmt_hz(plan['hop_span'])} · 单跳带宽 {_fmt_hz(plan['hop_bandwidth'])} · "
+                    f"2FSK 频偏 {_fmt_hz(plan['deviation'])}")
+        return (f"跳速 {plan['hop_rate']:g} hop/s · {len(plan['hop_points'])} 频点 · "
+                f"中心跨度 {_fmt_hz(plan['hop_span'])} · 单跳带宽 {_fmt_hz(plan['hop_bandwidth'])} · "
+                f"{plan['subcarriers']} 子载波")
+
+
+    def add_signal_clicked(self):
+        mode = self.gen_mode_combo.currentData()
+        dialog = SignalParamsDialog(mode, self.gen_rate.value(), parent=self)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self.add_iq_signal(dialog.result())
+
+
+    def edit_signal_clicked(self):
+        row = self.gen_signals.currentRow()
+        if row < 0:
+            self.status.setText("请先在信号表中选择一行")
+            return
+        spec = self.iq_signals[row]
+        dialog = SignalParamsDialog(spec["mode"], self.gen_rate.value(), spec, parent=self)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self.iq_signals[row] = dialog.result()
+            self._fill_signal_row(row, self.iq_signals[row])
+            self.update_gen_controls()
+
+
+    def remove_signal_clicked(self):
+        row = self.gen_signals.currentRow()
+        if row < 0:
+            self.status.setText("请先在信号表中选择一行")
+            return
+        self.gen_signals.removeRow(row)
+        del self.iq_signals[row]
+        self.update_gen_controls()
+
+
+    def add_iq_signal(self, spec):
+        if len(self.iq_signals) >= 16:
+            self.status.setText("一次最多生成 16 个信号")
+            return
+        self.iq_signals.append(dict(spec))
+        row = self.gen_signals.rowCount()
+        self.gen_signals.insertRow(row)
+        self._fill_signal_row(row, spec)
+        self.update_gen_controls()
+
+
+    def _fill_signal_row(self, row, spec):
+        mode_item = QtWidgets.QTableWidgetItem(MODE_SHORT.get(spec["mode"], spec["mode"]))
+        mode_item.setData(QtCore.Qt.ItemDataRole.UserRole, dict(spec))
+        self.gen_signals.setItem(row, 0, mode_item)
+        self.gen_signals.setItem(row, 1, QtWidgets.QTableWidgetItem(_fmt_hz(spec.get("offset", 0))))
+        self.gen_signals.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{spec.get('power_dbfs', -10):g} dBFS"))
+        self.gen_signals.setItem(row, 3, QtWidgets.QTableWidgetItem(_fmt_hz(spec.get("bandwidth", 0))))
+        self.gen_signals.setItem(row, 4, QtWidgets.QTableWidgetItem(self._describe_signal(spec)))
+
+
+    def generate_iq_clicked(self):
+        rate = self.gen_rate.value()
+        duration = self.gen_duration.value()
+        count = int(round(rate * duration))
+        if not 1 <= count <= MAX_SAMPLES:
+            self.status.setText(f"采样点数 {count:,} 超出 1～{MAX_SAMPLES:,} 范围，请调整采样率或持续时间")
+            return
+        noise = None
+        if self.gen_noise_enabled.isChecked():
+            noise = {"enabled": True, "bandwidth": self.gen_noise_bw.value()}
+            if self.iq_signals:
+                noise["snr_db"] = self.gen_snr.value()
+            else:
+                noise["power_dbfs"] = self.gen_noise_power.value()
+        export = None
+        fmt = self.gen_export_format.currentData()
+        if fmt:
+            export = {"format": fmt, "endian": self.gen_endian.currentData()}
+        self.start_job("generate", sample_rate=rate, duration=duration,
+                       seed=int(self.gen_seed.value()), signals=self.iq_signals,
+                       noise=noise, name=self.gen_name.text().strip() or None, export=export)
+
+
+    def show_generation_result(self, result):
+        summary = result["summary"]
+        lines = [f"已生成资产：{result['name']}",
+                 f"采样率 {_fmt_hz(summary['sample_rate_hz'])} · {summary['sample_count']:,} 个复采样 · "
+                 f"时长 {summary['duration_s']:g} s · 峰值 {summary['peak_dbfs']:.1f} dBFS"]
+        for entry in summary["signals"]:
+            style = MODE_SHORT.get(entry["mode"], entry["mode"])
+            lines.append(f"  {style}：频点 {_fmt_hz(entry['offset'])} · 目标功率 {entry['power_dbfs']:g} dBFS"
+                         f"（实测 {entry['power_dbfs_actual']:.2f} dBFS）· 目标带宽 {_fmt_hz(entry['bandwidth'])}")
+        noise = summary["noise"]
+        if noise["enabled"]:
+            if noise["snr_db"] is not None:
+                lines.append(f"  背景噪声：带宽 {_fmt_hz(noise['bandwidth'])} · SNR {noise['snr_db']:g} dB · "
+                             f"噪声功率 {noise['power_dbfs']:.1f} dBFS")
+            elif noise["power_dbfs"] is not None:
+                lines.append(f"  背景噪声：带宽 {_fmt_hz(noise['bandwidth'])} · 功率 {noise['power_dbfs']:.1f} dBFS")
+        if result["export_path"]:
+            lines.append(f"导出文件：{result['export_path']}（格式 {result['export_format']}）")
+        self.gen_result.setText("\n".join(lines))
+
+
     def selected_asset(self):
         item = self.assets.currentItem()
         return item.data(QtCore.Qt.ItemDataRole.UserRole) if item else None
-
-
     def refresh_assets(self, *_):
         selected = self.selected_asset()
         self.assets.clear()
@@ -153,6 +945,8 @@ class MainWindow(DesktopWindow):
 
 
     def asset_changed(self, *_):
+        if self._play_data is not None:
+            self._stop_playback()
         asset = self.selected_asset()
         if asset:
             self.asset_info.setText(f"{asset['sample_count']:,} 个复采样\n{asset['sample_rate']:g} Hz")
@@ -161,7 +955,6 @@ class MainWindow(DesktopWindow):
             self.asset_info.setText("尚未选择数据")
             self.label.clear()
 
-
     def save_label(self):
         asset = self.selected_asset()
         if asset:
@@ -169,14 +962,23 @@ class MainWindow(DesktopWindow):
             self.refresh_assets()
             self.status.setText("数据备注已保存")
 
-
     def import_file(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "选择离线数据", "", "数据 (*.npy *.csv)")
-        if path:
-            self.start_job("import", path=path, sample_rate=self.sample_rate.value())
-
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "选择离线数据", "",
+                                                        "数据 (*.npy *.csv *.bin *.raw *.iq)")
+        if not path:
+            return
+        request = {"sample_rate": self.sample_rate.value()}
+        if Path(path).suffix.lower() in (".bin", ".raw", ".iq"):
+            dialog = BinaryImportDialog(self)
+            if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+                return
+            request["binary_dtype"], request["endian"] = dialog.values()
+        self.start_job("import", path=path, **request)
 
     def analyze_selected(self):
+        if self.analyze_mode.currentText() == "实时播放":
+            self._start_playback()
+            return
         asset = self.selected_asset()
         if asset:
             self.start_job("analyze", asset_id=asset["id"], nfft=int(self.nfft.currentText()))
@@ -199,28 +1001,7 @@ class MainWindow(DesktopWindow):
         if result["kind"] == "analysis":
             self.tab_results[0] = result
             with np.load(self.workspace.root / result["plots_path"], allow_pickle=False) as arrays:
-                self.wave.clear()
-                self.wave.plot(arrays["wave_time"], arrays["wave_i"], pen="#2365b3", name="I")
-                self.wave.plot(arrays["wave_time"], arrays["wave_q"], pen="#e39b35", name="Q")
-                self.spectrum.clear()
-                f, t = arrays["frequency"], arrays["frame_time"]
-                self.spectrum.plot(f, arrays["spectrum_db"], pen="#2365b3")
-                matrix = arrays["spectrogram_db"]
-                high = float(matrix.max())
-                levels = [high - 80, high]
-                self.tf_image.setImage(matrix.T, levels=levels, autoLevels=False)
-                self.waterfall_image.setImage(matrix, levels=levels, autoLevels=False)
-                df = f[1] - f[0]
-                dt = result["summary"]["hop_samples"] / result["summary"]["sample_rate_hz"]
-                self.tf_image.setRect(QtCore.QRectF(t[0] - dt / 2, f[0] - df / 2, dt * len(t), df * len(f)))
-                self.waterfall_image.setRect(QtCore.QRectF(f[0] - df / 2, t[0] - dt / 2, df * len(f), dt * len(t)))
-                self.time_frequency.autoRange()
-                self.waterfall.autoRange()
-            s = result["summary"]
-            self.summary.setPlainText(f"数据：{result.get('asset_name', result['asset_id'])}  |  采样数 {s['sample_count']:,}  |  时长 {s['duration_s']:.6f} s\n"
-                                      f"均值 I={s['mean_i']:.6g}, Q={s['mean_q']:.6g}  |  RMS={s['rms']:.6g}  |  峰值={s['peak']:.6g}\n"
-                                      f"幅度：任意单位；颜色：PSD，{levels[0]:.1f}～{levels[1]:.1f} dB；"
-                                      f"波形抽点预览：{'是' if s['preview_decimated'] else '否'}")
+                self._render_analysis(result, arrays)
             self.tabs.setCurrentIndex(0)
         elif result["kind"] == "native":
             self.tab_results[0] = result
@@ -228,9 +1009,383 @@ class MainWindow(DesktopWindow):
             self.spectrum.clear()
             self.tf_image.clear()
             self.waterfall_image.clear()
+            self.const_scatter.clear()
+            self.tf_stack.setCurrentWidget(self.time_frequency)
             self.summary.setPlainText(f"原生复制完成：{result['plugin']['id']}\n"
                                       f"输出资产：{result['derived_asset_id']}\n请选择输出资产进行分析。")
             self.tabs.setCurrentIndex(0)
+
+    def _effective_classification(self, summary):
+        choice = self.class_combo.currentText()
+        if choice == "数字":
+            return "digital", True
+        if choice == "模拟":
+            return "analog", True
+        return summary.get("classification", "analog"), False
+
+    def _positive_half_mask(self, frequencies, real_valued):
+        choice = self.freq_view.currentText()
+        if choice == "双边":
+            return slice(None)
+        if choice == "仅正频率" or (choice == "自动" and real_valued):
+            return frequencies >= 0
+        return slice(None)
+
+    def _on_range_follow(self):
+        if not self._range_syncing:
+            self._apply_display_mode()
+
+    def _on_range_edited(self):
+        """手动改动任一范围数值即切换为固定范围，避免下次分析被自动定标覆盖。"""
+        if self._range_syncing:
+            return
+        self._range_syncing = True
+        self.range_follow.setChecked(False)
+        self._range_syncing = False
+        self._apply_display_mode()
+
+    def _wave_span_seconds(self):
+        text = self.wave_span.currentText()
+        if text == "整个记录":
+            return None
+        value, _, unit = text.partition(" ")
+        seconds = float(value)
+        return seconds / 1000.0 if unit.strip() == "ms" else seconds
+
+    def _spec_half_span(self, rate):
+        span = float(self.spec_span.value())
+        return min(span, rate / 2.0) if span > 0 else rate / 2.0
+
+    def _set_range_fields(self, amplitude, half_span):
+        """自动定标时把推导值写回控件，使界面显示的就是实际使用的范围。"""
+        self._range_syncing = True
+        self.amp_max.setValue(amplitude)
+        self.spec_span.setValue(half_span)
+        self._range_syncing = False
+
+    def _apply_wave_range(self, t_end, span):
+        amplitude = float(self.amp_max.value())
+        self.wave.setXRange(t_end - span, t_end, padding=0.0)
+        self.wave.setYRange(-amplitude, amplitude, padding=0.0)
+        self.wave.setTitle(f"I / Q 波形 · ±{amplitude:g}（任意单位）· 时窗 {_fmt_span(span)}")
+
+    def _apply_spectrum_range(self, rate, positive_only, hi_db):
+        half = self._spec_half_span(rate)
+        low = 0.0 if positive_only else -half
+        span_db = float(self.spec_db_span.value())
+        self.spectrum.setXRange(low, half, padding=0.0)
+        self.spectrum.setYRange(hi_db - span_db, hi_db, padding=0.0)
+        side = "仅正频率" if positive_only else "双边"
+        self.spectrum.setTitle(f"平均功率谱密度 · {side} {_fmt_hz(low)}～{_fmt_hz(half)}"
+                               f" · 动态范围 {span_db:g} dB")
+        return low, half, span_db
+
+    @staticmethod
+    def _nice_ceiling(value):
+        """1 / 2 / 5 × 10ⁿ 中不小于 value 的最小值，用作幅度定标上限。"""
+        if not value > 0:
+            return 1.0
+        magnitude = 10.0 ** np.floor(np.log10(value))
+        for step in (1.0, 2.0, 5.0, 10.0):
+            candidate = step * magnitude
+            if candidate >= value:
+                return float(candidate)
+        return float(10.0 * magnitude)
+
+    def _render_analysis(self, result, arrays):
+        summary = result["summary"]
+        f = arrays["frequency"]
+        t = arrays["frame_time"]
+        rate = float(summary["sample_rate_hz"])
+        mask = self._positive_half_mask(f, bool(summary.get("real_valued", False)))
+        fv = f[mask]
+        positive_only = isinstance(mask, np.ndarray)
+        spectrum_db = arrays["spectrum_db"][mask]
+        matrix = arrays["spectrogram_db"][:, mask]
+        high = float(matrix.max()) if matrix.size else -120.0
+        if spectrum_db.size:
+            high = max(high, float(spectrum_db.max()))
+        if self.range_follow.isChecked():
+            peak = max(float(np.abs(arrays["wave_i"]).max()) if arrays["wave_i"].size else 0.0,
+                       float(np.abs(arrays["wave_q"]).max()) if arrays["wave_q"].size else 0.0)
+            self._set_range_fields(self._nice_ceiling(peak), 0.0)
+        levels = [high - float(self.spec_db_span.value()), high]
+        classification, manual = self._effective_classification(summary)
+        self.wave.clear()
+        self.wave.plot(arrays["wave_time"], arrays["wave_i"], pen="#2365b3", name="I")
+        self.wave.plot(arrays["wave_time"], arrays["wave_q"], pen="#e39b35", name="Q")
+        duration = float(summary["duration_s"])
+        wave_span = self._wave_span_seconds()
+        wave_span = duration if wave_span is None else min(wave_span, duration)
+        self._apply_wave_range(wave_span, wave_span)
+        self.spectrum.clear()
+        self.spectrum.plot(fv, spectrum_db, pen="#2365b3")
+        low_f, high_f, span_db = self._apply_spectrum_range(rate, positive_only, high)
+        df = f[1] - f[0]
+        dt = summary["hop_samples"] / summary["sample_rate_hz"]
+        if classification == "digital":
+            self.const_scatter.setData(x=arrays["const_i"], y=arrays["const_q"])
+            self.constellation.setTitle(
+                f"星座图（数字信号判定 · 簇数估计 {summary.get('cluster_estimate', 0)}"
+                f"{' · 手动判定' if manual else ''}）")
+            self.tf_stack.setCurrentWidget(self.constellation)
+        else:
+            self.tf_image.setImage(matrix.T, levels=levels, autoLevels=False)
+            self.tf_image.setRect(QtCore.QRectF(t[0] - dt / 2, fv[0] - df / 2,
+                                                dt * len(t), df * len(fv)))
+            self.tf_stack.setCurrentWidget(self.time_frequency)
+            self.time_frequency.autoRange()
+        self.waterfall_image.setImage(matrix, levels=levels, autoLevels=False)
+        self.waterfall_image.setRect(QtCore.QRectF(fv[0] - df / 2, t[0] - dt / 2,
+                                                   df * len(fv), dt * len(t)))
+        self.waterfall.autoRange()
+        s = summary
+        label = "数字" if classification == "digital" else "模拟"
+        data_kind = "实数（默认仅显示正频率）" if s.get("real_valued") else "复数 IQ（默认双边频率）"
+        self.summary.setPlainText(
+            f"数据：{result.get('asset_name', result['asset_id'])}  |  采样数 {s['sample_count']:,}  |  时长 {s['duration_s']:.6f} s\n"
+            f"均值 I={s['mean_i']:.6g}, Q={s['mean_q']:.6g}  |  RMS={s['rms']:.6g}  |  峰值={s['peak']:.6g}\n"
+            f"信号判定：{label}（{'手动选择' if manual else '自动启发式'}，簇数估计 {s.get('cluster_estimate', 0)}）"
+            f"  |  数据：{data_kind}\n"
+            f"显示范围（固定，可在工具栏调整）：波形 ±{self.amp_max.value():g}（时窗 {_fmt_span(wave_span)}）；"
+            f"频谱 {_fmt_hz(low_f)}～{_fmt_hz(high_f)}，动态范围 {span_db:g} dB"
+            f"（{levels[0]:.1f}～{levels[1]:.1f} dB，含瀑布色标）；"
+            f"波形抽点预览：{'是' if s['preview_decimated'] else '否'}；"
+            f"瀑布时间范围 = 记录时长（与 FFT 点数无关）")
+
+    def _apply_display_mode(self):
+        if self._play_data is not None:
+            self._play_render()
+            return
+        result = self.last_result
+        if result is None or result.get("kind") != "analysis":
+            return
+        with np.load(self.workspace.root / result["plots_path"], allow_pickle=False) as arrays:
+            self._render_analysis(result, arrays)
+
+    def _on_analyze_mode(self):
+        playing_mode = self.analyze_mode.currentText() == "实时播放"
+        self.play_bar.setVisible(playing_mode)
+        self.analyze_button.setText("播放所选数据" if playing_mode else "分析所选数据")
+        if not playing_mode and self._play_data is not None:
+            self._stop_playback()
+
+    def _nfft_value(self):
+        return int(self.nfft.currentText())
+
+    def _on_playback_nfft(self):
+        if self._play_data is not None:
+            self._rebuild_playback_window()
+
+    def _start_playback(self):
+        asset = self.selected_asset()
+        if not asset:
+            self.status.setText("请先导入并选择数据")
+            return
+        if self._play_data is not None:
+            self._stop_playback()
+        try:
+            meta, data = self.workspace.load_samples(asset["id"])
+        except Exception as exc:
+            self.status.setText(f"读取数据失败：{exc}")
+            return
+        self._play_data = data
+        self._play_rate = float(meta["sample_rate"])
+        self._play_real = bool(np.all(data.imag == 0))
+        if self.range_follow.isChecked():
+            probe = np.asarray(data[:min(data.size, 200_000)])
+            peak = float(max(np.abs(probe.real).max(), np.abs(probe.imag).max())) if probe.size else 1.0
+            self._set_range_fields(self._nice_ceiling(peak), 0.0)
+        self._play_pos = 0
+        self._play_paused = False
+        self._play_buffer = None
+        self._play_times = []
+        self._play_level_hi = None
+        self._play_last = time.monotonic()
+        self.play_timer.start()
+        self.play_button.setEnabled(False)
+        self.pause_button.setEnabled(True)
+        self.stop_button.setEnabled(True)
+        self.waterfall.setTitle("瀑布图（滚动时间窗）")
+        self.status.setText(f"实时播放中：{asset['name']}（速度 {self.play_speed.currentText()}，"
+                            f"时间窗 {self.play_window.currentText()}）")
+
+    def _on_playback_tick(self):
+        if self._play_data is None:
+            return
+        if self._play_paused:
+            self._play_last = time.monotonic()
+            return
+        now = time.monotonic()
+        elapsed = now - self._play_last
+        self._play_last = now
+        advance = int(self._play_rate * self._play_speed() * elapsed)
+        if advance < 1:
+            return
+        size = self._play_data.size
+        target = min(self._play_pos + advance, size)
+        nfft = self._nfft_value()
+        hop = self._play_hop(advance)
+        # 时间窗可能短于一次刷新的间隔，此时需要在一次刷新内补齐多帧，
+        # 否则窗口里只剩一两行、远不足以表现滚动。
+        if self._play_buffer is None:
+            self._play_buffer = []
+            self._play_times = []
+        positions = []
+        pos = self._play_pos + hop
+        while pos <= target:
+            positions.append(pos)
+            pos += hop
+        if not positions:
+            positions.append(target)
+        for pos in positions:
+            _, row = spectrum_row(self._play_data, pos, nfft, self._play_rate)
+            self._play_buffer.append(row)
+            self._play_times.append(pos / self._play_rate)
+        self._play_pos = target
+        keep = self._play_window_rows()
+        if len(self._play_buffer) > keep:
+            self._play_buffer = self._play_buffer[-keep:]
+            self._play_times = self._play_times[-keep:]
+        self._play_render()
+        self.play_progress.setValue(int(1000 * self._play_pos / size))
+        if self._play_pos >= size:
+            self._stop_playback(final=True)
+
+    def _window_seconds(self):
+        value, _, unit = self.play_window.currentText().partition(" ")
+        seconds = float(value)
+        return seconds / 1000.0 if unit.strip() == "ms" else seconds
+
+    def _play_speed(self):
+        return float(self.play_speed.currentText().rstrip("×"))
+
+    def _play_hop(self, advance):
+        """相邻两帧相隔的信号样点数。
+
+        基准为 FFT 窗长的一半（标准 STFT 交叠），再受两个上限约束：
+        窗口内保留的行数不超过 `PLAY_MAX_ROWS`，单次刷新计算的行数不超过
+        `PLAY_MAX_ROWS_PER_TICK`。窗口很短时靠前一约束保证行数够用，
+        快放或长窗口时靠后一约束限制每次刷新的计算量。
+        """
+        hop = max(1, self._nfft_value() // 2)
+        window_samples = self._window_seconds() * self._play_rate
+        if window_samples > 0:
+            hop = max(hop, int(np.ceil(window_samples / PLAY_MAX_ROWS)))
+        if advance > 0:
+            hop = max(hop, int(np.ceil(advance / PLAY_MAX_ROWS_PER_TICK)))
+        return max(1, hop)
+
+    def _play_window_rows(self):
+        if len(self._play_times) > 1:
+            dt = float(np.median(np.diff(self._play_times)))
+        else:
+            dt = self._play_hop(0) / self._play_rate
+        if not dt > 0:
+            dt = max(1, self._nfft_value() // 2) / self._play_rate
+        return max(2, int(np.ceil(self._window_seconds() / dt)) + 1)
+
+    def _on_playback_window(self):
+        if self._play_data is not None:
+            self._rebuild_playback_window()
+
+    def _rebuild_playback_window(self):
+        """按当前时间窗与 FFT 点数重铺最近一窗数据的帧。
+
+        时间窗或 FFT 点数变化后，帧间距随之改变，旧缓冲行的疏密不再匹配，
+        因此丢弃旧缓冲并从当前播放位置向前回溯一窗重建，使瀑布图立刻以新
+        分辨率显示最近一段历史，而不是留一格空白或沿用旧疏密。
+        """
+        hop = self._play_hop(0)
+        span = int(self._window_seconds() * self._play_rate)
+        start = max(0, self._play_pos - span)
+        positions = list(range(start + hop, self._play_pos + 1, hop))
+        if not positions or positions[-1] != self._play_pos:
+            positions.append(self._play_pos)
+        nfft = self._nfft_value()
+        self._play_buffer = []
+        self._play_times = []
+        for pos in positions[-(PLAY_MAX_ROWS + 1):]:
+            _, row = spectrum_row(self._play_data, pos, nfft, self._play_rate)
+            self._play_buffer.append(row)
+            self._play_times.append(pos / self._play_rate)
+        self._play_render()
+
+    def _play_render(self):
+        if not self._play_buffer:
+            return
+        matrix = np.vstack(self._play_buffer)
+        f_full, _ = spectrum_row(self._play_data, self._play_pos, self._nfft_value(), self._play_rate)
+        mask = self._positive_half_mask(f_full, self._play_real)
+        positive_only = isinstance(mask, np.ndarray)
+        fv = f_full[mask]
+        df = fv[1] - fv[0] if fv.size > 1 else self._play_rate / self._nfft_value()
+        # 色标与频谱纵轴在整个播放过程中保持不变：仅首次刷新按数据定标，
+        # 否则每帧重算会让颜色与曲线随数据跳动。
+        if self._play_level_hi is None:
+            self._play_level_hi = float(matrix.max()) if matrix.size else -120.0
+        high = self._play_level_hi
+        span_db = float(self.spec_db_span.value())
+        levels = [high - span_db, high]
+        self.spectrum.clear()
+        self.spectrum.plot(fv, matrix[-1][mask], pen="#2365b3")
+        self._apply_spectrum_range(self._play_rate, positive_only, high)
+        window_s = self._window_seconds()
+        wave_span = self._wave_span_seconds()
+        wave_span = window_s if wave_span is None else wave_span
+        count = int(wave_span * self._play_rate)
+        start = max(0, self._play_pos - count)
+        step = max(1, int(np.ceil((self._play_pos - start) / PLAY_WAVE_POINTS)))
+        chunk = self._play_data[start:self._play_pos:step]
+        tt = (start + np.arange(chunk.size) * step) / self._play_rate
+        self.wave.clear()
+        self.wave.plot(tt, chunk.real, pen="#2365b3", name="I")
+        self.wave.plot(tt, chunk.imag, pen="#e39b35", name="Q")
+        self._apply_wave_range(self._play_times[-1], wave_span)
+        # 瀑布图为固定时长的滚动窗口：纵轴始终锁定最近「时间窗」秒，
+        # 新数据自顶端进入并随时间向上流动；窗口时长可调，行高随之重新标定。
+        rows_needed = self._play_window_rows()
+        view = matrix[-rows_needed:]
+        t_top = self._play_times[-1] if self._play_times else window_s
+        height = view.shape[0] * (window_s / rows_needed)
+        self.waterfall_image.setImage(view, levels=levels, autoLevels=False)
+        self.waterfall_image.setRect(QtCore.QRectF(fv[0] - df / 2, t_top - height,
+                                                   df * len(fv), height))
+        self.waterfall.setXRange(fv[0] - df / 2, fv[-1] + df / 2, padding=0.0)
+        self.waterfall.setYRange(t_top - window_s, t_top, padding=0.0)
+
+    def _toggle_pause(self):
+        if self._play_data is None:
+            return
+        self._play_paused = not self._play_paused
+        self.pause_button.setText("继续" if self._play_paused else "暂停")
+        self._play_last = time.monotonic()
+        self.status.setText("播放已暂停" if self._play_paused else "继续播放")
+
+    def _stop_playback(self, final=False):
+        self.play_timer.stop()
+        self._play_data = None
+        self._play_buffer = None
+        self._play_times = []
+        self._play_pos = 0
+        self._play_paused = False
+        self._play_level_hi = None
+        self.play_button.setEnabled(True)
+        self.pause_button.setEnabled(False)
+        self.stop_button.setEnabled(False)
+        self.pause_button.setText("暂停")
+        self.waterfall.setTitle("瀑布图（离线历史）")
+        self.status.setText("播放完成" if final else "播放已停止")
+
+    def _seek_playback(self):
+        if self._play_data is None:
+            return
+        frac = self.play_progress.value() / 1000.0
+        self._play_pos = int(frac * self._play_data.size)
+        self._play_buffer = None
+        self._play_times = []
+        self._play_last = time.monotonic()
+        self._rebuild_playback_window()
 
 
 

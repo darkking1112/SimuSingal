@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from . import __version__
 
@@ -16,9 +17,15 @@ def main(argv=None):
     demo = commands.add_parser("demo", help="生成数学双音数据")
     demo.add_argument("--count", type=int, default=8192)
     demo.add_argument("--sample-rate", type=float, default=48000)
-    imp = commands.add_parser("import", help="导入 NPY 或无表头 CSV")
+    imp = commands.add_parser("import", help="导入 NPY、无表头 CSV 或交织 IQ 二进制")
     imp.add_argument("path")
     imp.add_argument("--sample-rate", type=float, required=True)
+    imp.add_argument("--binary-dtype", choices=("int16", "float32"),
+                     help="交织 IQ 二进制（.bin/.raw/.iq）的数据类型，必须显式指定")
+    imp.add_argument("--endian", choices=("little", "big"), default="little",
+                     help="交织 IQ 二进制的字节序，默认 little")
+    generate = commands.add_parser("generate", help="按 JSON 规格生成测试用 IQ 信号")
+    generate.add_argument("spec", help="JSON 规格文件：sample_rate/duration/seed/noise/signals/name/export")
     analysis = commands.add_parser("analyze", help="通用统计和图形计算")
     analysis.add_argument("asset_id")
     analysis.add_argument("--nfft", type=int, default=256)
@@ -66,6 +73,13 @@ def main(argv=None):
                 request["count"] = args.count
             elif args.command == "import":
                 request["path"] = args.path
+                if args.binary_dtype:
+                    request["binary_dtype"] = args.binary_dtype
+                    request["endian"] = args.endian
+            elif args.command == "generate":
+                request.update(json.loads(Path(args.spec).read_text(encoding="utf-8")))
+                request["action"] = "generate"
+                request["workspace"] = str(workspace.root)
             elif args.command == "analyze":
                 request.update(asset_id=args.asset_id, nfft=args.nfft)
             elif args.command == "native":
