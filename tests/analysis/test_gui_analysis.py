@@ -198,6 +198,16 @@ def test_constellation_and_playback(tmp_path):
             (-window.amp_max.value(), window.amp_max.value()))
         assert window.spectrum.viewRange()[0] == pytest.approx((-500_000.0, 500_000.0))
         assert window.spec_db_span.value() == pytest.approx(40.0)
+        # 「仅正频率」时瀑布图必须只取正半轴，与平均功率谱密度共用同一频率范围
+        bins = window._nfft_value()
+        window.freq_view.setCurrentText("仅正频率")
+        assert window.spectrum.viewRange()[0] == pytest.approx((0.0, 500_000.0))
+        assert window.waterfall.viewRange()[0] == pytest.approx((0.0, 500_000.0))
+        assert window.waterfall_image.image.shape[1] == bins // 2
+        window.freq_view.setCurrentText("双边")
+        assert window.waterfall.viewRange()[0] == pytest.approx((-500_000.0, 500_000.0))
+        assert window.waterfall_image.image.shape[1] == bins
+        window.freq_view.setCurrentText("自动")
         # 调整动态范围即转为手动固定范围，播放时沿用该数值
         window.spec_db_span.setValue(80.0)
         assert not window.range_follow.isChecked()
@@ -217,6 +227,15 @@ def test_constellation_and_playback(tmp_path):
             time.sleep(.02)
         assert window.play_progress.value() > 0
         assert window.waterfall_image.image.ndim == 2
+        # 播放中瀑布图与频谱的频率范围一致，切换「仅正频率」立即同步
+        window.freq_view.setCurrentText("仅正频率")
+        app.processEvents()
+        assert window.spectrum.viewRange()[0] == pytest.approx((0.0, 500_000.0))
+        assert window.waterfall.viewRange()[0] == pytest.approx(window.spectrum.viewRange()[0])
+        assert window.waterfall_image.image.shape[1] == window._nfft_value() // 2
+        window.freq_view.setCurrentText("自动")
+        app.processEvents()
+        assert window.waterfall.viewRange()[0] == pytest.approx(window.spectrum.viewRange()[0])
         # 播放中波形与频谱范围保持不变；波形横轴为最近一窗，随时间平移
         def selected_span():
             value, unit = window.play_window.currentText().split()

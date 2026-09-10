@@ -1138,7 +1138,10 @@ class MainWindow(DesktopWindow):
         self.waterfall_image.setImage(matrix, levels=levels, autoLevels=False)
         self.waterfall_image.setRect(QtCore.QRectF(fv[0] - df / 2, t[0] - dt / 2,
                                                    df * len(fv), dt * len(t)))
-        self.waterfall.autoRange()
+        # 瀑布图与平均功率谱密度共用同一频率范围（含「仅正频率」选择），
+        # 纵轴固定为整段记录时长，不随刷新变动。
+        self.waterfall.setXRange(low_f, high_f, padding=0.0)
+        self.waterfall.setYRange(float(t[0] - dt / 2), float(t[-1] + dt / 2), padding=0.0)
         s = summary
         label = "数字" if classification == "digital" else "模拟"
         data_kind = "实数（默认仅显示正频率）" if s.get("real_valued") else "复数 IQ（默认双边频率）"
@@ -1319,6 +1322,9 @@ class MainWindow(DesktopWindow):
         mask = self._positive_half_mask(f_full, self._play_real)
         positive_only = isinstance(mask, np.ndarray)
         fv = f_full[mask]
+        # 瀑布图与频谱共用同一频率子集，否则「仅正频率」时瀑布图仍按双边铺满，
+        # 与上方曲线错位（横轴取正半轴、图像却仍是整段双边数据）。
+        matrix = matrix[:, mask]
         df = fv[1] - fv[0] if fv.size > 1 else self._play_rate / self._nfft_value()
         # 色标与频谱纵轴在整个播放过程中保持不变：仅首次刷新按数据定标，
         # 否则每帧重算会让颜色与曲线随数据跳动。
@@ -1328,8 +1334,8 @@ class MainWindow(DesktopWindow):
         span_db = float(self.spec_db_span.value())
         levels = [high - span_db, high]
         self.spectrum.clear()
-        self.spectrum.plot(fv, matrix[-1][mask], pen="#2365b3")
-        self._apply_spectrum_range(self._play_rate, positive_only, high)
+        self.spectrum.plot(fv, matrix[-1], pen="#2365b3")
+        low_f, high_f, _ = self._apply_spectrum_range(self._play_rate, positive_only, high)
         window_s = self._window_seconds()
         wave_span = self._wave_span_seconds()
         wave_span = window_s if wave_span is None else wave_span
@@ -1351,7 +1357,8 @@ class MainWindow(DesktopWindow):
         self.waterfall_image.setImage(view, levels=levels, autoLevels=False)
         self.waterfall_image.setRect(QtCore.QRectF(fv[0] - df / 2, t_top - height,
                                                    df * len(fv), height))
-        self.waterfall.setXRange(fv[0] - df / 2, fv[-1] + df / 2, padding=0.0)
+        # 横轴与上方平均功率谱密度完全一致，便于两图按频率对齐比较。
+        self.waterfall.setXRange(low_f, high_f, padding=0.0)
         self.waterfall.setYRange(t_top - window_s, t_top, padding=0.0)
 
     def _toggle_pause(self):
