@@ -59,7 +59,7 @@ def _check_band(offset, width, rate, mode):
         raise ValueError(f"频点 {offset:g} Hz 与带宽 {width:g} Hz 超出 ±{rate / 2:g} Hz 的基带范围")
 
 
-def _occupied_interval(offset, width, mode, side=None):
+def occupied_interval(offset, width, mode, side=None):
     """Two-sided frequency interval (Hz) occupied by one signal.
 
     SSB is one-sided (upper or lower sideband starting at ``offset``);
@@ -536,8 +536,8 @@ def generate_iq(sample_rate, duration, signals, noise=None, seed=0):
             reference_index = int(np.argmax([entry["power_dbfs_actual"] for entry in summaries]))
             reference = summaries[reference_index]
             snr_db = _finite(noise.get("snr_db", 20.0), "带内信噪比", -60.0, 120.0)
-            low, high = _occupied_interval(reference["offset"], reference["bandwidth_actual"],
-                                           reference["mode"], reference.get("side"))
+            low, high = occupied_interval(reference["offset"], reference["bandwidth_actual"],
+                                          reference["mode"], reference.get("side"))
             if low < -half_band or high > half_band:
                 label = MODE_NAMES.get(reference["mode"], reference["mode"])
                 raise ValueError(
@@ -554,8 +554,8 @@ def generate_iq(sample_rate, duration, signals, noise=None, seed=0):
             record += _band_noise(rng, count, rate, half_band) * np.sqrt(noise_power)
     for entry in summaries:
         entry["snr_inband_db"] = None
-        low, high = _occupied_interval(entry["offset"], entry["bandwidth_actual"],
-                                       entry["mode"], entry.get("side"))
+        low, high = occupied_interval(entry["offset"], entry["bandwidth_actual"],
+                                      entry["mode"], entry.get("side"))
         overlap = min(high, half_band) - max(low, -half_band)
         # 未被噪声频带覆盖的信号按重叠部分折算，完全落在带外时无定义。
         if noise_psd and overlap > 0:
@@ -613,6 +613,25 @@ def make_demo(sample_rate=48000.0, count=8192, seed=7):
     return x.astype(np.complex64)
 
 
+def _stft_psd(x, rate, nfft):
+    """Shared Hanning STFT producing a two-sided PSD (linear, per Hz).
+
+    ``psd`` has one row per frame with the same scaling as the spectrum
+    page, so integrating a band gives its power directly:
+    ``P_band = psd[:, lo:hi+1].sum() * (rate / nfft)``. At most 512 frames
+    are produced to bound memory and result size.
+    """
+    padded = np.pad(x, (0, max(0, nfft - x.size)))
+    hop = max(nfft // 2, int(np.ceil(max(0, padded.size - nfft) / 511)))
+    starts = np.arange(0, padded.size - nfft + 1, hop)
+    window = np.hanning(nfft)
+    frames = np.lib.stride_tricks.sliding_window_view(padded, nfft)[starts]
+    transformed = np.fft.fftshift(np.fft.fft(frames * window, axis=1), axes=1)
+    psd = np.abs(transformed) ** 2 / (rate * np.sum(window ** 2))
+    frequencies = np.fft.fftshift(np.fft.fftfreq(nfft, 1 / rate))
+    return psd, frequencies, starts, hop
+
+
 def analyze(samples, sample_rate, nfft=256):
     x = validate_samples(samples)
     rate = validate_rate(sample_rate)
@@ -635,20 +654,14 @@ def analyze(samples, sample_rate, nfft=256):
         "real_valued": real_valued,
     }
     # Power spectral density is two-sided for complex input; never double it.
-    padded = np.pad(x, (0, max(0, nfft - x.size)))
-    hop = max(nfft // 2, int(np.ceil(max(0, padded.size - nfft) / 511)))
-    starts = np.arange(0, padded.size - nfft + 1, hop)
-    window = np.hanning(nfft)
-    frames = np.lib.stride_tricks.sliding_window_view(padded, nfft)[starts]
-    transformed = np.fft.fftshift(np.fft.fft(frames * window, axis=1), axes=1)
-    psd = np.abs(transformed) ** 2 / (rate * np.sum(window ** 2))
+    psd, frequencies, starts, hop = _stft_psd(x, rate, nfft)
     indices = np.arange(0, x.size, max(1, int(np.ceil(x.size / 4096))))
     const_step = max(1, int(np.ceil(x.size / 20000)))
     const_view = x[::const_step]
     arrays = {
         "wave_time": indices / rate,
         "wave_i": x.real[indices], "wave_q": x.imag[indices],
-        "frequency": np.fft.fftshift(np.fft.fftfreq(nfft, 1 / rate)),
+        "frequency": frequencies,
         "spectrum_db": 10 * np.log10(np.maximum(psd.mean(axis=0), 1e-30)),
         "frame_time": (starts + (nfft - 1) / 2) / rate,
         "spectrogram_db": (10 * np.log10(np.maximum(psd, 1e-30))).astype(np.float32),
@@ -769,3 +782,434 @@ def spectrum_row(data, pos, nfft=256, rate=1.0):
     psd = np.abs(transformed) ** 2 / (rate * np.sum(window ** 2))
     frequencies = np.fft.fftshift(np.fft.fftfreq(nfft, 1 / rate))
     return frequencies, 10.0 * np.log10(np.maximum(psd, 1e-30))
+
+
+# ---------------------------------------------------------------------------
+# 信号检测与参数估计
+#
+# 输出遵守冻结契约 ``detect_result_v1``（见 signal_analysis.evaluation）：
+# 传统能量检测与后续 AI/ONNX 检测器输出同一结构，可直接比对。
+# 频域一律是复基带偏移，不虚构射频参数。
+# ---------------------------------------------------------------------------
+
+DETECT_ALGORITHM = "energy_detect_v1"
+DETECT_SNR_DEFINITION = "inband_snr_v1"
+_OCCUPIED_RATIO = 0.99
+#: 带内 SNR 估计下限（dB）：低于此值只报“几乎全为噪声”
+_SNR_FLOOR_DB = -20.0
+_DETECT_DEFAULTS = {
+    "nfft": 512,
+    # 平均 PSD 的逐点起伏远小于 0.5 dB（512 帧平均），故 3 dB 门限已很保守
+    "threshold_db": 3.0,
+    "band_threshold_db": 0.0,
+    "min_bandwidth_hz": 0.0,
+    "min_duration_s": 0.0,
+    "max_detections": 32,
+    "merge_bins": 0,
+}
+
+
+def _detect_config(rate, duration, config):
+    """Validate and resolve the detector configuration (frozen contract)."""
+    if config is None:
+        settings = {}
+    elif isinstance(config, dict):
+        settings = dict(config)
+    else:
+        raise ValueError("检测配置必须是字典")
+    unknown = set(settings) - set(_DETECT_DEFAULTS)
+    if unknown:
+        raise ValueError(f"未知的检测参数：{', '.join(sorted(unknown))}")
+    nfft = settings.get("nfft", _DETECT_DEFAULTS["nfft"])
+    if isinstance(nfft, bool) or int(nfft) != nfft or not 16 <= int(nfft) <= 4096:
+        raise ValueError("FFT 点数必须为 16～4096 的整数")
+    nfft = int(nfft)
+    resolution = rate / nfft
+    threshold_db = _finite(settings.get("threshold_db", _DETECT_DEFAULTS["threshold_db"]),
+                           "检测门限", 0.0, 80.0)
+    band_threshold_db = _finite(settings.get("band_threshold_db", 0.0),
+                                "带宽测量门限", 0.0, 80.0)
+    if band_threshold_db <= 0:
+        # “高门限检测、低门限量带宽”：占用带宽按噪声底以上 1.5 dB（默认）
+        # 测量，才能看到 AM 这种载波主导信号被压低的边带
+        band_threshold_db = max(1.0, 0.5 * threshold_db)
+    if band_threshold_db > threshold_db:
+        raise ValueError("带宽测量门限不得高于检测门限")
+    min_bandwidth = _finite(settings.get("min_bandwidth_hz", 0.0), "最小带宽", 0.0, rate)
+    if min_bandwidth <= 0:
+        # 默认要求至少 3 个频点宽，抑制单点毛刺
+        min_bandwidth = 3.0 * resolution
+    min_duration = _finite(settings.get("min_duration_s", 0.0), "最短持续时间", 0.0, duration)
+    max_detections = settings.get("max_detections", _DETECT_DEFAULTS["max_detections"])
+    if isinstance(max_detections, bool) or int(max_detections) != max_detections \
+            or not 1 <= int(max_detections) <= 256:
+        raise ValueError("最大目标数必须为 1～256 的整数")
+    merge_bins = settings.get("merge_bins", 0)
+    if isinstance(merge_bins, bool) or int(merge_bins) != merge_bins or not 0 <= int(merge_bins) <= nfft // 4:
+        raise ValueError(f"谱合并宽度必须为 0～{nfft // 4} 的整数")
+    merge_bins = int(merge_bins) or max(2, nfft // 128)
+    return {
+        "nfft": nfft,
+        "threshold_db": threshold_db,
+        "band_threshold_db": band_threshold_db,
+        "min_bandwidth_hz": min_bandwidth,
+        "min_duration_s": min_duration,
+        "max_detections": int(max_detections),
+        "merge_bins": merge_bins,
+        "freq_resolution_hz": resolution,
+        "min_bandwidth_bins": max(1, int(np.ceil(min_bandwidth / resolution))),
+    }
+
+
+def _noise_floor_db(psd_db, threshold_db, iterations=4):
+    """Robust noise floor: iterative median + MAD sigma clipping."""
+    values = np.asarray(psd_db, dtype=np.float64)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return 0.0
+    centre = float(np.median(values))
+    for _ in range(iterations):
+        deviation = np.abs(values - centre)
+        sigma = 1.4826 * float(np.median(deviation))
+        window = max(3.0 * sigma, threshold_db)
+        keep = values <= centre + window
+        if keep.sum() < 4:
+            break
+        centre = float(np.median(values[keep]))
+    return centre
+
+
+def _binary_dilate(mask, radius):
+    out = np.asarray(mask, dtype=bool).copy()
+    for shift in range(1, int(radius) + 1):
+        out[shift:] |= mask[:-shift]
+        out[:-shift] |= mask[shift:]
+    return out
+
+
+def _binary_close(mask, radius):
+    """1-D morphological closing: fill spectral ripple narrower than ``radius``."""
+    if radius <= 0:
+        return np.asarray(mask, dtype=bool)
+    filled = _binary_dilate(mask, radius)
+    return ~_binary_dilate(~filled, radius)
+
+
+def _true_runs(mask):
+    """Inclusive ``(start, stop)`` index pairs of consecutive True values."""
+    padded = np.concatenate(([False], np.asarray(mask, dtype=bool), [False]))
+    edges = np.flatnonzero(padded[1:] != padded[:-1])
+    return [(int(start), int(stop) - 1) for start, stop in zip(edges[::2], edges[1::2])]
+
+
+def _occupied_span(psd_linear, first, last, ratio=_OCCUPIED_RATIO):
+    """Bin indices containing ``ratio`` of the band power (99% occupancy).
+
+    Kept as the traceability reference: the band reported by
+    :func:`detect_signals` is the noise-referenced detected run (see the
+    function docstring), while this helper provides the classic
+    power-occupancy interval used when comparing with spectrum-management
+    tools.
+    """
+    segment = np.asarray(psd_linear[first:last + 1], dtype=np.float64)
+    total = float(segment.sum())
+    if not np.isfinite(total) or total <= 0:
+        return first, last
+    cumulative = np.cumsum(segment)
+    tail = (1.0 - ratio) / 2.0 * total
+    low = int(np.searchsorted(cumulative, tail, side="left"))
+    high = int(np.searchsorted(cumulative, total - tail, side="left"))
+    low = min(max(low, 0), segment.size - 1)
+    high = min(max(high, low), segment.size - 1)
+    return first + low, first + high
+
+
+_SESSION_GAP_RATIO = 3.0
+_SESSION_OVERLAP_RATIO = 0.2
+
+
+def _band_regions(detect_mask, edge_mask):
+    """Group detection runs by the measured-band component that contains them.
+
+    ``detect_mask`` (high threshold) provides the *evidence*, ``edge_mask``
+    (low threshold) the *band*. Grouping by component is what keeps one
+    emitter with an internal dip from being reported twice: both detection
+    runs of such an emitter belong to the same low-threshold component, so
+    they produce exactly one band.
+    """
+    regions = []
+    for first, last in _true_runs(edge_mask):
+        inner = [(a, b) for a, b in _true_runs(detect_mask)
+                 if first <= a and b <= last]
+        if inner:
+            regions.append((first, last, inner))
+    return regions
+
+
+def _overlap_seconds(first, second):
+    """Total time overlap (s) between two lists of disjoint intervals."""
+    total = 0.0
+    for a_start, a_end in first:
+        for b_start, b_end in second:
+            total += max(0.0, min(a_end, b_end) - max(a_start, b_start))
+    return total
+
+
+def _same_session(first, second, gap_ratio=_SESSION_GAP_RATIO,
+                  overlap_ratio=_SESSION_OVERLAP_RATIO):
+    """True when two frequency runs are hops of the same session.
+
+    Hops of one frequency-hopping signal occupy neighbouring bands at
+    different times, while two independent emitters are active at the same
+    time. Both conditions are required, so time-interleaved emitters in
+    distant bands and simultaneous emitters in adjacent bands stay separate.
+    Bandwidths are derived from the band edges, never cached, so merged
+    items stay consistent.
+    """
+    gap = max(first["f_low_hz"] - second["f_high_hz"],
+              second["f_low_hz"] - first["f_high_hz"])
+    first_width = first["f_high_hz"] - first["f_low_hz"]
+    second_width = second["f_high_hz"] - second["f_low_hz"]
+    if gap > gap_ratio * max(first_width, second_width):
+        return False
+    overlap = _overlap_seconds(first["intervals"], second["intervals"])
+    shorter = min(first["active_seconds"], second["active_seconds"])
+    return overlap <= overlap_ratio * shorter
+
+
+def _combine_sessions(left, right):
+    """Power-weighted union of two provisional detections."""
+    power = left["power_linear"] + right["power_linear"]
+    centroid = ((left["power_linear"] * left["centroid_hz"]
+                 + right["power_linear"] * right["centroid_hz"]) / power
+                if power > 0 else 0.5 * (left["centroid_hz"] + right["centroid_hz"]))
+    intervals = sorted(left["intervals"] + right["intervals"])
+    active_seconds = sum(end - start for start, end in intervals)
+    f_low = min(left["f_low_hz"], right["f_low_hz"])
+    f_high = max(left["f_high_hz"], right["f_high_hz"])
+    return {
+        "center_hz": 0.5 * (f_low + f_high),
+        "centroid_hz": float(centroid),
+        "f_low_hz": f_low,
+        "f_high_hz": f_high,
+        "power_linear": float(power),
+        "intervals": intervals,
+        "active_seconds": float(active_seconds),
+        "t_start_s": intervals[0][0],
+        "t_end_s": intervals[-1][1],
+        "bin_count": left["bin_count"] + right["bin_count"],
+        "sub_bands": left["sub_bands"] + right["sub_bands"],
+        "occupied_f_low_hz": min(left["occupied_f_low_hz"], right["occupied_f_low_hz"]),
+        "occupied_f_high_hz": max(left["occupied_f_high_hz"], right["occupied_f_high_hz"]),
+    }
+
+
+def _merge_sessions(items, max_detections=256):
+    """Merge hop runs into one instance per session (user agreed semantics)."""
+    groups = [dict(item) for item in items]
+    changed = True
+    while changed and len(groups) > 1:
+        changed = False
+        for i in range(len(groups)):
+            for j in range(len(groups) - 1, i, -1):
+                if not _same_session(groups[i], groups[j]):
+                    continue
+                groups[i] = _combine_sessions(groups[i], groups[j])
+                groups.pop(j)
+                changed = True
+                break
+            if changed:
+                break
+    groups.sort(key=lambda item: -item["power_linear"])
+    return groups[:max_detections]
+
+
+def detect_signals(samples, sample_rate, config=None):
+    """Spectrum-energy detector with parameter estimation.
+
+    Pipeline (all NumPy, Cython-compilable):
+
+    1. Hanning STFT shared with :func:`analyze`, then the **time-averaged**
+       PSD: averaging keeps band power and in-band SNR unbiased, and because
+       only one hop channel is active at a time a hopping session still
+       shows every channel above the floor.
+    2. Noise floor by iterative median + MAD sigma clipping.
+    3. Threshold on the averaged PSD, morphological closing to avoid ripping
+       one signal into pieces, then discard runs narrower than
+       ``min_bandwidth_hz``.
+    4. Per run: the band is the noise-referenced extent of the run (edges
+       aligned to bin edges), band power and in-band SNR
+       ``10·log10(P_band / (N0·B))`` where ``N0`` is the estimated noise
+       power spectral density (``inband_snr_v1``, identical to the
+       generator convention). ``center_hz`` is the band midpoint, which is
+       exactly how the generator truth defines the centre of the occupied
+       interval and is the only definition that stays meaningful for a
+       hopping session (the energy centroid wanders with the random hop
+       dwell); the power-weighted centroid is still reported as
+       ``centroid_hz``. The classic 99% power-occupancy interval is
+       reported as ``occupied_f_low_hz``/``occupied_f_high_hz`` for
+       traceability; it is not used as ``bandwidth_hz`` because a
+       carrier-dominated signal (AM) would collapse onto its carrier line,
+       while ``bandwidth_actual`` from the generator is the band-limited
+       spectrum extent that the noise-referenced run measures.
+    5. Time support from the per-frame band power.
+
+    Hopping signals follow the agreed "one session, one instance" rule: the
+    hop runs of one session are merged when they sit in neighbouring bands
+    and are active at different times, so a frequency hopping signal is
+    reported as one detection whose band equals the whole session band —
+    which is exactly what the generator truth (``bandwidth_actual``)
+    reports. ``session_id`` is non-null only for such merged sessions, and
+    ``hopping`` marks them, so a later multi-instance detector can reuse
+    both fields.
+
+    Returns ``(summary, arrays)`` like :func:`analyze`; the summary follows
+    the frozen ``detect_result_v1`` contract.
+    """
+    x = validate_samples(samples)
+    rate = validate_rate(sample_rate)
+    duration = float(x.size / rate)
+    resolved = _detect_config(rate, duration, config)
+    nfft = resolved["nfft"]
+    resolution = resolved["freq_resolution_hz"]
+    threshold_db = resolved["threshold_db"]
+
+    psd, frequencies, starts, hop = _stft_psd(x, rate, nfft)
+    psd_average = psd.mean(axis=0)
+    psd_db = 10.0 * np.log10(np.maximum(psd_average, 1e-30))
+    noise_floor_db = _noise_floor_db(psd_db, threshold_db)
+    threshold_dbfs = noise_floor_db + threshold_db
+    noise_linear = 10.0 ** (noise_floor_db / 10.0)
+
+    mask = _binary_close(psd_db > threshold_dbfs, resolved["merge_bins"])
+    runs = [(start, stop) for start, stop in _true_runs(mask)
+            if stop - start + 1 >= resolved["min_bandwidth_bins"]]
+    detect_mask = np.zeros(psd_db.size, dtype=bool)
+    for start, stop in runs:
+        detect_mask[start:stop + 1] = True
+    # 带宽测量门限（低于检测门限）：检出用高门限，量带宽用低门限
+    if resolved["band_threshold_db"] < threshold_db:
+        edge_mask = _binary_close(
+            psd_db > noise_floor_db + resolved["band_threshold_db"], resolved["merge_bins"])
+    else:
+        edge_mask = mask
+    regions = _band_regions(detect_mask, edge_mask)
+
+    frame_starts = np.clip(starts / rate, 0.0, duration)
+    frame_ends = np.clip((starts + nfft) / rate, 0.0, duration)
+    candidates = []
+    for first, last, inner in regions:
+        occupancy_low, occupancy_high = _occupied_span(psd_average, first, last)
+        weights = np.where(detect_mask[first:last + 1], psd_average[first:last + 1], 0.0)
+        weight_sum = float(psd_average[first:last + 1].sum())
+        if weight_sum <= 0:
+            continue
+        signal_sum = float(weights.sum())
+        band_frequencies = frequencies[first:last + 1]
+        centroid = (float((weights * band_frequencies).sum() / signal_sum)
+                    if signal_sum > 0 else float(band_frequencies.mean()))
+        f_low = float(band_frequencies[0] - resolution / 2.0)
+        f_high = float(band_frequencies[-1] + resolution / 2.0)
+        bandwidth = f_high - f_low
+        band_power = float(weight_sum * resolution)
+        # 时间支撑：按帧的带内功率与噪声参考功率比较
+        frame_power = np.asarray(psd[:, first:last + 1].sum(axis=1), dtype=np.float64) * resolution
+        active = frame_power > noise_linear * bandwidth * 10.0 ** (threshold_db / 10.0)
+        if not active.any():
+            active = np.ones(frame_power.size, dtype=bool)
+        active_index = np.flatnonzero(active)
+        t_start = float(frame_starts[active_index[0]])
+        t_end = float(frame_ends[active_index[-1]])
+        if t_end - t_start < resolved["min_duration_s"]:
+            continue
+        intervals = [(float(frame_starts[position]), float(frame_ends[position]))
+                     for position in active_index]
+        candidates.append({
+            "center_hz": 0.5 * (f_low + f_high),
+            "centroid_hz": centroid,
+            "f_low_hz": f_low,
+            "f_high_hz": f_high,
+            "power_linear": band_power,
+            "intervals": intervals,
+            "active_seconds": float(t_end - t_start),
+            "t_start_s": t_start,
+            "t_end_s": t_end,
+            "bin_count": int(sum(stop - start + 1 for start, stop in inner)),
+            "sub_bands": 1,
+            "occupied_f_low_hz": float(frequencies[occupancy_low] - resolution / 2.0),
+            "occupied_f_high_hz": float(frequencies[occupancy_high] + resolution / 2.0),
+        })
+
+    groups = _merge_sessions(candidates, resolved["max_detections"])
+    groups.sort(key=lambda item: item["center_hz"])
+    detections = []
+    for index, item in enumerate(groups, start=1):
+        bandwidth = item["f_high_hz"] - item["f_low_hz"]
+        # 噪声参考功率：同带宽白噪声功率 N0·B（inband_snr_v1 口径）
+        noise_band = max(noise_linear * bandwidth, 1e-30)
+        signal_power = max(item["power_linear"] - noise_band, 1e-30)
+        snr_db = float(max(10.0 * np.log10(signal_power / noise_band), _SNR_FLOOR_DB))
+        hopping = item["sub_bands"] > 1
+        detections.append({
+            "id": index,
+            "method": "energy",
+            "center_hz": round(item["center_hz"], 3),
+            "centroid_hz": round(item["centroid_hz"], 3),
+            "bandwidth_hz": round(bandwidth, 3),
+            "f_low_hz": round(item["f_low_hz"], 3),
+            "f_high_hz": round(item["f_high_hz"], 3),
+            "t_start_s": round(item["t_start_s"], 6),
+            "t_end_s": round(item["t_end_s"], 6),
+            "power_dbfs": round(float(10.0 * np.log10(max(item["power_linear"], 1e-30))), 3),
+            "snr_db": round(snr_db, 3),
+            "session_id": index if hopping else None,
+            "confidence": round(float(np.clip((snr_db + 5.0) / 25.0, 0.0, 1.0)), 3),
+            "hopping": hopping,
+            "sub_bands": int(item["sub_bands"]),
+            "bin_count": int(item["bin_count"]),
+            "occupied_f_low_hz": round(item["occupied_f_low_hz"], 3),
+            "occupied_f_high_hz": round(item["occupied_f_high_hz"], 3),
+        })
+
+    summary = {
+        "contract": "detect_result_v1",
+        "algorithm": DETECT_ALGORITHM,
+        "snr_definition": DETECT_SNR_DEFINITION,
+        "frequency_reference": "baseband_offset",
+        "sample_rate_hz": rate,
+        "sample_count": int(x.size),
+        "duration_s": duration,
+        "nfft": nfft,
+        "hop_samples": hop,
+        "frame_count": int(psd.shape[0]),
+        "config": {
+            "nfft": nfft,
+            "threshold_db": threshold_db,
+            "band_threshold_db": resolved["band_threshold_db"],
+            "min_bandwidth_hz": round(resolved["min_bandwidth_hz"], 6),
+            "min_duration_s": resolved["min_duration_s"],
+            "max_detections": resolved["max_detections"],
+            "merge_bins": resolved["merge_bins"],
+        },
+        "freq_resolution_hz": resolution,
+        "noise_floor_dbfs_per_hz": round(noise_floor_db, 3),
+        "threshold_dbfs_per_hz": round(threshold_dbfs, 3),
+        "detections": detections,
+    }
+    box_rows = [[item["f_low_hz"], item["f_high_hz"], item["t_start_s"], item["t_end_s"]]
+                for item in detections]
+    arrays = {
+        "frequency": frequencies,
+        "frame_time": (starts + (nfft - 1) / 2.0) / rate,
+        "spectrogram_db": (10.0 * np.log10(np.maximum(psd, 1e-30))).astype(np.float32),
+        # 检测依据：时间平均 PSD（与频谱页口径一致）；中位数 PSD 作对照
+        "spectrum_db": 10.0 * np.log10(np.maximum(psd_average, 1e-30)),
+        "spectrum_median_db": 10.0 * np.log10(np.maximum(np.median(psd, axis=0), 1e-30)),
+        "threshold_db": np.array([threshold_dbfs], dtype=np.float64),
+        "noise_floor_db": np.array([noise_floor_db], dtype=np.float64),
+        "detection_boxes": np.array(box_rows, dtype=np.float64).reshape(-1, 4),
+        "detection_id": np.array([item["id"] for item in detections], dtype=np.int64),
+        "detection_snr_db": np.array([item["snr_db"] for item in detections], dtype=np.float64),
+        "detection_power_dbfs": np.array([item["power_dbfs"] for item in detections], dtype=np.float64),
+    }
+    return summary, arrays

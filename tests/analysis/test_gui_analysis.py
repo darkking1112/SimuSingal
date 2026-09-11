@@ -58,7 +58,7 @@ def test_analysis_gui_workflow(tmp_path, monkeypatch):
     window = MainWindow(tmp_path)
     window.show()
     try:
-        assert window.tabs.count() == 3
+        assert window.tabs.count() == 6
         assert not hasattr(window, "sim_button")
         window.demo_button.click()
         wait_job(app, window)
@@ -78,6 +78,43 @@ def test_analysis_gui_workflow(tmp_path, monkeypatch):
         window.export_current()
         import json
         assert json.loads(output.read_text(encoding="utf-8"))["kind"] == "analysis"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.gui
+def test_compare_page_pairs_ai_with_baseline(tmp_path):
+    """对比页在 AI 检测结果上并排列出传统基线（这里用契约化的 payload 直接驱动渲染）。"""
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(tmp_path)
+    window.show()
+    try:
+        def metrics(matched, precision, snr_mae):
+            return {"true": 2, "matched": matched, "missed": 2 - matched, "false_alarm": 0,
+                    "precision": precision, "recall": matched / 2, "f1": precision,
+                    "center_mae_hz": 500.0, "bandwidth_mape": 0.02, "snr_mae_db": snr_mae}
+        window.tab_results[2] = {
+            "kind": "ml_detect", "asset_id": "a1", "asset_name": "合成数据",
+            "algorithm": "onnx_yolox_v1", "contract": "detect_result_v1",
+            "model": {"id": "dut", "version": "1.0.0"},
+            "summary": {"detections": [{}, {}], "threshold_dbfs_per_hz": 3.0,
+                        "model": {"id": "dut", "version": "1.0.0"}},
+            "metrics": metrics(2, 1.0, 0.4), "baseline_metrics": metrics(1, 0.5, 0.9)}
+        window.compare_from_detect()
+        assert window.tabs.currentIndex() == 4
+        table = window.compare_table
+        assert table.rowCount() == 20  # 10 项指标 × 两条路径
+        assert [table.horizontalHeaderItem(i).text() for i in range(4)] == ["环节", "对象", "指标", "取值"]
+        objects = {table.item(row, 1).text() for row in range(table.rowCount())}
+        assert any(text.startswith("AI 检测 · dut@1.0.0") for text in objects)
+        assert "传统基线（能量检测）" in objects
+        text = window.compare_summary.toPlainText()
+        assert "并排对比" in text and "传统基线" in text
+        # 没有识别结果时不编造内容，只提示需要先跑一次
+        window.tab_results.pop(3, None)
+        window._render_compare()
+        assert "识别模型来源" not in window.compare_summary.toPlainText()
     finally:
         window.close()
         app.processEvents()
@@ -139,7 +176,7 @@ def test_iq_generation_gui_workflow(tmp_path):
     window = MainWindow(tmp_path)
     window.show()
     try:
-        assert window.tabs.count() == 3
+        assert window.tabs.count() == 6
         window.tabs.setCurrentIndex(1)
         assert window.gen_signals.rowCount() == 0
         window.add_iq_signal({"mode": "qpsk", "offset": 100_000.0, "power_dbfs": -10.0,
@@ -159,6 +196,67 @@ def test_iq_generation_gui_workflow(tmp_path):
         export = tmp_path / "exports" / f"{window.last_result['id']}.bin"
         assert export.exists()
         assert export.stat().st_size > 0
+    finally:
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.gui
+def test_detection_tab_workflow(tmp_path):
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(tmp_path)
+    window.show()
+    try:
+        window.tabs.setCurrentIndex(1)
+        window.gen_duration.setValue(0.5)
+        window.gen_rate.setValue(1_000_000.0)
+        window.gen_snr.setValue(20.0)
+        window.add_iq_signal({"mode": "qpsk", "offset": 120_000.0, "power_dbfs": -10.0,
+                              "bandwidth": 100_000.0})
+        window.generate_button.click()
+        wait_job(app, window)
+        # 带宽门限默认跟随检测门限的一半，可切换为手动并受上界约束
+        assert window.detect_band_auto.isChecked()
+        assert not window.detect_band_threshold.isEnabled()
+        window.detect_threshold.setValue(0.5)
+        assert 0 < window.detect_band_threshold.value() <= 0.5
+        window.detect_threshold.setValue(3.0)
+        assert window.detect_band_threshold.value() == pytest.approx(1.5)
+        window.detect_band_auto.setChecked(False)
+        assert window.detect_band_threshold.isEnabled()
+        window.detect_band_threshold.setValue(2.0)
+        window.detect_threshold.setValue(1.0)
+        assert window.detect_band_threshold.value() <= 1.0
+        window.detect_threshold.setValue(3.0)
+        window.detect_band_auto.setChecked(True)
+        window.tabs.setCurrentIndex(2)
+        window.detect_button.click()
+        wait_job(app, window)
+        result = window.last_result
+        assert result["kind"] == "detect"
+        assert result["contract"] == "detect_result_v1"
+        assert result["algorithm"] == "energy_detect_v1"
+        assert len(result["summary"]["detections"]) == 1
+        assert window.detect_table.rowCount() == 1
+        assert len(window._detect_items) == 1
+        assert window.detect_tf_image.image.ndim == 2
+        assert window.detect_spectrum.listDataItems()
+        assert result["metrics"]["matched"] == 1
+        assert 0 < result["metrics"]["center_mae_hz"] < 2000.0
+        text = window.detect_summary.toPlainText()
+        assert "噪声本底" in text and "真值" in text and "中心频率" in text
+        # “算法对比”页随检测结果同步填充；传统检测路径没有对照基线，会明确说明
+        assert window.compare_table.rowCount() == 10
+        assert "没有同步运行传统基线" in window.compare_summary.toPlainText()
+        # 参数控件确实透传到后端配置
+        window.detect_nfft.setCurrentText("1024")
+        window.detect_merge.setCurrentText("8")
+        window.detect_max.setValue(4)
+        window.detect_button.click()
+        wait_job(app, window)
+        config = window.last_result["summary"]["config"]
+        assert window.last_result["summary"]["nfft"] == 1024
+        assert config["merge_bins"] == 8 and config["max_detections"] == 4
     finally:
         window.close()
         app.processEvents()
@@ -327,6 +425,31 @@ def test_constellation_and_playback(tmp_path):
         assert window._play_data is not None
         window.asset_changed()
         assert window._play_data is None
+    finally:
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.gui
+def test_ml_controls_follow_runtime_availability(tmp_path, monkeypatch):
+    """推理运行时缺失时禁用 AI 入口并给出安装提示，传统检测路径不受影响。"""
+    from signal_analysis.ml import runtime as ml_runtime
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(tmp_path)
+    try:
+        widgets = (window.ml_button, window.ml_choose, window.ml_score, window.ml_iou,
+                   window.ml_compare)
+        monkeypatch.setattr(ml_runtime, "runtime_version", lambda: None)
+        window.update_ml_controls()
+        assert not any(widget.isEnabled() for widget in widgets)
+        status = window.ml_status.text()
+        assert "onnxruntime" in status and "[ml]" in status
+        assert window.detect_button.isEnabled()
+        monkeypatch.setattr(ml_runtime, "runtime_version", lambda: "1.17.0")
+        window.update_ml_controls()
+        assert all(widget.isEnabled() for widget in widgets)
+        assert window.ml_status.text() == "onnxruntime 1.17.0"
     finally:
         window.close()
         app.processEvents()

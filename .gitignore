@@ -220,3 +220,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Generated training datasets (reproducible from scripts and a seed)
+training/data/

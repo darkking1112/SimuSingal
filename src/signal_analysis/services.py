@@ -2,8 +2,9 @@
 
 from pathlib import Path
 
-from .core_api import MODE_NAMES, analyze, generate_iq, make_demo
+from .core_api import MODE_NAMES, analyze, detect_signals, generate_iq, make_demo
 from .dataio import read_samples, write_samples
+from .evaluation import evaluate_detections, signal_truth
 from .sigmf_io import SIGMF_EXTENSIONS, read_sigmf
 from .plugins import call_demo_plugin
 from .storage import Workspace
@@ -13,6 +14,57 @@ def _generated_name(signals):
     styles = sorted({MODE_NAMES.get(str(signal.get("mode", "")), str(signal.get("mode", "")))
                      for signal in signals})
     return f"IQ 生成 · {' + '.join(styles)}"
+
+
+def _attach_truth(payload, workspace, asset_id, summary):
+    """给检测结果补上生成器真值与评分（AI 路径同时给出传统基线评分）。"""
+    truth = signal_truth(workspace.get_metadata(asset_id).get("generation"))
+    if not truth:
+        return payload
+    payload["truth"] = truth
+    payload["metrics"] = evaluate_detections(truth, summary["detections"])
+    baseline = summary.get("baseline")
+    if isinstance(baseline, dict) and baseline.get("detections"):
+        payload["baseline_metrics"] = evaluate_detections(truth, baseline["detections"])
+    return payload
+
+
+def _attach_amc_truth(payload, workspace, asset_id):
+    """给调制识别结果附上生成器真值。
+
+    只有“生成器产出且仅含单个信号”时才能与真值直接比对；其余情况显式标注为
+    “不适用”（而不是静默跳过），与 A09 的“不适用必须计数”一致。
+    """
+    from .ml import mode_to_class
+
+    truth = signal_truth(workspace.get_metadata(asset_id).get("generation"))
+    prediction = payload["prediction"]
+    if not truth:
+        payload["truth"] = {"available": False,
+                            "reason": "数据没有生成器真值（导入或原生插件产出），不计算识别正误"}
+        payload["truth_hit"] = None
+        return payload
+    if len(truth) != 1:
+        payload["truth"] = {
+            "available": False, "count": len(truth),
+            "reason": f"生成数据含 {len(truth)} 个信号，单频带识别结果不与真值直接比对"}
+        payload["truth_hit"] = None
+        return payload
+    entry = truth[0]
+    truth_class = mode_to_class(entry["mode"])
+    payload["truth"] = {
+        "available": truth_class is not None,
+        "mode": entry["mode"],
+        "class": truth_class,
+        "center_hz": entry["center_hz"],
+        "bandwidth_hz": entry["bandwidth_hz"],
+        "snr_inband_db": entry["snr_inband_db"],
+        "reason": None if truth_class is not None else
+                  f"生成样式 {entry['mode']} 不在 A09 六类字典内，按“不适用”计",
+    }
+    payload["truth_hit"] = (None if truth_class is None
+                            else prediction["label"] == truth_class)
+    return payload
 
 
 def execute(request):
@@ -70,6 +122,42 @@ def execute(request):
         asset, data = workspace.load_samples(request["asset_id"])
         summary, arrays = analyze(data, asset["sample_rate"], request.get("nfft", 256))
         return workspace.save_run("analysis", {"summary": summary, "asset_name": asset["name"]}, arrays, asset["id"])
+    if action == "detect":
+        asset, data = workspace.load_samples(request["asset_id"])
+        summary, arrays = detect_signals(data, asset["sample_rate"], request.get("config"))
+        payload = {"summary": summary, "asset_name": asset["name"],
+                   "contract": summary["contract"], "algorithm": summary["algorithm"],
+                   "snr_definition": summary["snr_definition"]}
+        _attach_truth(payload, workspace, asset["id"], summary)
+        return workspace.save_run("detect", payload, arrays, asset["id"])
+    if action == "ml_detect":
+        from .ml import ml_detect
+
+        asset, data = workspace.load_samples(request["asset_id"])
+        summary, arrays = ml_detect(data, asset["sample_rate"], request.get("config"),
+                                    model=request.get("manifest"),
+                                    threads=request.get("threads"),
+                                    with_baseline=request.get("with_baseline", True))
+        payload = {"summary": summary, "asset_name": asset["name"],
+                   "contract": summary["contract"], "algorithm": summary["algorithm"],
+                   "snr_definition": summary["snr_definition"], "model": summary["model"]}
+        # 同一份数据上的传统基线：AI 与会话合并口径一致，可直接并排比较
+        _attach_truth(payload, workspace, asset["id"], summary)
+        return workspace.save_run("ml_detect", payload, arrays, asset["id"])
+    if action == "amc_classify":
+        from .ml import amc_classify
+
+        asset, data = workspace.load_samples(request["asset_id"])
+        result = amc_classify(data, asset["sample_rate"], request.get("config"),
+                              model=request.get("model"), threads=request.get("threads"))
+        payload = {"summary": result, "asset_name": asset["name"],
+                   "contract": result["contract"], "algorithm": result["algorithm"],
+                   "feature_contract": result["feature_contract"],
+                   "snr_estimate_db": result["snr_estimate_db"],
+                   "prediction": result["prediction"], "model": result["model"],
+                   "band": result["band"], "pending": result["pending"]}
+        _attach_amc_truth(payload, workspace, asset["id"])
+        return workspace.save_run("amc_classify", payload, None, asset["id"])
     if action == "native":
         asset, data = workspace.load_samples(request["asset_id"])
         manifest, result = call_demo_plugin(request["manifest"], data)

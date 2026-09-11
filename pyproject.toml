@@ -12,6 +12,10 @@ dependencies = ["numpy>=1.26,<3", "simpy>=4.1,<5", "sigmf==1.11.1"]
 [project.optional-dependencies]
 gui = ["PySide6>=6.6,<7", "pyqtgraph>=0.13,<0.15"]
 dev = ["pytest>=8,<10", "Cython>=3,<4", "build>=1,<2", "pyinstaller>=6,<7"]
+# AI 检测：ONNX Runtime 推理。不安装时 ml-detect 会给出安装提示，传统检测路径不受影响
+ml = ["onnxruntime>=1.17,<2"]
+# 模型训练：仅 training/ 目录下的脚本使用，不随发布包分发
+train = ["torch>=2.2,<3", "torchvision>=0.17,<1", "onnx>=1.16,<2"]
 
 [project.scripts]
 signal-analysis = "signal_analysis.cli:main"
@@ -20,7 +24,13 @@ communication-sim = "communication_sim.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# 随包分发的模型文件：内置调制识别基线（合成数据训练，可复核、可重训）
+[tool.setuptools.package-data]
+"signal_analysis.ml" = ["*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-markers = ["gui: requires PySide6 and an offscreen Qt platform", "native: builds a local C shared library"]
+markers = ["gui: requires PySide6 and an offscreen Qt platform",
+           "native: builds a local C shared library",
+           "ml: needs onnxruntime (the [ml] extra) and an exported ONNX model"]

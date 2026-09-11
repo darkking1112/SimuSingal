@@ -58,6 +58,46 @@ def test_invalid_import_does_not_create_asset(tmp_path):
     assert list((tmp_path / "assets").iterdir()) == []
 
 
+def _fake_metrics(precision, matched):
+    return {"true": 3, "matched": matched, "missed": 3 - matched, "false_alarm": 1,
+            "precision": precision, "recall": 0.5, "f1": 0.6, "center_mae_hz": 1200.0,
+            "bandwidth_mape": 0.04, "snr_mae_db": 0.5}
+
+
+def test_html_report_has_metric_tables(tmp_path):
+    baseline = _fake_metrics(0.5678, 1)
+    del baseline["snr_mae_db"]  # 传统基线没有该项：表格必须显示 “--”，不能写成 0
+    detection = tmp_path / "detect.html"
+    export_report({"kind": "ml_detect", "run_id": "r1", "asset_name": "合成数据",
+                   "algorithm": "yolox_detect_v1", "contract": "detect_result_v1",
+                   "metrics": _fake_metrics(0.9123, 2), "baseline_metrics": baseline},
+                  detection)
+    page = detection.read_text(encoding="utf-8")
+    # 检测结果与传统基线并排成表：两列数值都要出现
+    assert "<th>检测结果</th>" in page and "<th>传统基线</th>" in page
+    assert "<td>0.9123</td>" in page and "<td>0.5678</td>" in page
+    assert "中心频率 MAE / Hz" in page and "<td>1200.0</td>" in page
+    assert "<td>--</td>" in page
+    # 无真值时不编造指标，只保留原始 JSON
+    plain = tmp_path / "detect-none.html"
+    export_report({"kind": "detect", "run_id": "r2", "metrics": None}, plain)
+    assert "检测评测" not in plain.read_text(encoding="utf-8")
+
+
+def test_html_report_amc_section_counts_pending(tmp_path):
+    report = tmp_path / "amc.html"
+    export_report({"kind": "amc_classify", "run_id": "r3", "asset_name": "QPSK 数据",
+                   "prediction": {"label": "qpsk", "name": "QPSK 四相键控", "confidence": 0.99,
+                                  "margin": 0.8, "reliable": True, "reason": "分数明确"},
+                   "truth": {"available": False, "reason": "数据没有生成器真值"}, "truth_hit": None,
+                   "pending": ["识别准确率的合格门限尚未确认（技术方案待确认项）"]},
+                  report)
+    page = report.read_text(encoding="utf-8")
+    assert "QPSK 四相键控" in page and "<td>0.9900</td>" in page
+    assert "按“不适用”计数，不丢弃样本" in page
+    assert "尚未确认项" in page and "合格门限尚未确认" in page
+
+
 def test_failed_run_does_not_leave_success_artifact(tmp_path):
     import sqlite3
     store = Workspace(tmp_path)

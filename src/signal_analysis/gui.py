@@ -6,6 +6,7 @@ import numpy as np
 from PySide6 import QtCore, QtWidgets
 import pyqtgraph as pg
 from common.gui import DesktopWindow
+from common.reports import amc_metrics, detection_metrics
 from .core_api import MAX_SAMPLES, plan_signal, spectrum_row
 from .storage import Workspace
 from .tasks import run_job
@@ -85,6 +86,25 @@ def _fmt_span(seconds):
     """Format a duration in ms / s."""
     seconds = float(seconds)
     return f"{seconds * 1000:g} ms" if seconds < 1.0 else f"{seconds:g} s"
+
+
+def _fmt_metric(value, spec):
+    """Format an optional metric; missing values (无真值/未定义) show as “--”。"""
+    return "--" if value is None else format(float(value), spec)
+
+
+def _comparison_line(left_label, left, right_label, right):
+    """One-line side-by-side detection metrics (AI vs traditional baseline)."""
+    fields = (("匹配", "matched", "g"), ("漏警", "missed", "g"), ("虚警", "false_alarm", "g"),
+              ("中心 MAE", "center_mae_hz", ".1f"), ("带宽相对误差", "bandwidth_mape", ".3f"),
+              ("信噪比 MAE", "snr_mae_db", ".2f"))
+    parts = [f"{name} {_fmt_metric(left.get(key), spec)} / {_fmt_metric(right.get(key), spec)}"
+             for name, key, spec in fields]
+    return (f"并排对比（{left_label} / {right_label}）：" + " · ".join(parts))
+
+
+_AMC_SOURCE_TEXT = {"builtin": "内置基线", "file": "指定模型文件", "onnx": "ONNX 分类器",
+                   "inline": "内存模型"}
 
 
 def _unit_row(spin):
@@ -411,8 +431,12 @@ class MainWindow(DesktopWindow):
     def __init__(self, workspace):
         self.asset_limit = 100
         super().__init__(Workspace(workspace), "电磁信号分析 · SignalAnalysis",
-                         "离线数据 · 通用统计与时频展示 · IQ 信号生成 · 原生插件")
+                         "离线数据 · 通用统计与时频展示 · IQ 信号生成 · 信号检测与调制识别 · "
+                         "算法对比与离线报告 · 原生插件")
         self.tabs.insertTab(1, self.build_generator(), "IQ 信号生成")
+        self.tabs.insertTab(2, self.build_detect(), "信号检测")
+        self.tabs.insertTab(3, self.build_amc(), "调制识别")
+        self.tabs.insertTab(4, self.build_compare(), "算法对比")
         self.last_result = None
         self._play_data = None
         self._play_rate = 1.0
@@ -434,7 +458,7 @@ class MainWindow(DesktopWindow):
 
     def job_buttons(self):
         return (self.demo_button, self.import_button, self.analyze_button, self.native_button,
-                self.generate_button)
+                self.generate_button, self.detect_button, self.ml_button, self.amc_button)
 
     def result_ready(self, result):
         self.refresh_assets()
@@ -498,7 +522,7 @@ class MainWindow(DesktopWindow):
         box = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(box)
         bar = QtWidgets.QHBoxLayout()
-        bar.addWidget(QtWidgets.QLabel("通用统计与时频展示 · 识别模型尚未配置"), 1)
+        bar.addWidget(QtWidgets.QLabel("通用统计与时频展示 · 调制识别见“调制识别”标签页"), 1)
         bar.addWidget(QtWidgets.QLabel("信号判定"))
         self.class_combo = QtWidgets.QComboBox()
         self.class_combo.addItems(["自动", "数字", "模拟"])
@@ -1011,6 +1035,629 @@ class MainWindow(DesktopWindow):
             self.start_job("native", asset_id=asset["id"], manifest=path)
 
 
+    def build_detect(self):
+        box = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(box)
+        intro = QtWidgets.QLabel(
+            "能量检测与参数估计（基线算法 energy_detect_v1）：对所选 IQ 记录做短时傅里叶变换，"
+            "以中位数 + MAD 估计噪声本底，高于检测门限的连续频段判为目标；带宽按较低的带宽门限在"
+            "同一连通区内测量，从而保留 AM 载波两侧较弱的边带。输出中心频率（功率重心所在频段的"
+            "中点）、占用带宽、起止时间、带内功率与带内信噪比（信号功率 / 同频段噪声功率）。"
+            "生成器产出的数据自带真值，可直接给出匹配、漏警、虚警与参数误差。"
+            "IQ 为复基带记录：中心频率指基带频率偏移，不是射频载频。")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        bar = QtWidgets.QHBoxLayout()
+        bar.addWidget(QtWidgets.QLabel("STFT 点数"))
+        self.detect_nfft = QtWidgets.QComboBox()
+        self.detect_nfft.addItems(["128", "256", "512", "1024", "2048", "4096"])
+        self.detect_nfft.setCurrentText("512")
+        self.detect_nfft.setToolTip("频点分辨率 = 采样率 / STFT 点数；点数越大频率越精细、时间粒度越粗")
+        bar.addWidget(self.detect_nfft)
+        bar.addWidget(QtWidgets.QLabel("检测门限"))
+        threshold_row, self.detect_threshold = _plain_spin(0.5, 60.0, 3.0, 1, "dB")
+        self.detect_threshold.setToolTip("高于噪声本底该值（dB）的频点参与检测，默认 3 dB")
+        bar.addWidget(threshold_row)
+        bar.addWidget(QtWidgets.QLabel("带宽门限"))
+        band_row, self.detect_band_threshold = _plain_spin(0.0, 60.0, 1.5, 1, "dB")
+        self.detect_band_threshold.setToolTip("测量占用带宽时使用的较低门限，不得超过检测门限；"
+                                              "越小越能保留弱边带，但噪声也更容易把频段抬宽")
+        bar.addWidget(band_row)
+        self.detect_band_auto = QtWidgets.QCheckBox("自动")
+        self.detect_band_auto.setChecked(True)
+        self.detect_band_auto.setToolTip("勾选时取检测门限的一半；取消后可自行指定，但不得超过检测门限")
+        self.detect_band_auto.toggled.connect(self.update_detect_controls)
+        self.detect_threshold.valueChanged.connect(self.update_detect_controls)
+        bar.addWidget(self.detect_band_auto)
+        bar.addWidget(QtWidgets.QLabel("最小带宽"))
+        width_row, self.detect_min_bandwidth = _freq_spin(0.0, 1e9, 0.0, 1)
+        self.detect_min_bandwidth.setToolTip("小于该占用带宽的频段视为噪声，0 表示自动取 3 个频点")
+        bar.addWidget(width_row)
+        bar.addWidget(QtWidgets.QLabel("最小时长"))
+        duration_row, self.detect_min_duration = _plain_spin(0.0, 3600.0, 0.0, 4, "s")
+        self.detect_min_duration.setToolTip("持续时间短于该值的目标将被丢弃，0 表示不限制")
+        bar.addWidget(duration_row)
+        bar.addWidget(QtWidgets.QLabel("最多目标"))
+        self.detect_max = QtWidgets.QSpinBox()
+        self.detect_max.setRange(1, 256)
+        self.detect_max.setValue(32)
+        self.detect_max.setToolTip("按带内功率从大到小保留的目标数")
+        bar.addWidget(self.detect_max)
+        bar.addWidget(QtWidgets.QLabel("平滑半径"))
+        self.detect_merge = QtWidgets.QComboBox()
+        self.detect_merge.addItems(["自动", "0", "1", "2", "4", "8", "16"])
+        self.detect_merge.setToolTip("形态学闭运算半径（频点），用于把同一目标被衰落切开的频段合并")
+        bar.addWidget(self.detect_merge)
+        self.detect_button = QtWidgets.QPushButton("检测所选数据")
+        self.detect_button.setObjectName("primary")
+        self.detect_button.clicked.connect(self.detect_selected)
+        bar.addWidget(self.detect_button)
+        bar.addStretch(1)
+        layout.addLayout(bar)
+        ai_bar = QtWidgets.QHBoxLayout()
+        ai_bar.addWidget(QtWidgets.QLabel("AI 模型清单"))
+        self.ml_manifest = QtWidgets.QLineEdit()
+        self.ml_manifest.setPlaceholderText("选择 ml-manifest 生成的 JSON（含 ONNX 相对路径与 SHA-256）")
+        self.ml_manifest.setToolTip("清单声明输入图像尺寸、STFT 点数与动态范围；推理时与清单不一致会直接报错")
+        ai_bar.addWidget(self.ml_manifest, 1)
+        self.ml_choose = QtWidgets.QPushButton("选择…")
+        self.ml_choose.clicked.connect(self.choose_ml_manifest)
+        ai_bar.addWidget(self.ml_choose)
+        ai_bar.addWidget(QtWidgets.QLabel("置信度阈值"))
+        self.ml_score = QtWidgets.QDoubleSpinBox()
+        self.ml_score.setRange(0.01, 0.99)
+        self.ml_score.setSingleStep(0.05)
+        self.ml_score.setDecimals(2)
+        self.ml_score.setValue(0.25)
+        self.ml_score.setToolTip("低于该置信度的模型候选框被丢弃，默认 0.25")
+        ai_bar.addWidget(self.ml_score)
+        ai_bar.addWidget(QtWidgets.QLabel("去重 IoU"))
+        self.ml_iou = QtWidgets.QDoubleSpinBox()
+        self.ml_iou.setRange(0.0, 1.0)
+        self.ml_iou.setSingleStep(0.05)
+        self.ml_iou.setDecimals(2)
+        self.ml_iou.setValue(0.5)
+        self.ml_iou.setToolTip("重叠度超过该值的同类别候选框只保留置信度最高的一个，默认 0.5")
+        ai_bar.addWidget(self.ml_iou)
+        self.ml_compare = QtWidgets.QCheckBox("并排对比传统检测")
+        self.ml_compare.setChecked(True)
+        self.ml_compare.setToolTip("勾选时在同一次任务里跑一遍能量检测作为基线，并给出两项指标对照")
+        ai_bar.addWidget(self.ml_compare)
+        self.ml_button = QtWidgets.QPushButton("AI 检测所选数据")
+        self.ml_button.setObjectName("primary")
+        self.ml_button.clicked.connect(self.ml_detect_selected)
+        ai_bar.addWidget(self.ml_button)
+        self.ml_status = QtWidgets.QLabel()
+        ai_bar.addWidget(self.ml_status)
+        ai_bar.addStretch(1)
+        layout.addLayout(ai_bar)
+        self.update_ml_controls()
+        grid = QtWidgets.QGridLayout()
+        self.detect_spectrum = pg.PlotWidget(title="平均功率谱密度与检测门限")
+        self.detect_spectrum.setLabel("bottom", "基带频率偏移", units="Hz")
+        self.detect_spectrum.setLabel("left", "PSD（dB，参考 1 任意单位²/Hz）")
+        self.detect_tf = pg.PlotWidget(title="时频图与检测框")
+        self.detect_tf.setLabel("bottom", "基带频率偏移", units="Hz")
+        self.detect_tf.setLabel("left", "时间", units="s")
+        self.detect_tf_image = pg.ImageItem(axisOrder="row-major")
+        self.detect_tf_image.setLookupTable(pg.colormap.get("viridis").getLookupTable())
+        self.detect_tf.addItem(self.detect_tf_image)
+        grid.addWidget(self.detect_spectrum, 0, 0)
+        grid.addWidget(self.detect_tf, 0, 1)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid, 1)
+        self._detect_items = []
+        lower = QtWidgets.QHBoxLayout()
+        self.detect_table = QtWidgets.QTableWidget(0, 9)
+        self.detect_table.setHorizontalHeaderLabels(
+            ["编号", "中心频率", "占用带宽", "频段范围", "时间范围", "功率 dBFS",
+             "带内 SNR", "会话", "备注"])
+        self.detect_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.detect_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.detect_table.horizontalHeader().setStretchLastSection(True)
+        self.detect_table.setMaximumHeight(180)
+        lower.addWidget(self.detect_table, 1)
+        self.detect_summary = QtWidgets.QPlainTextEdit()
+        self.detect_summary.setReadOnly(True)
+        self.detect_summary.setMaximumHeight(180)
+        self.detect_summary.setPlaceholderText("检测后显示噪声本底、门限、目标数量与参数误差。")
+        lower.addWidget(self.detect_summary, 1)
+        layout.addLayout(lower)
+        self.update_detect_controls()
+        return box
+
+
+    def build_amc(self):
+        box = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(box)
+        intro = QtWidgets.QLabel(
+            "A09 六类调制识别（AMC）：FM、SSB、2ASK、QPSK、16QAM、64QAM。在指定分析频带内提取确定性"
+            "NumPy 特征（包络统计、谱平坦度、瞬时频率与相位统计、高阶累积量、峰值幅度直方图模板、"
+            "带内信噪比粗估），再由线性判别模型给出六类概率。默认使用随包分发的合成数据基线模型，"
+            "也可以选择自训练模型 JSON 或 ONNX 分类器清单。识别准确率的合格门限尚未确认；低信噪比"
+            "（<5 dB）或最高类概率偏低时会标注“仅供参考”，无法映射到六类的样式（如 AM、跳频会话）"
+            "按“不适用”计数，不丢弃样本。"
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        bar = QtWidgets.QHBoxLayout()
+        bar.addWidget(QtWidgets.QLabel("分析中心"))
+        center_row, self.amc_offset = _freq_spin(-1e9, 1e9, 0.0, 1)
+        self.amc_offset.setToolTip("信号占用的中心频率（相对基带的频率偏移），0 表示基带中心")
+        bar.addWidget(center_row)
+        bar.addWidget(QtWidgets.QLabel("分析带宽"))
+        width_row, self.amc_bandwidth = _freq_spin(0.0, 1e9, 0.0, 1)
+        self.amc_bandwidth.setToolTip("信号占用带宽（Hz），0 表示使用整段采样带宽（不做抽取）")
+        bar.addWidget(width_row)
+        self.amc_button = QtWidgets.QPushButton("识别所选数据")
+        self.amc_button.setObjectName("primary")
+        self.amc_button.clicked.connect(self.amc_classify_selected)
+        bar.addWidget(self.amc_button)
+        self.amc_from_detect = QtWidgets.QPushButton("取用检测结果频带")
+        self.amc_from_detect.setToolTip(
+            "把最近一次检测结果中功率最大的目标中心频率与带宽填进左侧输入框")
+        self.amc_from_detect.clicked.connect(self.use_detected_band)
+        bar.addWidget(self.amc_from_detect)
+        bar.addStretch(1)
+        layout.addLayout(bar)
+        model_bar = QtWidgets.QHBoxLayout()
+        model_bar.addWidget(QtWidgets.QLabel("识别模型"))
+        self.amc_model = QtWidgets.QLineEdit()
+        self.amc_model.setPlaceholderText("留空使用内置线性基线；也可选择自训练模型 JSON 或 ONNX 清单")
+        self.amc_model.setToolTip("模型 JSON 为 amc_model_v1；ONNX 清单为 amc-manifest 生成的 JSON")
+        model_bar.addWidget(self.amc_model, 1)
+        self.amc_choose = QtWidgets.QPushButton("选择…")
+        self.amc_choose.clicked.connect(self.choose_amc_model)
+        model_bar.addWidget(self.amc_choose)
+        self.amc_model_status = QtWidgets.QLabel()
+        model_bar.addWidget(self.amc_model_status)
+        model_bar.addStretch(1)
+        layout.addLayout(model_bar)
+        grid = QtWidgets.QGridLayout()
+        self.amc_plot = pg.PlotWidget(title="六类后验概率")
+        self.amc_plot.setLabel("left", "概率")
+        self.amc_bars = None
+        grid.addWidget(self.amc_plot, 0, 0)
+        self.amc_table = QtWidgets.QTableWidget(0, 2)
+        self.amc_table.setHorizontalHeaderLabels(["特征", "取值"])
+        self.amc_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.amc_table.horizontalHeader().setStretchLastSection(True)
+        self.amc_table.setMaximumWidth(320)
+        grid.addWidget(self.amc_table, 0, 1)
+        grid.setColumnStretch(0, 3)
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid, 1)
+        self.amc_summary = QtWidgets.QPlainTextEdit()
+        self.amc_summary.setReadOnly(True)
+        self.amc_summary.setMaximumHeight(215)
+        self.amc_summary.setPlaceholderText("识别后显示模型来源、六类概率、可信度提示与真值对照。")
+        layout.addWidget(self.amc_summary)
+        self.update_amc_controls()
+        return box
+
+
+    def update_amc_controls(self):
+        """显示内置模型是否随包分发（缺失时给出自训练指引，不影响手动选模型）。"""
+        from .ml import default_model_path
+
+        present = default_model_path().is_file()
+        self.amc_model_status.setText(
+            "内置线性基线可用" if present else
+            "未找到内置模型，请先运行 training/train_amc.py，或手动选择模型文件")
+
+
+    def build_compare(self):
+        """算法对比页：同一份数据上传统基线与 AI 路径的指标并排。"""
+        box = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(box)
+        intro = QtWidgets.QLabel(
+            "把同一个数据资产上的两条路径排在一起：信号检测侧的“检测结果 / 传统基线”取自 AI 检测运行时"
+            "同步跑的能量检测，两者使用同一套真值、同一套会话合并口径；调制识别侧列出模型输出、"
+            "生成器真值与命中情况。没有生成器真值（导入或原生插件产出）时只列结果、不计算指标，"
+            "按“不适用”计数而不是静默丢弃。"
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        bar = QtWidgets.QHBoxLayout()
+        self.compare_refresh = QtWidgets.QPushButton("刷新对比")
+        self.compare_refresh.setToolTip("使用最近的检测与调制识别结果重新填表")
+        self.compare_refresh.clicked.connect(self.compare_from_detect)
+        bar.addWidget(self.compare_refresh)
+        bar.addStretch(1)
+        layout.addLayout(bar)
+        self.compare_table = QtWidgets.QTableWidget(0, 4)
+        self.compare_table.setHorizontalHeaderLabels(["环节", "对象", "指标", "取值"])
+        self.compare_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.compare_table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.compare_table, 3)
+        self.compare_summary = QtWidgets.QPlainTextEdit()
+        self.compare_summary.setReadOnly(True)
+        self.compare_summary.setPlaceholderText(
+            "运行“信号检测”（或 AI 检测）与“调制识别”后，这里显示并排对比与未确认项。")
+        layout.addWidget(self.compare_summary, 2)
+        return box
+
+
+    def compare_from_detect(self):
+        self._render_compare(switch=True)
+
+
+    def _object_label(self, prefix, result):
+        """表格里的对象名：有模型就带模型标识，否则用路径名。"""
+        model = (result or {}).get("model") or {}
+        if not model.get("id"):
+            return prefix
+        return f"{prefix} · {model['id']}@{model.get('version', '--')}"
+
+
+    def _render_compare(self, switch=False):
+        """把最近一次检测（AI/传统）与调制识别结果整理成并排表格。"""
+        detect = self.tab_results.get(2)
+        amc = self.tab_results.get(3)
+        rows = []
+        lines = []
+        if detect:
+            summary = detect.get("summary") or {}
+            metrics = detect.get("metrics")
+            baseline = detect.get("baseline_metrics")
+            main_label = self._object_label(
+                "AI 检测" if summary.get("model") else "能量检测", summary)
+            lines = [
+                f"检测数据：{detect.get('asset_name', detect.get('asset_id'))}  |  "
+                f"算法 {detect.get('algorithm')}（契约 {detect.get('contract')}）",
+                f"检出目标 {len(summary.get('detections') or [])} 个 · "
+                f"门限 {_fmt_metric(summary.get('threshold_dbfs_per_hz'), '.1f')} dB/Hz",
+            ]
+            if metrics:
+                for name, value in detection_metrics(metrics):
+                    rows.append(("信号检测", main_label, name, value))
+                if baseline:
+                    for name, value in detection_metrics(baseline):
+                        rows.append(("信号检测", "传统基线（能量检测）", name, value))
+                    lines.append(_comparison_line(main_label, metrics,
+                                                  "传统基线", baseline))
+                else:
+                    lines.append("本次检测没有同步运行传统基线，无法并排展示；"
+                                 "AI 检测页勾选“同时跑能量检测”即可对照。")
+            else:
+                lines.append("该数据没有生成器真值，只列检测结果，不计算指标（不适用）。")
+        if amc:
+            prediction = amc.get("prediction") or {}
+            model = amc.get("model") or {}
+            truth = amc.get("truth") or {}
+            label = self._object_label("调制识别", {"model": model})
+            for name, value in amc_metrics(prediction):
+                rows.append(("调制识别", label, name, value))
+            if truth.get("available"):
+                hit = amc.get("truth_hit")
+                rows.append(("调制识别", "生成器真值", "真值类别 / 样式",
+                             f"{truth.get('class')} / {truth.get('mode')}"))
+                rows.append(("调制识别", "生成器真值", "识别命中",
+                             "命中" if hit else "未命中"))
+            else:
+                rows.append(("调制识别", "生成器真值", "对照", truth.get("reason") or "不适用"))
+            lines.append(f"识别模型来源 {model.get('source', '--')}（{model.get('id', '--')}）· "
+                         f"带内信噪比粗估 {_fmt_metric(amc.get('snr_estimate_db'), '.2f')} dB")
+            for item in amc.get("pending") or []:
+                lines.append(f"待确认项：{item}")
+        self.compare_table.setRowCount(len(rows))
+        for row, values in enumerate(rows):
+            for column, text in enumerate(values):
+                self.compare_table.setItem(row, column, QtWidgets.QTableWidgetItem(str(text)))
+        self.compare_table.resizeColumnsToContents()
+        if not lines:
+            lines = ["还没有可对比的结果：请先在“信号检测”或“调制识别”标签页运行一次。"]
+        self.compare_summary.setPlainText("\n".join(lines))
+        if switch:
+            self.tabs.setCurrentIndex(4)
+            self.status.setText(f"算法对比已刷新（{len(rows)} 行指标）")
+
+
+    def choose_amc_model(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "选择调制识别模型", str(self.workspace.root), "模型文件 (*.json *.onnx)")
+        if path:
+            self.amc_model.setText(path)
+
+
+    def use_detected_band(self):
+        """把检测结果里最强目标的中心频率与带宽填进识别输入框（可手动再改）。"""
+        result = self.tab_results.get(2) or {}
+        detections = (result.get("summary") or {}).get("detections") or []
+        if not detections:
+            self.status.setText("还没有检测结果：请先在“信号检测”标签页运行一次检测")
+            return
+        target = max(detections, key=lambda item: float(item.get("power_dbfs", -1e9)))
+        self.amc_offset.setValue(float(target["center_hz"]))
+        self.amc_bandwidth.setValue(float(target["bandwidth_hz"]))
+        self.status.setText(
+            f"已取用检测结果 #{target['id']} 的频带（中心 {_fmt_hz(target['center_hz'])}、"
+            f"带宽 {_fmt_hz(target['bandwidth_hz'])}）")
+
+
+    def amc_classify_selected(self):
+        asset = self.selected_asset()
+        if not asset:
+            self.status.setText("请先导入并选择数据")
+            return
+        config = {}
+        offset = float(self.amc_offset.value())
+        if offset:
+            config["offset_hz"] = offset
+        bandwidth = float(self.amc_bandwidth.value())
+        if bandwidth > 0:
+            config["bandwidth_hz"] = bandwidth
+        model = self.amc_model.text().strip() or None
+        self.start_job("amc_classify", asset_id=asset["id"], config=config, model=model)
+
+
+    def _render_amc(self, result):
+        summary = result["summary"]
+        prediction = result["prediction"]
+        classes = summary["classes"]
+        labels = summary["labels"]
+        features = summary["features"]
+        scores = prediction["scores"]
+        values = [float(scores.get(name, 0.0)) for name in classes]
+        positions = np.arange(len(classes), dtype=float)
+        if self.amc_bars is not None:
+            self.amc_plot.removeItem(self.amc_bars)
+        self.amc_bars = pg.BarGraphItem(x=positions, height=values, width=0.62,
+                                        brush="#2365b3", pen=pg.mkPen("#183c65"))
+        self.amc_plot.addItem(self.amc_bars)
+        self.amc_plot.getAxis("bottom").setTicks(
+            [[(float(position), labels[name]) for position, name in zip(positions, classes)]])
+        self.amc_plot.setYRange(0.0, max(1.0, max(values) * 1.15), padding=0.0)
+        self.amc_plot.setTitle(f"六类后验概率 · 预测 {prediction['label_text']}"
+                               f"（{prediction['confidence']:.2f}）")
+        self.amc_table.setRowCount(len(features))
+        for row, name in enumerate(features):
+            self.amc_table.setItem(row, 0, QtWidgets.QTableWidgetItem(name))
+            self.amc_table.setItem(
+                row, 1, QtWidgets.QTableWidgetItem(f"{float(features[name]):.6g}"))
+        band = summary["band"]
+        model = summary["model"] or {}
+        source = _AMC_SOURCE_TEXT.get(str(model.get("source")), str(model.get("source")))
+        model_line = (f"模型 {model.get('id')}@{model.get('version')} · 来源 {source}"
+                      + (f" · 摘要 {str(model['sha256'])[:12]}…" if model.get("sha256") else "")
+                      + (f" · 训练集内准确率 {_fmt_metric(model.get('accuracy_in_sample'), '.4f')}"
+                         if model.get("accuracy_in_sample") is not None else ""))
+        lines = [
+            f"数据：{result.get('asset_name', result['asset_id'])}  |  采样率 "
+            f"{_fmt_hz(band['sample_rate_hz'])}  |  分析频带 中心 {_fmt_hz(band['center_hz'])}"
+            f" · 带宽 {_fmt_hz(band['bandwidth_hz'])}  |  分析样本 {band['analysis_samples']:,}"
+            f"（抽样比 {band['decimation']}）· 带内功率 {band['power_dbfs']:.2f} dBFS",
+            f"算法 {summary['algorithm']}（契约 {summary['contract']}）· 特征契约 "
+            f"{summary['feature_contract']}（{len(features)} 维）· 峰值样本 {band['peak_samples']} 个",
+            model_line,
+            f"预测：{prediction['label_text']}（概率 {prediction['confidence']:.4f} · 与次高类差值 "
+            f"{_fmt_metric(prediction.get('margin'), '.4f')}）· 带内信噪比粗估 "
+            f"{_fmt_metric(summary['snr_estimate_db'], '.1f')} dB",
+        ]
+        if prediction["reliable"]:
+            lines.append("可信度：未发现低信噪比或区分度不足的提示；" + prediction["snr_note"])
+        else:
+            lines.append(f"可信度：仅供参考 —— {prediction['reason']}；{prediction['snr_note']}")
+        baseline = summary["baseline"]
+        if baseline["classification"]:
+            lines.append(f"传统对照（{baseline['algorithm']}）：判定 {baseline['classification']}"
+                         f" · 估计簇数 {baseline['cluster_estimate']}"
+                         "（该启发式只区分数字/模拟，不对应六类）")
+        else:
+            lines.append(f"传统对照（{baseline['algorithm']}）：不可用 —— {baseline['note']}")
+        truth = result.get("truth") or {}
+        if truth.get("available"):
+            lines.append(
+                f"生成器真值：{truth['class']}（样式 {truth['mode']}）· 带内信噪比 "
+                f"{_fmt_metric(truth['snr_inband_db'], '.2f')} dB · 识别"
+                f"{'命中' if result.get('truth_hit') else '未命中'}")
+        else:
+            lines.append(f"生成器真值：不适用 —— {truth.get('reason', '没有真值')}；样本仍计入统计，不丢弃")
+        for item in summary["pending"]:
+            lines.append(f"待确认：{item}")
+        self.amc_summary.setPlainText("\n".join(lines))
+
+
+    def update_detect_controls(self, *_):
+        """带宽门限默认跟随检测门限的一半；手动模式只做上界约束。"""
+        auto = self.detect_band_auto.isChecked()
+        threshold = float(self.detect_threshold.value())
+        self.detect_band_threshold.setEnabled(not auto)
+        if auto:
+            self.detect_band_threshold.setValue(max(0.1, 0.5 * threshold))
+        elif self.detect_band_threshold.value() > threshold:
+            self.detect_band_threshold.setValue(max(0.1, 0.5 * threshold))
+
+
+    def update_ml_controls(self):
+        """推理运行时缺失时禁用 AI 入口并给出安装提示（传统路径不受影响）。"""
+        from .ml.runtime import runtime_version
+
+        version = runtime_version()
+        ready = version is not None
+        for widget in (self.ml_button, self.ml_choose, self.ml_score, self.ml_iou,
+                       self.ml_compare):
+            widget.setEnabled(ready)
+        self.ml_status.setText(f"onnxruntime {version}" if ready else
+                               "未安装 onnxruntime：pip install '.[ml]' 后可用")
+
+
+    def choose_ml_manifest(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "选择 AI 检测模型清单", str(self.workspace.root), "模型清单 (*.json)")
+        if path:
+            self.ml_manifest.setText(path)
+
+
+    def ml_detect_selected(self):
+        asset = self.selected_asset()
+        if not asset:
+            self.status.setText("请先导入并选择数据")
+            return
+        manifest = self.ml_manifest.text().strip()
+        if not manifest:
+            self.status.setText("请先选择 AI 模型清单（ml-manifest 生成）")
+            return
+        config = {"threshold_db": float(self.detect_threshold.value()),
+                  "score_threshold": float(self.ml_score.value()),
+                  "iou_threshold": float(self.ml_iou.value()),
+                  "max_detections": int(self.detect_max.value())}
+        if self.detect_min_bandwidth.value() > 0:
+            config["min_bandwidth_hz"] = float(self.detect_min_bandwidth.value())
+        if self.detect_min_duration.value() > 0:
+            config["min_duration_s"] = float(self.detect_min_duration.value())
+        # nfft 与图像尺寸由清单声明，界面不覆盖，避免训练/推理口径分叉
+        self.start_job("ml_detect", asset_id=asset["id"], manifest=manifest,
+                       config=config, with_baseline=bool(self.ml_compare.isChecked()))
+
+
+    def detect_selected(self):
+        asset = self.selected_asset()
+        if not asset:
+            self.status.setText("请先导入并选择数据")
+            return
+        config = {"nfft": int(self.detect_nfft.currentText()),
+                  "threshold_db": float(self.detect_threshold.value()),
+                  "band_threshold_db": float(self.detect_band_threshold.value()),
+                  "max_detections": int(self.detect_max.value())}
+        if self.detect_min_bandwidth.value() > 0:
+            config["min_bandwidth_hz"] = float(self.detect_min_bandwidth.value())
+        if self.detect_min_duration.value() > 0:
+            config["min_duration_s"] = float(self.detect_min_duration.value())
+        if self.detect_merge.currentText() != "自动":
+            config["merge_bins"] = int(self.detect_merge.currentText())
+        self.start_job("detect", asset_id=asset["id"], config=config)
+
+
+    def _render_detect(self, result, arrays):
+        summary = result["summary"]
+        detections = summary["detections"]
+        f = arrays["frequency"]
+        t = arrays["frame_time"]
+        matrix = arrays["spectrogram_db"]
+        boxes = arrays["detection_boxes"].reshape(-1, 4)
+        baseline_boxes = (arrays["baseline_detection_boxes"].reshape(-1, 4)
+                          if "baseline_detection_boxes" in arrays else [])
+        is_ml = bool(summary.get("model"))
+        threshold_db = float(arrays["threshold_db"].ravel()[0])
+        noise_db = float(arrays["noise_floor_db"].ravel()[0])
+        df = float(summary["freq_resolution_hz"])
+        dt = float(summary["hop_samples"]) / float(summary["sample_rate_hz"])
+        high = float(matrix.max()) if matrix.size else -120.0
+        if arrays["spectrum_db"].size:
+            high = max(high, float(arrays["spectrum_db"].max()))
+        # 平均功率谱密度：检测依据，与本底/门限一起显示；中位数 PSD 作对照
+        self.detect_spectrum.clear()
+        self.detect_spectrum.plot(f, arrays["spectrum_median_db"], pen="#9fb6cd", name="中位数 PSD（对照）")
+        self.detect_spectrum.plot(f, arrays["spectrum_db"], pen="#2365b3", name="平均 PSD（检测依据）")
+        self.detect_spectrum.addItem(pg.InfiniteLine(
+            pos=threshold_db, angle=0, movable=False, pen=pg.mkPen("#e2564a", width=2)))
+        self.detect_spectrum.addItem(pg.InfiniteLine(
+            pos=noise_db, angle=0, movable=False,
+            pen=pg.mkPen("#7d8fa1", style=QtCore.Qt.PenStyle.DashLine)))
+        for item in detections:
+            self.detect_spectrum.addItem(pg.LinearRegionItem(
+                values=(item["f_low_hz"], item["f_high_hz"]), movable=False,
+                brush=pg.mkBrush(35, 101, 179, 45), pen=pg.mkPen("#2365b3")))
+        # 时频图叠加检测框（横轴频率、纵轴时间，与图像坐标系一致）
+        levels = [high - 80.0, high]
+        self.detect_tf_image.setImage(matrix.T, levels=levels, autoLevels=False)
+        self.detect_tf_image.setRect(QtCore.QRectF(f[0] - df / 2, t[0] - dt / 2,
+                                                   df * len(f), dt * len(t)))
+        view_box = self.detect_tf.getPlotItem().getViewBox()
+        for item in self._detect_items:
+            item.setParentItem(None)
+            self.detect_tf.scene().removeItem(item)
+        self._detect_items = []
+        for f_low, f_high, t_start, t_end in boxes:
+            rectangle = QtWidgets.QGraphicsRectItem(QtCore.QRectF(
+                float(f_low), float(t_start), float(f_high - f_low),
+                max(float(t_end - t_start), dt)))
+            rectangle.setPen(pg.mkPen("#e2564a", width=2))
+            rectangle.setParentItem(view_box)
+            self._detect_items.append(rectangle)
+        for f_low, f_high, t_start, t_end in baseline_boxes:
+            rectangle = QtWidgets.QGraphicsRectItem(QtCore.QRectF(
+                float(f_low), float(t_start), float(f_high - f_low),
+                max(float(t_end - t_start), dt)))
+            rectangle.setPen(pg.mkPen("#7d8fa1", width=1, style=QtCore.Qt.PenStyle.DashLine))
+            rectangle.setParentItem(view_box)
+            self._detect_items.append(rectangle)
+        span = float(f[-1] - f[0]) / 2.0 + df
+        self.detect_spectrum.setXRange(float(f[0]) - df / 2, float(f[-1]) + df / 2, padding=0.0)
+        self.detect_spectrum.setYRange(max(noise_db - 5.0, high - 80.0), high + 3.0, padding=0.0)
+        self.detect_tf.setXRange(float(f[0]) - df / 2, float(f[-1]) + df / 2, padding=0.0)
+        self.detect_tf.setYRange(float(t[0]) - dt / 2, float(t[-1]) + dt / 2, padding=0.0)
+        self.detect_tf.setTitle(f"时频图与检测框 · 动态范围 80 dB · ±{_fmt_hz(span)}"
+                                + (" · 红框 AI 检出，灰虚线传统基线" if baseline_boxes else ""))
+        self.detect_spectrum.setTitle(
+            f"平均功率谱密度与检测门限 · 本底 {noise_db:.1f} dB/Hz · 门限 {threshold_db:.1f} dB/Hz"
+            f" · 带宽门限 {summary['config']['band_threshold_db']:.1f} dB")
+        self.detect_table.setRowCount(len(detections))
+        for row, item in enumerate(detections):
+            if is_ml:
+                note = f"{item.get('label', '目标')} · 置信度 {item['confidence']:.2f}"
+                if item["hopping"]:
+                    note += (f" · 跳频会话 · 子带 {item['sub_bands']} 个")
+            else:
+                note = (f"跳频会话 · 子带 {item['sub_bands']} 个" if item["hopping"]
+                        else f"频点 {item['bin_count']} 个")
+            values = [str(item["id"]), _fmt_hz(item["center_hz"]), _fmt_hz(item["bandwidth_hz"]),
+                      f"{_fmt_hz(item['f_low_hz'])} ～ {_fmt_hz(item['f_high_hz'])}",
+                      f"{item['t_start_s']:.4f} ～ {item['t_end_s']:.4f} s",
+                      f"{item['power_dbfs']:.2f}", f"{item['snr_db']:.2f} dB",
+                      "-" if item["session_id"] is None else str(item["session_id"]), note]
+            for column, text in enumerate(values):
+                self.detect_table.setItem(row, column, QtWidgets.QTableWidgetItem(text))
+        lines = [
+            f"数据：{result.get('asset_name', result['asset_id'])}  |  "
+            f"采样数 {summary['sample_count']:,}  |  时长 {summary['duration_s']:.6f} s  |  "
+            f"采样率 {_fmt_hz(summary['sample_rate_hz'])}",
+            f"算法 {summary['algorithm']}（契约 {summary['contract']}）· "
+            f"带内信噪比定义 {summary['snr_definition']} · 频率参考 {summary['frequency_reference']}",
+            f"STFT {summary['nfft']} 点（频点 {summary['freq_resolution_hz']:g} Hz）· "
+            f"{summary['frame_count']} 帧 · 噪声本底 {summary['noise_floor_dbfs_per_hz']:.1f} dB/Hz · "
+            f"检测门限 {summary['threshold_dbfs_per_hz']:.1f} dB/Hz · "
+            f"最小带宽 {_fmt_hz(summary['config']['min_bandwidth_hz'])} · "
+            f"平滑半径 {summary['config']['merge_bins']} 频点",
+            f"检出目标 {len(detections)} 个（跳频会话 {sum(1 for item in detections if item['hopping'])} 个）",
+        ]
+        if is_ml:
+            model = summary["model"]
+            lines.insert(1, f"模型 {model['id']}@{model['version']} · 摘要 {str(model['sha256'])[:12]}… · "
+                            f"输入 {summary['image']['size']}² 灰度时频图（动态范围 "
+                            f"{summary['image']['db_ceiling'] - summary['image']['db_floor']:.0f} dB）· "
+                            f"置信度阈值 {summary['config']['score_threshold']:.2f} · 去重 IoU "
+                            f"{summary['config']['iou_threshold']:.2f}")
+            lines.append(f"模型候选 {summary['raw_boxes']['candidates']} 个（输出 "
+                         f"{summary['raw_boxes']['rows']} 行）· 上下文 "
+                         f"{summary['timing']['context_ms']:.1f} ms · 推理 "
+                         f"{summary['timing']['inference_ms']:.1f} ms · 合计 "
+                         f"{summary['timing']['total_ms']:.1f} ms")
+        metrics = result.get("metrics")
+        if metrics:
+            lines.append(
+                f"真值 {metrics['true']} 个：匹配 {metrics['matched']} · 漏警 {metrics['missed']} · "
+                f"虚警 {metrics['false_alarm']} · 精确率 {_fmt_metric(metrics['precision'], '4g')} · "
+                f"召回 {_fmt_metric(metrics['recall'], '4g')} · F1 {_fmt_metric(metrics['f1'], '4g')}")
+            lines.append(
+                f"参数误差：中心频率 MAE {_fmt_metric(metrics['center_mae_hz'], '.1f')} Hz · "
+                f"带宽相对误差 {_fmt_metric(metrics['bandwidth_mape'], '.1%')} · "
+                f"带内信噪比 MAE {_fmt_metric(metrics['snr_mae_db'], '.2f')} dB")
+            for entry in result["truth"]:
+                lines.append(
+                    f"  真值 #{entry['index']} {entry['mode']}{'（跳频会话）' if entry['hopping'] else ''}："
+                    f"中心 {_fmt_hz(entry['center_hz'])} · 带宽 {_fmt_hz(entry['bandwidth_hz'])} · "
+                    f"带内信噪比 {_fmt_metric(entry['snr_inband_db'], '.2f')} dB")
+            if result.get("baseline_metrics"):
+                lines.append(_comparison_line("AI 检测", metrics,
+                                              "传统基线", result["baseline_metrics"]))
+        else:
+            lines.append("该数据没有生成器真值（导入或原生插件产出），只给出检测结果，不计算误差指标。")
+        self.detect_summary.setPlainText("\n".join(lines))
+
+
     def display_result(self, result):
         self.last_result = result
         if result["kind"] == "analysis":
@@ -1018,6 +1665,17 @@ class MainWindow(DesktopWindow):
             with np.load(self.workspace.root / result["plots_path"], allow_pickle=False) as arrays:
                 self._render_analysis(result, arrays)
             self.tabs.setCurrentIndex(0)
+        elif result["kind"] in ("detect", "ml_detect"):
+            self.tab_results[2] = result
+            with np.load(self.workspace.root / result["plots_path"], allow_pickle=False) as arrays:
+                self._render_detect(result, arrays)
+            self._render_compare()
+            self.tabs.setCurrentIndex(2)
+        elif result["kind"] == "amc_classify":
+            self.tab_results[3] = result
+            self._render_amc(result)
+            self._render_compare()
+            self.tabs.setCurrentIndex(3)
         elif result["kind"] == "native":
             self.tab_results[0] = result
             self.wave.clear()

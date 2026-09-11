@@ -18,3 +18,8 @@ signal-analysis = "signal_analysis.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["common*", "signal_analysis*"]
+
+[tool.setuptools.package-data]
+# 内置调制识别模型是运行时资源（``amc.default_model_path()`` 按 ``__file__`` 定位），
+# 必须随 wheel 分发；否则打包后调制识别会因找不到默认模型而失败。
+"signal_analysis.ml" = ["*.json"]

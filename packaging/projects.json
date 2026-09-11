@@ -4,7 +4,8 @@
     "app_dir": "analysis_desktop",
     "executable": "SignalAnalysis",
     "exclude": ["communication_sim", "simpy"],
-    "collect_all": ["sigmf", "jsonschema_specifications"]
+    "collect_all": ["sigmf", "jsonschema_specifications"],
+    "collect_data": ["signal_analysis"]
   },
   "simulation": {
     "package": "communication_sim",

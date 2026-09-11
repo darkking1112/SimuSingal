@@ -15,7 +15,10 @@
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[gui,dev]'
+# 核心依赖 + gui + dev 
+python -m pip install -e '.[gui,dev]' 
+# 所有torch 体积很大，仅在需要训练时装
+python -m pip install -e '.[gui,dev,ml,train]'
 python -m signal_analysis gui
 python -m communication_sim gui
 ```
@@ -37,7 +40,7 @@ python -m signal_analysis analyze ASSET_ID --nfft 256
 python -m signal_analysis export RUN_ID report.html
 ```
 
-把 ID 替换为前一步输出。单文件限制为 512 MiB，最多 16,000,000 个采样点。采样率明确填写，不猜测未知 BIN 文件。正式检测、三参数估计、调制识别和教学测评尚未实现。
+把 ID 替换为前一步输出。单文件限制为 512 MiB，最多 16,000,000 个采样点。采样率明确填写，不猜测未知 BIN 文件。
 
 ### 信号 IQ 生成（测试信号源）
 
@@ -60,6 +63,45 @@ python -m signal_analysis import path/to/recording.sigmf-meta
 ```
 
 SigMF 不必指定 `--sample-rate`；显式指定时必须与文件一致。其他格式仍需该参数。导入支持单通道 `cf32/cf64/ci16` 的大小端连续 IQ 双文件，内部转换为 complex64；暂不支持 `.sigmf` 归档、多通道或外部数据引用。导入的原始元数据及生成摘要关联资产保存；生成摘要也写入导出文件的 `core:description`，不虚构射频载频。详细限制见设计文档 §4.1。
+
+### 信号检测与参数估计（能量检测基线）
+
+界面“信号检测”页，或 CLI `detect`：STFT 时频图 → 噪声本底估计 → 自适应门限 → 形态学闭运算合并 → 逐目标给出中心频率、占用带宽、时间范围、功率与带内 SNR；同一载波上的跳频信道按会话合并为一条记录。结果是冻结的 `detect_result_v1` 结构，可用 `evaluation.evaluate_detections` 与 IQ 生成摘要中的真值逐项评分（召回、精确率、中心频率 MAE、带宽相对误差）。
+
+```bash
+python -m signal_analysis detect ASSET_ID --nfft 512 --threshold-db 3 --max-detections 32
+```
+
+### AI 检测（可选，ONNX Runtime）
+
+```bash
+python -m pip install -e ".[ml]"           # onnxruntime；未安装时界面 AI 入口自动禁用
+python -m signal_analysis ml-manifest model.onnx detector.json --image-size 1024 --nfft 512 \
+    --framework yolox --license Apache-2.0 --dataset "本项目合成数据集"
+python -m signal_analysis ml-detect ASSET_ID detector.json --score-threshold 0.25
+```
+
+模型清单声明输入图像契约（尺寸、STFT 点数、动态范围、归一化方式）与输出框格式，推理时强制与清单一致而不是静默改变输入；`ml-detect` 默认同时跑一遍能量检测基线，两条路径的指标可直接对照。训练、导出与验收脚本见 [`training/`](training/README.md)（该目录不随 wheel 分发，训练依赖 `.[train]`）。
+
+### 调制识别（A09 六类）
+
+界面“调制识别”页，或 CLI `amc-classify`：在检测结果给出的频带（或手工填写的中心频率/占用带宽）上把信号搬到零频、抽取到与带宽匹配的分析率，提取 34 维冻结特征（包络统计、瞬时频率/相位、高阶累积量、谱对称性等），再由模型输出 A09 六类字典 `FM / SSB / 2ASK / QPSK / 16QAM / 64QAM` 的分数与置信度。
+
+```bash
+python -m signal_analysis amc-classify ASSET_ID --offset-hz 40000 --bandwidth-hz 30000
+python -m signal_analysis amc-classify ASSET_ID --model model.json          # 自带模型
+python -m signal_analysis amc-manifest model.json amc.json --id dut --version 1.0.0
+```
+
+随包分发一个**线性基线**模型（`amc-linear-default`，34 维特征上的多项逻辑回归，含温度标定），无需 `.[ml]` 即可离线使用；仓库内实测（800 次/类合成场景，验证集）准确率 0.8250、macro F1 0.8246，带内 SNR ≥ 10 dB 时 ≥ 0.97，主要误差来自 10 dB 以下 16QAM 与 64QAM 之间的混淆。结果结构为冻结的 `amc_classify_v1`，同时给出传统启发式对照（数字/模拟、恒包络/非恒包络），字段 `pending` 明确列出**尚未确认项**：识别准确率的合格门限尚未确定，因此只报原始指标而不做通过/不通过判定。
+
+生成数据会带上生成器真值并逐条计命中（`truth_hit`）；导入数据或原生插件产出没有真值，此时接口返回 `不适用` 并**保留失败样本计数**，不静默丢弃。`am` 与跳频样式不在 A09 六类字典内，按“不适用”计入统计而不算识别错误。训练、导出与验收脚本见 [`training/README.md`](training/README.md) §6。
+
+### 算法对比与离线报告
+
+界面“算法对比”页把同一对象在不同路径上的取值并排列出（环节 / 对象 / 指标 / 取值），便于直接看出差异而不是各看各的结果；某一侧没有产出时显示 `--`，不填 0、不猜测。
+
+导出的 HTML 报告（`export RUN_ID report.html`，CLI 与冻结产物同接口）除页尾完整原始 JSON 外，按结果类型附指标表：检测与 AI 检测给出“检测结果 / 传统基线”两列的真实目标数、匹配、漏警、虚警、精确率、召回、F1、中心频率 MAE、带宽相对误差与带内信噪比 MAE；调制识别给出预测类别、置信度、置信度差、是否可靠、判定说明，以及真值命中与真值带内信噪比，并把 `pending` 中**尚未确认项**单列。真值不可用按“不适用”计数，缺失字段显示 `--`。所有文本经 HTML 转义，报告为自包含离线文件。
 
 ![独立分析界面](docs/images/analysis-workbench.png)
 
@@ -140,3 +182,17 @@ python scripts/build_desktop.py simulation dist/wheels/communication_sim-0.2.0-p
 - [分析项目设计](docs/电磁信号分析识别系统_Python技术方案.md)
 - [仿真项目设计](docs/某星通信仿真系统_Python技术方案.md)
 - [二进制与原生插件设计](docs/核心模块二进制化与原生插件接口方案.md)
+
+### 算法设计文档
+
+信号检测与调制识别各自的传统算法、AI 算法独立成篇，内容包含算法思路、公式推导、流程图、
+输入输出参数、当前参考文献、设计局限与可改进方向（含改进所需文献）：
+
+| 任务 | 传统算法 | AI 算法 |
+| --- | --- | --- |
+| 信号检测（时频域） | [传统能量检测](docs/algorithms/信号检测_传统能量检测.md) | [AI 时频图检测](docs/algorithms/信号检测_AI时频图检测.md) |
+| 调制识别（A09 六类） | [传统特征与启发式判定](docs/algorithms/调制识别_传统特征与启发式判定.md) | [AI 特征学习](docs/algorithms/调制识别_AI特征学习.md) |
+
+四篇文档以**已实现代码**为准逐项核对公式与常量；其中 A09 调制识别的两条路径共用同一份
+34 维确定性特征契约（`amc_feature_vector_v1`），因此“传统”与“AI”的差别只体现在最后的判别层，
+两者可直接同口径比较。识别准确率的合格门限仍为**待确认项**，文档只给原始指标与局限，不作通过判定。
