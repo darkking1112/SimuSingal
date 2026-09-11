@@ -41,7 +41,9 @@ python -m signal_analysis export RUN_ID report.html
 
 ### 信号 IQ 生成（测试信号源）
 
-界面"IQ 信号生成"页，用于生成测试检测、参数估计与调制识别算法的 IQ 基带信号：支持 AM、FM、SSB、2ASK、QPSK、16QAM、64QAM 与跳频信号（FH-2FSK 模拟遥控链路、FH-OFDM 模拟图传链路）。IQ 为复基带记录，不设置载频，"频点"指基带频率偏移。可设置信号持续时间、采样率、随机种子、每信号功率（dBFS）、目标带宽、频点、跳速、符号速率等；自动按调制样式与目标带宽推导消息带宽、频偏、滚降成形等参数。支持一次 IQ 中包含最多 16 种信号并独立设置参数，以及带限背景噪声（SNR 相对最强信号，或纯噪声时按绝对 dBFS）。可导出 NPY、CSV（两列 I,Q）或交织 IQ 二进制（int16/float32、大小端可选）。
+界面"IQ 信号生成"页，用于生成测试检测、参数估计与调制识别算法的 IQ 基带信号：支持 AM、FM、SSB、2ASK、QPSK、16QAM、64QAM 与跳频信号（FH-2FSK 模拟遥控链路、FH-OFDM 模拟图传链路）。IQ 为复基带记录，不设置载频，"频点"指基带频率偏移。可设置信号持续时间、采样率、随机种子、每信号功率（dBFS）、目标带宽、频点、跳速、符号速率等；自动按调制样式与目标带宽推导消息带宽、频偏、滚降成形等参数。支持一次 IQ 中包含最多 16 种信号并独立设置参数，以及带限背景噪声。
+
+噪声口径为**带内信噪比**：噪声功率在设定的噪声带宽内均匀分布（功率谱密度 `N0 = P_noise / B_noise`），信号的带内噪声取 `N0 × 该信号实际占用带宽`，因此某信号的带内 SNR = 其平均功率 ÷（`N0 × B_actual`）。界面填写的 `snr_db` 指最强的那个信号（按实测平均功率判定）的带内 SNR，其余信号按各自实际带宽与重叠频带折算，结果记录在摘要的 `signals[].snr_inband_db` 中；若噪声带宽未覆盖最强信号的占用频带会直接报错，避免实测 SNR 与填写值不符。纯噪声（无信号）时改为填写噪声的绝对总功率（dBFS）。摘要同时给出 `noise.power_dbfs_per_hz`、`noise.snr_definition`（当前为 `inband_snr_v1`）与 `noise.snr_reference_index` 以便复核。可导出 NPY、CSV（两列 I,Q）或交织 IQ 二进制（int16/float32、大小端可选）。
 
 ```bash
 python -m signal_analysis --workspace /tmp/iqws generate spec.json

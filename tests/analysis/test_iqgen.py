@@ -95,20 +95,55 @@ def test_2ask_rect_has_carrier_line():
     assert carrier > 10 * np.median(psd)
 
 
-def test_snr_relative_to_strongest_signal():
+def test_inband_snr_relative_to_strongest_signal():
     strong = dict(BASE, mode="qpsk", power_dbfs=-5.0)
-    weak = dict(BASE, power_dbfs=-25.0, offset=-150_000.0)
-    samples, summary = generate_iq(RATE, 0.5, [strong, dict(weak, mode="qpsk")],
+    weak = dict(BASE, mode="qpsk", power_dbfs=-25.0, offset=-150_000.0)
+    samples, summary = generate_iq(RATE, 0.5, [strong, weak],
                                    noise={"bandwidth": RATE, "snr_db": 20.0}, seed=8)
-    # 1) 摘要自洽：最强信号实测功率 − 噪声功率 ≈ 请求的 SNR。
-    entry = summary["signals"][0]
+    first, second = summary["signals"]
     noise = summary["noise"]
-    assert entry["power_dbfs_actual"] - noise["power_dbfs"] == pytest.approx(20.0, abs=1.5)
+    # 1) 带内 SNR 口径：信号平均功率 ÷ (噪声功率谱密度 × 实际占用带宽)。
+    assert noise["snr_definition"] == "inband_snr_v1"
+    assert noise["snr_reference_index"] == 0
     assert noise["snr_db"] == 20.0
+    assert first["snr_inband_db"] == pytest.approx(20.0, abs=0.2)
+    # 弱信号低 20 dB 且占用带宽相同 → 带内 SNR 也低 20 dB。
+    assert second["snr_inband_db"] == pytest.approx(0.0, abs=0.2)
+    # 噪声总功率 = 功率谱密度 × 噪声带宽。
+    psd = 10 ** (noise["power_dbfs_per_hz"] / 10)
+    assert noise["power_dbfs"] == pytest.approx(10 * np.log10(psd * RATE), abs=1e-6)
     # 2) 独立验证：总功率 ≈ 各分量功率之和（独立随机过程相加）。
     total = measured_power(samples)
     expected = 10 * np.log10(10 ** (-5.0 / 10) + 10 ** (-2.5) + 10 ** (noise["power_dbfs"] / 10))
     assert total == pytest.approx(expected, abs=0.5)
+
+
+def test_inband_snr_from_spectral_density():
+    """带内 SNR 可由功率谱密度独立复算：SNR = P_signal / (N0 × B_actual)。"""
+    spec = dict(BASE, mode="qpsk", offset=0.0, power_dbfs=-10.0)
+    _, summary = generate_iq(RATE, 0.2, [spec],
+                             noise={"bandwidth": RATE, "snr_db": 12.0}, seed=21)
+    entry, noise = summary["signals"][0], summary["noise"]
+    psd = 10 ** (noise["power_dbfs_per_hz"] / 10)
+    expected = entry["power_dbfs_actual"] - 10 * np.log10(psd * entry["bandwidth_actual"])
+    assert entry["snr_inband_db"] == pytest.approx(expected, abs=1e-6)
+
+
+def test_noise_band_must_cover_strongest_signal():
+    # 信号位于 100 kHz 附近、占用带宽约 96 kHz，50 kHz 噪声带宽无法覆盖。
+    with pytest.raises(ValueError, match="未覆盖最强信号"):
+        generate_iq(RATE, 0.05, [dict(BASE, mode="qpsk")],
+                    noise={"bandwidth": 50_000.0, "snr_db": 20.0}, seed=22)
+
+
+def test_signal_outside_noise_band_has_undefined_snr():
+    inside = dict(BASE, mode="qpsk", offset=0.0, power_dbfs=-5.0)
+    outside = dict(BASE, mode="qpsk", offset=400_000.0, power_dbfs=-20.0)
+    _, summary = generate_iq(RATE, 0.2, [inside, outside],
+                             noise={"bandwidth": 200_000.0, "snr_db": 15.0}, seed=23)
+    assert summary["noise"]["snr_reference_index"] == 0
+    assert summary["signals"][0]["snr_inband_db"] == pytest.approx(15.0, abs=0.2)
+    assert summary["signals"][1]["snr_inband_db"] is None
 
 
 def test_multi_signal_independent_and_deterministic():
@@ -124,9 +159,13 @@ def test_multi_signal_independent_and_deterministic():
 
 def test_pure_noise_mode():
     samples, summary = generate_iq(RATE, 0.05, [], noise={"power_dbfs": -20.0}, seed=10)
+    noise = summary["noise"]
     assert measured_power(samples) == pytest.approx(-20.0, abs=0.5)
-    assert summary["noise"]["enabled"] is True
-    assert summary["noise"]["snr_db"] is None
+    assert noise["enabled"] is True
+    assert noise["snr_db"] is None
+    assert noise["snr_reference_index"] is None
+    # 默认噪声带宽 = 采样率，功率谱密度 = 总功率 / 带宽。
+    assert noise["power_dbfs_per_hz"] == pytest.approx(-20.0 - 10 * np.log10(RATE), abs=1e-6)
     assert summary["signals"] == []
 
 

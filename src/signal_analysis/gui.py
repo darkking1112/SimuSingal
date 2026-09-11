@@ -700,8 +700,10 @@ class MainWindow(DesktopWindow):
         noise_bw_row, self.gen_noise_bw = _freq_spin(1.0, 1e9, 1_000_000.0, 2)
         self.gen_noise_bw.setToolTip("双侧带限带宽；等于采样率时为全带白噪声")
         row.addWidget(noise_bw_row)
-        row.addWidget(QtWidgets.QLabel("SNR（相对最强信号）"))
+        row.addWidget(QtWidgets.QLabel("带内 SNR（相对最强信号）"))
         snr_row, self.gen_snr = _plain_spin(-10.0, 80.0, 20.0, 1, "dB")
+        self.gen_snr.setToolTip("信号平均功率 ÷ 同占用带宽内的噪声功率；噪声按功率谱密度折算，\n"
+                               "噪声带宽须覆盖最强信号的占用频带")
         row.addWidget(snr_row)
         row.addWidget(QtWidgets.QLabel("噪声功率（无信号时）"))
         noise_power_row, self.gen_noise_power = _plain_spin(-200.0, 0.0, -20.0, 1, "dBFS")
@@ -910,15 +912,23 @@ class MainWindow(DesktopWindow):
                  f"时长 {summary['duration_s']:g} s · 峰值 {summary['peak_dbfs']:.1f} dBFS"]
         for entry in summary["signals"]:
             style = MODE_SHORT.get(entry["mode"], entry["mode"])
-            lines.append(f"  {style}：频点 {_fmt_hz(entry['offset'])} · 目标功率 {entry['power_dbfs']:g} dBFS"
-                         f"（实测 {entry['power_dbfs_actual']:.2f} dBFS）· 目标带宽 {_fmt_hz(entry['bandwidth'])}")
+            line = (f"  {style}：频点 {_fmt_hz(entry['offset'])} · 目标功率 {entry['power_dbfs']:g} dBFS"
+                    f"（实测 {entry['power_dbfs_actual']:.2f} dBFS）· 目标带宽 {_fmt_hz(entry['bandwidth'])}")
+            if entry.get("snr_inband_db") is not None:
+                line += f" · 带内 SNR {entry['snr_inband_db']:.2f} dB"
+            lines.append(line)
         noise = summary["noise"]
+        psd = noise.get("power_dbfs_per_hz")
+        psd_text = "" if psd is None else f" · 功率谱密度 {psd:.1f} dB/Hz"
         if noise["enabled"]:
             if noise["snr_db"] is not None:
-                lines.append(f"  背景噪声：带宽 {_fmt_hz(noise['bandwidth'])} · SNR {noise['snr_db']:g} dB · "
-                             f"噪声功率 {noise['power_dbfs']:.1f} dBFS")
+                reference = noise.get("snr_reference_index")
+                ref_text = "" if reference is None else f"（参考信号 #{reference + 1}）"
+                lines.append(f"  背景噪声：带宽 {_fmt_hz(noise['bandwidth'])} · 带内 SNR {noise['snr_db']:g} dB"
+                             f"{ref_text} · 总功率 {noise['power_dbfs']:.1f} dBFS{psd_text}")
             elif noise["power_dbfs"] is not None:
-                lines.append(f"  背景噪声：带宽 {_fmt_hz(noise['bandwidth'])} · 功率 {noise['power_dbfs']:.1f} dBFS")
+                lines.append(f"  背景噪声：带宽 {_fmt_hz(noise['bandwidth'])} · "
+                             f"总功率 {noise['power_dbfs']:.1f} dBFS{psd_text}")
         if result["export_path"]:
             lines.append(f"导出文件：{result['export_path']}（格式 {result['export_format']}）")
             if result.get("export_data_path"):

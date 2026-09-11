@@ -59,6 +59,19 @@ def _check_band(offset, width, rate, mode):
         raise ValueError(f"频点 {offset:g} Hz 与带宽 {width:g} Hz 超出 ±{rate / 2:g} Hz 的基带范围")
 
 
+def _occupied_interval(offset, width, mode, side=None):
+    """Two-sided frequency interval (Hz) occupied by one signal.
+
+    SSB is one-sided (upper or lower sideband starting at ``offset``);
+    every other mode is centred on ``offset``. Used to verify that the
+    background noise band covers the signal, which the in-band SNR
+    definition requires.
+    """
+    if mode == "ssb":
+        return (offset - width, offset) if side == "lsb" else (offset, offset + width)
+    return offset - width / 2.0, offset + width / 2.0
+
+
 def _hop_points(spec, rate, offset, bandwidth, mode):
     """Resolve the hop set; return ``(points, hop_bw, span)``.
 
@@ -464,9 +477,15 @@ def generate_iq(sample_rate, duration, signals, noise=None, seed=0):
     ``mode``, optional ``offset`` (baseband offset in Hz), ``power_dbfs``,
     ``bandwidth`` and mode-specific parameters (see :func:`plan_signal`).
     ``noise`` is an optional dict with ``enabled``, ``bandwidth`` (Hz,
-    two-sided, default full band), ``snr_db`` (relative to the strongest
-    signal) or ``power_dbfs`` (absolute, used when there are no signals).
-    A fixed ``seed`` reproduces identical samples.
+    two-sided, default full band), ``snr_db`` (in-band SNR of the strongest
+    signal) or ``power_dbfs`` (absolute total power, used when there are no
+    signals). In-band SNR is the signal mean power divided by the noise
+    power inside the same occupied bandwidth: the total noise power is
+    spread uniformly over ``bandwidth``, giving a power spectral density
+    ``power / bandwidth``, and each signal's in-band noise is that density
+    times its own ``bandwidth_actual``. The noise band must cover the
+    strongest signal's occupied band. A fixed ``seed`` reproduces identical
+    samples.
     """
     rate = validate_rate(sample_rate)
     duration_s = _finite(duration, "持续时间", 0.0, 3600.0)
@@ -502,18 +521,46 @@ def generate_iq(sample_rate, duration, signals, noise=None, seed=0):
     noise_enabled = has_noise
     noise_bandwidth = rate
     noise_power = 0.0
+    noise_psd = None
+    snr_db = None
+    reference_index = None
+    half_band = rate / 2.0
     if noise_enabled:
         noise_bandwidth = _finite(noise.get("bandwidth", rate), "噪声带宽", 0.0, rate)
         if not 0 < noise_bandwidth <= rate:
             raise ValueError("噪声带宽必须大于 0 且不超过采样率")
+        half_band = noise_bandwidth / 2.0
         if summaries:
-            strongest = max(10 ** (entry["power_dbfs"] / 10.0) for entry in summaries)
-            snr_db = _finite(noise.get("snr_db", 20.0), "信噪比", -60.0, 120.0)
-            noise_power = strongest / 10 ** (snr_db / 10.0)
+            # 参考信号取实测平均功率最大者；带内 SNR 定义要求噪声频带
+            # 完整覆盖其占用频带，否则无法按功率谱密度折算。
+            reference_index = int(np.argmax([entry["power_dbfs_actual"] for entry in summaries]))
+            reference = summaries[reference_index]
+            snr_db = _finite(noise.get("snr_db", 20.0), "带内信噪比", -60.0, 120.0)
+            low, high = _occupied_interval(reference["offset"], reference["bandwidth_actual"],
+                                           reference["mode"], reference.get("side"))
+            if low < -half_band or high > half_band:
+                label = MODE_NAMES.get(reference["mode"], reference["mode"])
+                raise ValueError(
+                    f"噪声带宽 {noise_bandwidth:g} Hz 未覆盖最强信号（{label}）的占用频带 "
+                    f"{low:g}～{high:g} Hz，无法折算带内信噪比；请增大噪声带宽或调整该信号")
+            # N0 = P_ref / (B_ref · 10^(SNR/10))，噪声总功率 P_n = N0 · B_n。
+            noise_psd = (10 ** (reference["power_dbfs_actual"] / 10.0)
+                         / (reference["bandwidth_actual"] * 10 ** (snr_db / 10.0)))
+            noise_power = noise_psd * noise_bandwidth
         else:
             noise_power = 10 ** (_finite(noise.get("power_dbfs", -20.0), "噪声功率", -200.0, 0.0) / 10.0)
+            noise_psd = noise_power / noise_bandwidth
         if noise_power > 0:
-            record += _band_noise(rng, count, rate, noise_bandwidth / 2.0) * np.sqrt(noise_power)
+            record += _band_noise(rng, count, rate, half_band) * np.sqrt(noise_power)
+    for entry in summaries:
+        entry["snr_inband_db"] = None
+        low, high = _occupied_interval(entry["offset"], entry["bandwidth_actual"],
+                                       entry["mode"], entry.get("side"))
+        overlap = min(high, half_band) - max(low, -half_band)
+        # 未被噪声频带覆盖的信号按重叠部分折算，完全落在带外时无定义。
+        if noise_psd and overlap > 0:
+            entry["snr_inband_db"] = float(
+                entry["power_dbfs_actual"] - 10.0 * np.log10(noise_psd * overlap))
     samples = np.ascontiguousarray(record, dtype=np.complex64)
     summary = {
         "algorithm": "iq_generator_v1",
@@ -524,7 +571,10 @@ def generate_iq(sample_rate, duration, signals, noise=None, seed=0):
         "signals": summaries,
         "noise": {"enabled": noise_enabled, "bandwidth": noise_bandwidth,
                   "power_dbfs": float(10.0 * np.log10(noise_power)) if noise_power > 0 else None,
-                  "snr_db": float(noise.get("snr_db")) if noise_enabled and summaries else None},
+                  "power_dbfs_per_hz": float(10.0 * np.log10(noise_psd)) if noise_psd else None,
+                  "snr_db": float(snr_db) if snr_db is not None else None,
+                  "snr_definition": "inband_snr_v1",
+                  "snr_reference_index": reference_index},
         "peak_dbfs": float(10.0 * np.log10(np.max(np.abs(samples) ** 2))),
     }
     return samples, summary
