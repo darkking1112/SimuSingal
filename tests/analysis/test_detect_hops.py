@@ -537,10 +537,10 @@ def test_gui_hops_tab_renders_result(tmp_path):
     window = MainWindow(workspace)
     window.show()
     try:
-        assert window.tabs.count() == 7
+        assert window.tabs.count() == 8
         labels = [window.tabs.tabText(index) for index in range(window.tabs.count())]
         assert labels == ["数据分析", "IQ 信号生成", "信号检测", "调制识别", "算法对比",
-                          "跳频参数", "运行记录"]
+                          "跳频参数", "数据管理", "运行记录"]
         assert window.hops_button.text() == "估计逐跳参数"
         assert window.hops_nfft.currentText() == "512"
         assert window.hops_sessions.isChecked()

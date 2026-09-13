@@ -167,6 +167,10 @@ class DesktopWindow(QtWidgets.QMainWindow):
     def build_sidebar(self):
         return None
 
+    def result_status(self, result):
+        """任务完成后的状态栏文案；只读页面（不写运行记录）可覆盖本方法。"""
+        return "任务完成 · 结果已保存到本项目工作目录"
+
     @QtCore.Slot(object)
     def job_completed(self, result):
         self.active_job = None
@@ -174,7 +178,6 @@ class DesktopWindow(QtWidgets.QMainWindow):
         self.refresh_history()
         try:
             self.result_ready(result)
-            self.status.setText("任务完成 · 结果已保存到本项目工作目录")
+            self.status.setText(self.result_status(result))
         except Exception as exc:
             self.status.setText(f"结果已保存，但显示失败：{exc}")
-

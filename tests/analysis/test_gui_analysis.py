@@ -58,7 +58,7 @@ def test_analysis_gui_workflow(tmp_path, monkeypatch):
     window = MainWindow(tmp_path)
     window.show()
     try:
-        assert window.tabs.count() == 7
+        assert window.tabs.count() == 8
         assert not hasattr(window, "sim_button")
         window.demo_button.click()
         wait_job(app, window)
@@ -176,7 +176,7 @@ def test_iq_generation_gui_workflow(tmp_path):
     window = MainWindow(tmp_path)
     window.show()
     try:
-        assert window.tabs.count() == 7
+        assert window.tabs.count() == 8
         window.tabs.setCurrentIndex(1)
         assert window.gen_signals.rowCount() == 0
         window.add_iq_signal({"mode": "qpsk", "offset": 100_000.0, "power_dbfs": -10.0,
@@ -532,6 +532,73 @@ def test_ml_controls_follow_runtime_availability(tmp_path, monkeypatch):
         window.update_ml_controls()
         assert all(widget.isEnabled() for widget in widgets)
         assert window.ml_status.text() == "onnxruntime 1.17.0"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.gui
+def test_data_management_tab_scan_and_cleanup_gating(tmp_path):
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(tmp_path)
+    window.show()
+    try:
+        assert window.tabs.tabText(6) == "数据管理"
+        window.tabs.setCurrentIndex(6)
+        assert not window.storage_cleanup_button.isEnabled()
+        window.storage_scan_button.click()
+        wait_job(app, window)
+        assert "工作区" in window.storage_overview.text()
+        assert len(window.storage_chart.listDataItems()) >= 1
+        # 空工作区各表格给出一行占位而不是空白
+        assert window.storage_asset_table.item(0, 0).text() == "（无）"
+        assert window.storage_issue_table.item(0, 0).text() == "无"
+        assert "没有可清理项" in window.storage_cleanup_hint.text()
+        # 普通扫描不解锁删除，必须先“预览清理”
+        assert not window.storage_cleanup_button.isEnabled()
+        window.storage_retention.setValue(0)
+        assert not window.storage_cleanup_button.isEnabled()
+        window.storage_preview_button.click()
+        wait_job(app, window)
+        assert window.storage_cleanup_table.rowCount() >= 1
+        assert "运行中" in window.storage_cleanup_hint.text()
+        # 预览后仍需勾选才能删除
+        assert not window.storage_cleanup_button.isEnabled()
+        window.storage_cleanup_table.item(0, 0).setCheckState(QtCore.Qt.CheckState.Checked)
+        assert window.storage_cleanup_button.isEnabled()
+        # 改动保留天数后权限立即失效，避免用旧清单删除
+        window._retention_changed(7)
+        assert not window.storage_cleanup_button.isEnabled()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.gui
+def test_data_management_scan_and_export_never_write_runs(tmp_path, monkeypatch):
+    import json
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(tmp_path)
+    window.show()
+    try:
+        window.storage_scan_button.click()
+        wait_job(app, window)
+        assert window.history.count() == 0  # 只读盘点不写运行记录
+        assert "未写入运行记录" in window.status.text()
+        output = tmp_path / "storage_report.json"
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                            lambda *args: (str(output), "JSON (*.json)"))
+        window.export_storage_report()
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        assert payload["kind"] == "storage_report"
+        assert payload["root"] == str(tmp_path)
+        assert window.history.count() == 0
+        assert "已导出" in window.status.text()
+        # 未扫描时导出给出提示而不是报错
+        window._storage_report = None
+        window.export_storage_report()
+        assert "请先扫描" in window.status.text()
     finally:
         window.close()
         app.processEvents()

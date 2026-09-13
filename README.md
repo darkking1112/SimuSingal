@@ -151,6 +151,18 @@ python -m signal_analysis amc-iq-manifest onnx/iq.onnx iq_manifest.json \
 
 导出的 HTML 报告（`export RUN_ID report.html`，CLI 与冻结产物同接口）除页尾完整原始 JSON 外，按结果类型附指标表：检测与 AI 检测给出“检测结果 / 传统基线”两列的真实目标数、匹配、漏警、虚警、精确率、召回、F1、中心频率 MAE、带宽相对误差与带内信噪比 MAE；调制识别给出预测类别、置信度、置信度差、是否可靠、判定说明，以及真值命中与真值带内信噪比，并把 `pending` 中**尚未确认项**单列。真值不可用按“不适用”计数，缺失字段显示 `--`。所有文本经 HTML 转义，报告为自包含离线文件。
 
+### 工作区数据管理
+
+界面“数据管理”页（在“跳频参数”之后、“运行记录”之前）盘点工作目录的占用并给出安全清理：
+
+* 按 `assets/`、`runs/`、`jobs/`、`exports/`、`catalog.sqlite3`、页面设置分别统计字节与文件数，另可把 `training/data`、`training/runs` 或模型目录加为**额外目录**（只统计容量，不建索引）；
+* 核对索引与磁盘是否一致：未入库文件、入库但文件缺失、未入库运行目录、原子写 `.tmp` 残留、源资产已删除；
+* 按“任务保留天数”列出可清理的**过期任务**与**无主文件**，需先“预览清理”再逐条勾选才能删除，删除前二次确认；
+  已入库的信号资产、运行目录与 `exports/` **永不删除**，运行中任务一律跳过；
+* **扫描与导出都是只读的**，不写入运行记录（不会让工作目录越扫越大）；每次清理往 `maintenance.log` 追加一行审计记录。
+
+统计口径、报告字段、清理规则与已知局限见 [`docs/数据管理页面.md`](docs/数据管理页面.md)。
+
 ![独立分析界面](docs/images/analysis-workbench.png)
 
 ## 通信仿真项目
@@ -177,6 +189,12 @@ python -m communication_sim --workspace /tmp/simulation-demo simulate
 ```
 
 每个数据目录保存 `project.json` 标识所属项目，仿真数据库不创建分析资产表。
+
+分析目录里另有 `maintenance.json`（数据管理页的额外目录与任务保留天数，默认 30 天，上限 3650 天）与
+`maintenance.log`（清理审计 JSONL），均可在“数据管理”页里维护。
+
+仓库根目录下的 `workspace_data/{assets,runs,jobs,catalog.sqlite3}` 是**没有 `project.json` 的旧版布局残留**，
+两个项目都不会读取或清理它；“数据管理”页只统计不删除，确认无用后请手动删除。
 
 ## 原生插件（分析项目）
 

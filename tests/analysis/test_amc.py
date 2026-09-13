@@ -345,9 +345,10 @@ def test_gui_amc_tab_renders_result(tmp_path):
     window = MainWindow(workspace)
     window.show()
     try:
-        assert window.tabs.count() == 7
+        assert window.tabs.count() == 8
         labels = [window.tabs.tabText(index) for index in range(window.tabs.count())]
-        assert labels[:5] == ["数据分析", "IQ 信号生成", "信号检测", "调制识别", "算法对比"]
+        assert labels == ["数据分析", "IQ 信号生成", "信号检测", "调制识别", "算法对比",
+                          "跳频参数", "数据管理", "运行记录"]
         assert window.amc_button.text() and window.amc_from_detect.text()
         assert "内置" in window.amc_model_status.text()  # 内置模型随包分发时应给出可用的提示
         # 无检测结果时，“取用检测结果频带”给出明确提示而不是静默无动作
