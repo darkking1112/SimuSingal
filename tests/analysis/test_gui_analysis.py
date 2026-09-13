@@ -58,7 +58,7 @@ def test_analysis_gui_workflow(tmp_path, monkeypatch):
     window = MainWindow(tmp_path)
     window.show()
     try:
-        assert window.tabs.count() == 6
+        assert window.tabs.count() == 7
         assert not hasattr(window, "sim_button")
         window.demo_button.click()
         wait_job(app, window)
@@ -114,7 +114,7 @@ def test_compare_page_pairs_ai_with_baseline(tmp_path):
         # 没有识别结果时不编造内容，只提示需要先跑一次
         window.tab_results.pop(3, None)
         window._render_compare()
-        assert "识别模型来源" not in window.compare_summary.toPlainText()
+        assert "调制识别" not in window.compare_summary.toPlainText()
     finally:
         window.close()
         app.processEvents()
@@ -176,7 +176,7 @@ def test_iq_generation_gui_workflow(tmp_path):
     window = MainWindow(tmp_path)
     window.show()
     try:
-        assert window.tabs.count() == 6
+        assert window.tabs.count() == 7
         window.tabs.setCurrentIndex(1)
         assert window.gen_signals.rowCount() == 0
         window.add_iq_signal({"mode": "qpsk", "offset": 100_000.0, "power_dbfs": -10.0,

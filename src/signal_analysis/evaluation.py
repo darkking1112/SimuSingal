@@ -37,9 +37,12 @@ truth are directly comparable.
 import numpy as np
 
 from .core_api import occupied_interval
+from ._numeric import _fh_hop_boundaries
 
 CONTRACT_VERSION = "detect_result_v1"
+HOP_CONTRACT = "fh_hops_v1"
 DETECT_ALGORITHM = "energy_detect_v1"
+HOP_ALGORITHM = "hop_track_v1"
 SNR_DEFINITION = "inband_snr_v1"
 
 
@@ -115,6 +118,80 @@ def signal_truth(summary):
     return truth
 
 
+def hop_truth(summary):
+    """Per-dwell truth for the hopping contract (``fh_hops_v1``).
+
+    One entry per hop the generator actually emitted, i.e. per entry of
+    ``hop_points`` — the hop sequence is drawn randomly, so consecutive hops
+    may reuse a channel (indistinguishable from a longer dwell), and the
+    record may end mid-sequence. Only ``fh*`` modes have this granularity,
+    every other mode returns ``[]``: their truth is the whole transmission,
+    which :func:`signal_truth` already describes.
+
+    The **band** of every entry is ``hop_bandwidth`` around the visited hop
+    point, not the generator's ``occupied_bandwidth`` (which is the measured
+    occupancy of the whole signal). With that convention the union of all
+    entries is exactly the session band reported by :func:`signal_truth`,
+    so the two granularities can be scored side by side.
+
+    ``snr_inband_db`` is converted to the per-hop bandwidth:
+    ``snr_inband_db + 10*log10(bandwidth_actual / hop_bandwidth)``. The
+    generator reports in-band SNR over its full actual bandwidth, while a
+    hop detector measures the power of a single dwell inside one hop
+    bandwidth, so the conversion subtracts ``N0·(B_actual - B_hop)``.
+    """
+    if not isinstance(summary, dict):
+        return []
+    rate = _finite_or_none(summary.get("sample_rate_hz"))
+    duration = _finite_or_none(summary.get("duration_s"))
+    truth = []
+    for session_index, entry in enumerate(summary.get("signals") or []):
+        if not isinstance(entry, dict):
+            continue
+        mode = str(entry.get("mode", ""))
+        if not mode.startswith("fh"):
+            continue
+        hop_bw = _finite_or_none(entry.get("hop_bandwidth"))
+        points = [value for value in (_finite_or_none(point)
+                                      for point in (entry.get("hop_points") or []))
+                  if value is not None]
+        if not hop_bw or hop_bw <= 0 or not points or not rate:
+            continue
+        count = _finite_or_none(entry.get("sample_count")) or (
+            rate * duration if duration else None)
+        if not count:
+            continue
+        width = _finite_or_none(entry.get("bandwidth_actual", entry.get("bandwidth")))
+        hop_rate = _finite_or_none(entry.get("hop_rate"))
+        power_dbfs = _finite_or_none(entry.get("power_dbfs_actual"))
+        session_snr = _finite_or_none(entry.get("snr_inband_db"))
+        correction = (10.0 * float(np.log10(width / hop_bw))
+                      if width and width > 0 else 0.0)
+        boundaries = _fh_hop_boundaries(int(round(count)), len(points))
+        for hop_index, point in enumerate(points):
+            start = float(boundaries[hop_index]) / rate
+            stop = float(boundaries[hop_index + 1]) / rate
+            truth.append({
+                "index": len(truth),
+                "mode": mode,
+                "session_index": session_index,
+                "hop_index": hop_index,
+                "hop_count": len(points),
+                "center_hz": _rounded(point),
+                "bandwidth_hz": _rounded(hop_bw),
+                "f_low_hz": _rounded(point - hop_bw / 2.0),
+                "f_high_hz": _rounded(point + hop_bw / 2.0),
+                "t_start_s": _rounded(start),
+                "t_end_s": _rounded(stop),
+                "dwell_s": _rounded(stop - start),
+                "hop_rate_hz": _rounded(hop_rate),
+                "power_dbfs": power_dbfs,
+                "snr_inband_db": (None if session_snr is None
+                                  else _rounded(session_snr + correction)),
+            })
+    return truth
+
+
 def match_detections(truth, detections, gate_ratio=0.75):
     """Greedy one-to-one matching of detections to truth by centre distance.
 
@@ -156,8 +233,14 @@ def match_detections(truth, detections, gate_ratio=0.75):
     return matched
 
 
-def evaluate_detections(truth, detections, gate_ratio=0.75):
-    """Detection metrics for the frozen contract.
+def evaluate_detections(truth, detections, gate_ratio=0.75, contract=CONTRACT_VERSION):
+    """Detection metrics for the detection contracts.
+
+    Used unchanged by both frozen contracts: ``detect_result_v1`` (one
+    instance per transmission) and ``fh_hops_v1`` (one instance per hop).
+    The only difference is the ``contract`` string written into the result,
+    so ``contract=HOP_CONTRACT`` scores hop entries; everything else —
+    the matching gate, the reported errors — has the same meaning.
 
     Reported values: ``true/detected/matched/missed/false_alarm``, precision,
     recall, F1, ``center_mae_hz``, ``center_rmse_hz``, ``bandwidth_mape``
@@ -211,7 +294,7 @@ def evaluate_detections(truth, detections, gate_ratio=0.75):
         f1 = (2 * safe_precision * safe_recall / (safe_precision + safe_recall)
               if (safe_precision + safe_recall) > 0 else 0.0)
     return {
-        "contract": CONTRACT_VERSION,
+        "contract": contract,
         "snr_definition": SNR_DEFINITION,
         "true": true_count,
         "detected": detection_count,

@@ -72,6 +72,19 @@ SigMF 不必指定 `--sample-rate`；显式指定时必须与文件一致。其�
 python -m signal_analysis detect ASSET_ID --nfft 512 --threshold-db 3 --max-detections 32
 ```
 
+### 跳频逐跳参数估计（`detect-hops`）
+
+界面“跳频参数”页，或 CLI `detect-hops`：同一份 STFT 时频图上做逐帧门限游程，再以时频脊线跟踪把属于同一部发射机的跳接成轨道，对每跳用细网格复算占用带宽与带内 SNR，最后给出跳频点、跳时刻、驻留时间、跳速、占空比与会话分组。结果是独立契约 `fh_hops_v1`（算法 `hop_track_v1`），**不改变**冻结的 `detect_result_v1`；`summary.baseline` 只读复用会话级结果，报告里两套指标并排。
+
+```bash
+python -m signal_analysis detect-hops ASSET_ID --nfft 512 --threshold-db 6
+python -m signal_analysis detect-hops ASSET_ID --max-hops 64 --no-sessions
+```
+
+驻留时间与跳速存在**可分辨下限**（帧间距与最小驻留共同决定），不可分辨时结果会显式给出 `resolvable=false` 与 `reason`，而不是静默给出乐观数字。逐跳真值只在生成器产出且记录了生成摘要时存在（`hop_truth`），否则报告标“不适用”。
+
+同一契约还有 **AI 逐跳通路** `ml-detect-hops`（算法标识 `ml_detect_hops:<模型 id>`，需清单声明 `label_semantics=per_hop_v1`）：网络在时频图上直接给出逐跳候选框，框之后的驻留/功率/带宽/SNR 重测与会话归并**复用同一套逐跳逻辑**，因此 AI 与传统逐跳的物理量可直接并排比较，报告里另外给出 AI 逐跳/传统逐跳/会话级三列指标；`--no-traditional` 可关掉传统逐跳基线，`--no-sessions` 时连会话级基线也不跑。每条 AI 逐跳明细多一个 `model_confidence`（网络分数，**不是概率、未标定**）供追溯。
+
 ### AI 检测（可选，ONNX Runtime）
 
 ```bash
@@ -81,7 +94,16 @@ python -m signal_analysis ml-manifest model.onnx detector.json --image-size 1024
 python -m signal_analysis ml-detect ASSET_ID detector.json --score-threshold 0.25
 ```
 
-模型清单声明输入图像契约（尺寸、STFT 点数、动态范围、归一化方式）与输出框格式，推理时强制与清单一致而不是静默改变输入；`ml-detect` 默认同时跑一遍能量检测基线，两条路径的指标可直接对照。训练、导出与验收脚本见 [`training/`](training/README.md)（该目录不随 wheel 分发，训练依赖 `.[train]`）。
+模型清单声明输入图像契约（尺寸、STFT 点数、动态范围、归一化方式）与输出框格式，推理时强制与清单一致而不是静默改变输入；`ml-detect` 默认同时跑一遍能量检测基线，两条路径的指标可直接对照。逐跳模型用 `ml-detect-hops`（清单需 `--label-semantics per_hop_v1`）：
+
+```bash
+python -m signal_analysis ml-manifest hops.onnx hops.json --image-size 1024 --nfft 512 \
+    --label-semantics per_hop_v1 --license Apache-2.0
+# --workspace 是全局选项，必须放在子命令之前；清单是位置参数
+python -m signal_analysis --workspace workspace_data/analysis ml-detect-hops ASSET_ID hops.json
+```
+
+会话级清单与逐跳清单不能互换：用错粒度会在推理前直接报错，而不是静默给出“一跳等于整段传输”的假结果。训练、导出与验收脚本见 [`training/`](training/README.md)（该目录不随 wheel 分发，训练依赖 `.[train]`；逐跳模型的数据集与训练参数见其 §2.1 / §3.1）。
 
 ### 调制识别（A09 六类）
 
@@ -96,6 +118,28 @@ python -m signal_analysis amc-manifest model.json amc.json --id dut --version 1.
 随包分发一个**线性基线**模型（`amc-linear-default`，34 维特征上的多项逻辑回归，含温度标定），无需 `.[ml]` 即可离线使用；仓库内实测（800 次/类合成场景，验证集）准确率 0.8250、macro F1 0.8246，带内 SNR ≥ 10 dB 时 ≥ 0.97，主要误差来自 10 dB 以下 16QAM 与 64QAM 之间的混淆。结果结构为冻结的 `amc_classify_v1`，同时给出传统启发式对照（数字/模拟、恒包络/非恒包络），字段 `pending` 明确列出**尚未确认项**：识别准确率的合格门限尚未确定，因此只报原始指标而不做通过/不通过判定。
 
 生成数据会带上生成器真值并逐条计命中（`truth_hit`）；导入数据或原生插件产出没有真值，此时接口返回 `不适用` 并**保留失败样本计数**，不静默丢弃。`am` 与跳频样式不在 A09 六类字典内，按“不适用”计入统计而不算识别错误。训练、导出与验收脚本见 [`training/README.md`](training/README.md) §6。
+
+#### 原始 IQ 通路（`amc_iq_classify_v1`）
+
+同一页面改选一个**原始 IQ 模型清单**（`input.contract = iq_waveform_v1`）即可走第二条通路：不提取 34 维特征，
+而是把“搬到零频 → 抽取到与带宽匹配的分析率 → 取中一段定长窗口 → 单位 RMS 归一化”后的 `(2, N)` 复数波形
+直接交给 CNN/TCN 分类器。前端抽取口径与特征通路**共用同一份实现**（抽取比 8.0、低通抽头 65），
+所以同一带宽下两条通路的分析带宽与滤波器完全一致；差别只在“交给判别器的东西”。
+
+```bash
+python -m signal_analysis amc-iq-classify ASSET_ID --model training/runs/iq/iq_manifest.json
+python -m signal_analysis amc-iq-classify ASSET_ID --model iq_manifest.json \
+    --offset-hz 0 --bandwidth-hz 30000 --threads 4
+python -m signal_analysis amc-iq-manifest onnx/iq.onnx iq_manifest.json \
+    --id iq-cnn-v1 --version 0.1.0 --samples 1024
+```
+
+类别字典由清单声明（`a09` 六类，或 `custom` 自定义且不超过 64 类），窗口长度必须与清单 `input.samples` 一致：
+短于 64 点或长于 65536 点直接报错，**不补零、不截断**——短窗口补零会让“看起来像噪声”的输入也能出高置信度结果。
+结果是冻结的 `amc_iq_classify_v1`，含波形摘要（窗口起点、RMS、峰值因数、`snr_estimate_db`）、各类分数与可信度提示；
+与特征通路一样，`pending` 明确列出**识别准确率的合格门限尚未确认**，所以只报原始指标、不做通过判定。
+这条通路没有 34 维特征向量，因此不提供传统启发式对照行（对照只对确定性特征有意义）。
+数据集的构建（可混入 TorchSig 补充数据）、训练与验收见 [`training/README.md`](training/README.md) §7。
 
 ### 算法对比与离线报告
 
@@ -186,13 +230,19 @@ python scripts/build_desktop.py simulation dist/wheels/communication_sim-0.2.0-p
 ### 算法设计文档
 
 信号检测与调制识别各自的传统算法、AI 算法独立成篇，内容包含算法思路、公式推导、流程图、
-输入输出参数、当前参考文献、设计局限与可改进方向（含改进所需文献）：
+输入输出参数、设计局限与可改进方向（含改进所需文献）、当前参考文献：
 
 | 任务 | 传统算法 | AI 算法 |
 | --- | --- | --- |
-| 信号检测（时频域） | [传统能量检测](docs/algorithms/信号检测_传统能量检测.md) | [AI 时频图检测](docs/algorithms/信号检测_AI时频图检测.md) |
-| 调制识别（A09 六类） | [传统特征与启发式判定](docs/algorithms/调制识别_传统特征与启发式判定.md) | [AI 特征学习](docs/algorithms/调制识别_AI特征学习.md) |
+| 信号检测（会话级，时频域） | [传统能量检测](docs/algorithms/信号检测_传统能量检测.md) | [AI 时频图检测](docs/algorithms/信号检测_AI时频图检测.md) |
+| 信号检测（跳频逐跳） | [跳频逐跳参数估计](docs/algorithms/信号检测_跳频逐跳参数估计.md) | [AI 时频图检测](docs/algorithms/信号检测_AI时频图检测.md) §7（`ml-detect-hops`，需清单 `per_hop_v1`） |
+| 调制识别（A09 六类，特征通路） | [传统特征与启发式判定](docs/algorithms/调制识别_传统特征与启发式判定.md) | [AI 特征学习](docs/algorithms/调制识别_AI特征学习.md) |
+| 调制识别（原始 IQ 通路） | 无（无确定特征可对照） | [AI 特征学习](docs/algorithms/调制识别_AI特征学习.md) §7 |
 
-四篇文档以**已实现代码**为准逐项核对公式与常量；其中 A09 调制识别的两条路径共用同一份
+五篇文档以**已实现代码**为准逐项核对公式与常量；其中会话级与逐跳两条检测路径共用同一份
+STFT 与带内信噪比口径（`inband_snr_v1`），只是粒度不同（一条链路 vs 一跳）；
+A09 调制识别的两条路径共用同一份
 34 维确定性特征契约（`amc_feature_vector_v1`），因此“传统”与“AI”的差别只体现在最后的判别层，
-两者可直接同口径比较。识别准确率的合格门限仍为**待确认项**，文档只给原始指标与局限，不作通过判定。
+两者可直接同口径比较。原始 IQ 通路是另一条输入契约（`iq_waveform_v1` / `amc_iq_classify_v1`）：
+它不共用 34 维特征，而是让网络直接学波形，因此**不与特征通路做同口径对比**，只与自己的基线比。
+识别准确率的合格门限仍为**待确认项**，文档只给原始指标与局限，不作通过判定。

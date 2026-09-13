@@ -18,7 +18,17 @@ import time
 
 import numpy as np
 
-from .._numeric import _SNR_FLOOR_DB, _merge_sessions, _occupied_span
+from .._numeric import (
+    _SNR_FLOOR_DB,
+    _finalise_hops,
+    _group_hop_sessions,
+    _hop_config,
+    _merge_sessions,
+    _occupied_span,
+    _refine_hop_bands,
+    _smooth_psd,
+    validate_samples,
+)
 from .decode import (
     DEFAULT_IOU_THRESHOLD,
     DEFAULT_SCORE_THRESHOLD,
@@ -27,8 +37,11 @@ from .decode import (
 )
 from .manifest import (
     DEFAULT_DYNAMIC_RANGE_DB,
+    DEFAULT_LABEL_SEMANTICS,
     DEFAULT_NFFT,
     IMAGE_LAYOUT,
+    LABEL_SEMANTICS,
+    LABEL_SEMANTICS_FIELD,
 )
 from .runtime import load_runner
 from .tensor import (
@@ -44,12 +57,24 @@ from .tensor import (
 DETECTION_METHOD = "ml"
 CONTRACT = "detect_result_v1"
 SNR_DEFINITION = "inband_snr_v1"
+#: 逐跳结果契约与算法名（与会话级 ``detect_result_v1`` 完全不同的消费方式：
+#: 一跳一个实例，可用于 :func:`signal_analysis.evaluation.evaluate_detections`
+#: 的逐跳口径评分）。
+HOP_CONTRACT = "fh_hops_v1"
+HOP_ALGORITHM = "ml_detect_hops"
+#: 模型清单里标签语义的取值（见 :mod:`signal_analysis.ml.manifest`）
+PER_HOP_SEMANTICS = "per_hop_v1"
 # 传给 STFT/能量基线的配置项（能量检测器会自行校验取值范围）
 CONTEXT_KEYS = ("nfft", "threshold_db", "band_threshold_db", "min_bandwidth_hz",
                 "min_duration_s", "max_detections", "merge_bins")
 # AI 路径特有的配置项
 ML_KEYS = ("score_threshold", "iou_threshold", "dynamic_range_db", "image_size",
            "threads", "image_contract")
+# 逐跳解码特有的配置项。取值范围不在本模块重复定义，而是交给
+# ``_numeric._hop_config`` —— 与 ``detect-hops`` 命令行完全同一套校验，
+# 因此“AI 逐跳”与“传统逐跳”的参数含义与边界完全相同。
+HOP_KEYS = ("max_hops", "min_dwell_s", "smooth_frames", "merge_bins",
+            "min_bandwidth_hz", "max_gap_frames", "max_gap_bins")
 _NUMERIC_KEYS = ("nfft", "threshold_db", "band_threshold_db", "min_bandwidth_hz",
                  "min_duration_s", "max_detections", "merge_bins",
                  "score_threshold", "iou_threshold", "dynamic_range_db", "image_size")
@@ -76,10 +101,15 @@ def _contract_input(manifest):
     return {}
 
 
-def _resolve_settings(config, contract):
-    """校验配置并与模型清单对齐，返回 ``(设置, 上下文配置)``。"""
+def _resolve_settings(config, contract, extra_keys=()):
+    """校验配置并与模型清单对齐，返回 ``(设置, 上下文配置)``。
+
+    ``extra_keys`` 给出本模块不自行校验、但允许出现在配置里的额外键
+    （逐跳解码用 :data:`HOP_KEYS`，由 ``_hop_config`` 校验）。默认空元组，
+    :func:`ml_detect` 的行为不受影响。
+    """
     settings = dict(config or {})
-    unknown = sorted(set(settings) - set(CONTEXT_KEYS) - set(ML_KEYS))
+    unknown = sorted(set(settings) - set(CONTEXT_KEYS) - set(ML_KEYS) - set(extra_keys))
     if unknown:
         raise ValueError(f"不支持的检测配置项：{'、'.join(unknown)}")
     # 与清单冲突的项直接报错：图像生成方式必须与训练时一致（数值一致性前提）
@@ -338,4 +368,415 @@ def ml_detect(samples, sample_rate, config=None, model=None, runner=None,
     return summary, arrays
 
 
-__all__ = ["CONTEXT_KEYS", "ML_KEYS", "ml_detect"]
+def _label_semantics(manifest):
+    """模型清单声明的标签语义；缺失时按会话级（兼容历史清单）。"""
+    value = manifest.get(LABEL_SEMANTICS_FIELD)
+    if value is None:
+        training = manifest.get("training")
+        if isinstance(training, dict):
+            value = training.get(LABEL_SEMANTICS_FIELD)
+    if value is None:
+        return DEFAULT_LABEL_SEMANTICS
+    if value not in LABEL_SEMANTICS:
+        raise ValueError(f"模型清单的标签语义不被支持：{value!r}")
+    return value
+
+
+def _boxes_to_tracks(candidates, frequency, frame_time, resolution):
+    """模型框 → :func:`_finalise_hops` 需要的轨道字典。
+
+    Route B 的全部要点就在这里：网络只回答“一跳在时频图的哪一块”，所以每个
+    框只需要映射回 ``_finalise_hops`` 用的两个几何量——``runs``（频点区间）与
+    ``first_frame``/``last_frame``（帧区间）。驻留时间、功率、单跳占用带宽、
+    带内信噪比随后都由 :func:`_finalise_hops` 与 :func:`_refine_hop_bands` 在
+    **原始 PSD** 上重新测量，因此 AI 逐跳与传统逐跳的这些物理量同一口径，
+    可以直接并排比较，而不需要动 ``_numeric`` 一个字符。
+
+    帧区间用帧中心落在框内来取（与 :func:`_refine_hop_bands` 同一约定），
+    至少保留一帧——窄于一帧的框仍应产生一次测量机会，是否成立交给
+    ``min_dwell_frames`` 过滤，而不是在这里静默丢弃。
+    """
+    tracks = []
+    for index, candidate in enumerate(candidates, start=1):
+        band = candidate["band"]
+        bins = band_bins(frequency, band["f_low_hz"], band["f_high_hz"], resolution)
+        if bins.size == 0:
+            nearest = int(np.argmin(np.abs(frequency
+                                           - 0.5 * (band["f_low_hz"] + band["f_high_hz"]))))
+            bins = np.array([nearest], dtype=np.int64)
+        first_frame = int(np.searchsorted(frame_time, band["t_start_s"], side="left"))
+        last_frame = int(np.searchsorted(frame_time, band["t_end_s"], side="right")) - 1
+        first_frame = max(0, min(first_frame, frame_time.size - 1))
+        last_frame = max(first_frame, min(last_frame, frame_time.size - 1))
+        tracks.append({
+            "id": index,
+            "first_frame": first_frame,
+            "last_frame": last_frame,
+            "frames": [first_frame, last_frame],
+            "runs": [(int(bins[0]), int(bins[-1]))],
+            "transition_frames": 0,
+            "confidence": candidate["confidence"],
+            "label": candidate["label"],
+            "box": candidate["box"],
+        })
+    return tracks
+
+
+def _attach_model_scores(hops, tracks, frame_time, frequency):
+    """把每个跳标注回产生它的候选框：``model_confidence`` 与 ``model_label``。
+
+    ``_finalise_hops`` 会按最短驻留/最小带宽剔除一部分轨道（弱框更容易被剔除），
+    返回的跳与轨道不是一一对应，所以这里按几何量重新配对：取帧区间重叠帧数最多
+    的轨道，同分取频带中心最近的那个。这么做只影响“这一跳来自哪个框”的标注，
+    物理量仍然全部来自原始 PSD 上的重测。
+
+    ``model_confidence`` 回答的是“这一跳存在吗”（网络给出的分数，可直接用于筛弱
+    候选），与 ``confidence``（由带内信噪比换算出来的量测置信度）不是同一件事，
+    因此单列一个字段而不是复用 ``confidence``。
+    """
+    if not hops or not tracks or frame_time.size == 0:
+        return
+    last_index = frame_time.size - 1
+    last_bin = frequency.size - 1
+    spans = []
+    for track in tracks:
+        first_bin, stop_bin = track["runs"][0]
+        first_bin = max(0, min(int(first_bin), last_bin))
+        stop_bin = max(0, min(int(stop_bin), last_bin))
+        spans.append((track["first_frame"], track["last_frame"],
+                      0.5 * (frequency[first_bin] + frequency[stop_bin]), track))
+    for hop in hops:
+        low = int(np.searchsorted(frame_time, hop["t_start_s"], side="left"))
+        high = int(np.searchsorted(frame_time, hop["t_end_s"], side="right")) - 1
+        low = max(0, min(low, last_index))
+        high = max(low, min(high, last_index))
+        centre = 0.5 * (hop["f_low_hz"] + hop["f_high_hz"])
+        best, best_key = None, None
+        for first, stop, band_centre, track in spans:
+            overlap = min(high, stop) - max(low, first) + 1
+            key = (overlap, -abs(band_centre - centre))
+            if best_key is None or key > best_key:
+                best, best_key = track, key
+        if best is not None:
+            hop["model_confidence"] = float(best["confidence"])
+            hop["model_label"] = best["label"]
+
+
+def _multi_hop_frames(hops, frame_time):
+    """同一帧上多于一个跳处于活动状态的帧数。
+
+    传统通路里 ``transition_frames`` 统计的是“一帧上多于一条谱游程”的帧——
+    即跳变帧或并发发射机。AI 通路不做逐帧游程链接，但同一件事可以照量：
+    一跳就是一个时频块，所以“一帧上覆盖了多于一个跳”就是同一含义的统计量，
+    两条通路的读数因此仍然可比（而不是留一个没有定义的数字）。
+    """
+    if frame_time.size == 0 or not hops:
+        return 0
+    counts = np.zeros(frame_time.size, dtype=np.int64)
+    for item in hops:
+        low = int(np.searchsorted(frame_time, item["t_start_s"], side="left"))
+        high = int(np.searchsorted(frame_time, item["t_end_s"], side="right"))
+        if high > low:
+            counts[low:high] += 1
+    return int(np.count_nonzero(counts > 1))
+
+
+def _hop_reason(resolved, hops, resolvable, rate, hop_samples):
+    """逐跳诚实性出口：可分辨门限的说明文案与 :func:`detect_hops` 相同。"""
+    if not hops:
+        return (f"没有一跳同时满足最小带宽 {resolved['min_bandwidth_hz']:.0f} Hz 与"
+                f"最短驻留 {resolved['min_dwell_frames']} 帧（候选框为空或被驻留过滤全部剔除）；"
+                "请放宽门限、降低置信度阈值或增大分析点数")
+    if not resolvable:
+        return (f"STFT 帧间距 {hop_samples / rate * 1000.0:.3f} ms、一跳至少"
+                f"{resolved['min_dwell_frames']} 帧，跳速高于"
+                f"{rate / hop_samples / resolved['min_dwell_frames']:.1f} Hz 时驻留不足、逐跳不可分辨")
+    return None
+
+
+def _hop_entries(hops):
+    """逐跳测量 → ``fh_hops_v1`` 的 ``hops`` 条目（舍入口径与 :func:`detect_hops` 一致）。
+
+    AI 通路额外带上 ``model_confidence`` / ``model_label``：传统通路没有模型，
+    这两个键不出现（而不是填 0 或 None），界面与报告按“缺值”显示。
+    """
+    entries = []
+    for item in hops:
+        entry = {
+            "id": item["id"],
+            "session_id": item["session_id"],
+            "center_hz": round(item["center_hz"], 3),
+            "centroid_hz": round(item["centroid_hz"], 3),
+            "bandwidth_hz": round(item["bandwidth_hz"], 3),
+            "f_low_hz": round(item["f_low_hz"], 3),
+            "f_high_hz": round(item["f_high_hz"], 3),
+            "t_start_s": round(item["t_start_s"], 6),
+            "t_end_s": round(item["t_end_s"], 6),
+            "dwell_s": round(item["dwell_s"], 6),
+            "power_dbfs": round(float(10.0 * np.log10(max(item["power_linear"], 1e-30))), 3),
+            "snr_db": round(item["snr_db"], 3),
+            "confidence": round(item["confidence"], 3),
+            "frame_count": int(item["frame_count"]),
+            "bin_count": int(item["bin_count"]),
+            "band_nfft": int(item["band_nfft"]),
+            "mask_f_low_hz": round(item["mask_f_low_hz"], 3),
+            "mask_f_high_hz": round(item["mask_f_high_hz"], 3),
+            "mask_bandwidth_hz": round(item["mask_bandwidth_hz"], 3),
+        }
+        if "model_confidence" in item:
+            entry["model_confidence"] = round(float(item["model_confidence"]), 4)
+            entry["model_label"] = item.get("model_label")
+        entries.append(entry)
+    return entries
+
+
+def _session_entries(sessions):
+    """逐跳会话 → ``fh_hops_v1`` 的 ``sessions`` 条目。"""
+    entries = []
+    for session in sessions:
+        entries.append({
+            "session_id": session["session_id"],
+            "hop_count": int(session["hop_count"]),
+            "sequence": [round(value, 3) for value in session["sequence"]],
+            "hop_frequencies_hz": [round(value, 3) for value in session["hop_frequencies_hz"]],
+            "channel_spacing_hz": (None if session["channel_spacing_hz"] is None
+                                   else round(session["channel_spacing_hz"], 3)),
+            "hop_span_hz": round(session["hop_span_hz"], 3),
+            "hop_bandwidth_hz": round(session["hop_bandwidth_hz"], 3),
+            "hop_period_s": (None if session["hop_period_s"] is None
+                             else round(session["hop_period_s"], 6)),
+            "hop_rate_hz": (None if session["hop_rate_hz"] is None
+                            else round(session["hop_rate_hz"], 3)),
+            "duty_cycle": (None if session["duty_cycle"] is None
+                           else round(session["duty_cycle"], 4)),
+            "dwell_median_s": round(session["dwell_median_s"], 6),
+            "dwell_min_s": round(session["dwell_min_s"], 6),
+            "dwell_max_s": round(session["dwell_max_s"], 6),
+            "center_hz": round(session["center_hz"], 3),
+            "bandwidth_hz": round(session["bandwidth_hz"], 3),
+            "f_low_hz": round(session["f_low_hz"], 3),
+            "f_high_hz": round(session["f_high_hz"], 3),
+            "t_start_s": round(session["t_start_s"], 6),
+            "t_end_s": round(session["t_end_s"], 6),
+            "power_dbfs": round(float(10.0 * np.log10(max(session["power_linear"], 1e-30))), 3),
+            "snr_db": round(session["snr_db"], 3),
+            "session_detection_id": session["session_detection_id"],
+        })
+    return entries
+
+
+def ml_detect_hops(samples, sample_rate, config=None, model=None, runner=None,
+                   threads=None, with_sessions=True, with_traditional=True):
+    """逐跳 AI 估计入口，返回 ``(summary, arrays)``（契约 ``fh_hops_v1``）。
+
+    只接受 ``label_semantics = per_hop_v1`` 的模型。会话级模型（一段传输一个框）
+    即使在这里调用也只会得到“一跳等于整段传输”的假结果——一个 8 跳的信号会被
+    报成 1 跳——所以本函数直接报错并指出该走哪条路，而不是静默给出对不上的数字。
+
+    与 :func:`ml_detect` 的分工（Route B）：
+
+    * **判决**（一跳在时频图的哪一块）来自网络，模型只提供频带与粗略时间；
+    * **辐射量**（驻留时间、功率、单跳占用带宽、带内信噪比）全部由
+      :func:`_finalise_hops` / :func:`_refine_hop_bands` 在**原始 PSD** 上重新
+      测量，所以 AI 逐跳与传统逐跳的这些量是同一口径的实测值、可直接对比；
+    * **不经过会话合并**：``_merge_sessions`` 会把同一发射机的多跳并成一个会话，
+      那是会话级契约该有的行为，逐跳结果必须绕开它。
+
+    ``with_sessions`` 与 :func:`detect_hops` 同义：把 :func:`detect_signals` 的
+    会话级检出放在 ``summary["baseline"]``，并按频带重叠把每个会话关联到对应检出
+    （``session_detection_id``）；关掉就不再跑这段会话级能量检测。
+    ``with_traditional`` 用**同一份逐跳配置**再跑一次 :func:`detect_hops`，结果
+    放在 ``summary["traditional"]``（传统逐跳基线）。
+
+    结果与 :func:`detect_hops` 的键集逐位对齐，因此渲染、表格与逐跳评分器
+    （``evaluate_detections(..., contract=HOP_CONTRACT)``）无需任何改动；只有逐跳
+    明细额外多出 ``model_confidence`` / ``model_label`` 两个键（模型分数），
+    传统通路没有这两个键，界面与报告按“不适用”显示。
+    """
+    manifest = {}
+    if runner is None:
+        if not model:
+            raise ValueError("请提供模型清单路径（model=...）或已加载的推理会话")
+        runner, manifest, _ = load_runner(model, threads=threads)
+        manifest = dict(manifest)
+    else:
+        manifest = dict(getattr(runner, "manifest", {}) or {})
+    semantics = _label_semantics(manifest)
+    if semantics != PER_HOP_SEMANTICS:
+        raise ValueError(
+            f"模型清单的标签语义是 {semantics}（一段传输一个框），不能用于逐跳估计"
+            f"（本通路要求 {PER_HOP_SEMANTICS}）；"
+            "请用 training/build_dataset.py --labels hop 重建数据集并重训，"
+            "或改用 ml-detect（会话级检测）")
+    contract = _contract_input(manifest)
+    resolved, context_config = _resolve_settings(config, contract, extra_keys=HOP_KEYS)
+    model_name = getattr(runner, "model_name", None) or manifest.get("id", "injected")
+    settings = dict(config or {})
+    hop_config = {key: settings[key] for key in HOP_KEYS if key in settings}
+
+    started = time.perf_counter()
+    energy_summary, arrays = spectral_context(samples, sample_rate, context_config)
+    context_ms = (time.perf_counter() - started) * 1000.0
+    rate = float(energy_summary["sample_rate_hz"])
+    duration = float(energy_summary["duration_s"])
+    nfft = int(energy_summary["nfft"])
+    hop_samples = int(energy_summary["hop_samples"])
+    # 逐跳配置的 nfft 必须与产出 PSD 的 STFT 网格一致：``_hop_config`` 会据此
+    # 推出频点宽度与帧间距，用另一个值会让带宽/驻留的换算整体错位。
+    hop_config["nfft"] = nfft
+    hop_resolved = _hop_config(rate, duration, hop_config)
+    resolution = float(energy_summary["freq_resolution_hz"])
+
+    image, meta = detection_image(arrays, energy_summary, resolved["image_size"],
+                                  resolved["dynamic_range_db"])
+    inference_started = time.perf_counter()
+    output = runner.run(image)
+    inference_ms = (time.perf_counter() - inference_started) * 1000.0
+    rows, output_shape = parse_model_output(output)
+    labels = list(manifest.get("labels") or ["emitter"])
+    candidates = boxes_to_bands(
+        rows, meta,
+        score_threshold=resolved["score_threshold"],
+        iou_threshold=resolved["iou_threshold"],
+        # 候选上限不能低于 max_hops，否则一跳一个框的模型会在解码阶段被截断
+        max_detections=max(64, min(512, hop_resolved["max_hops"])),
+        min_bandwidth_hz=resolved["min_bandwidth_hz"],
+        min_duration_s=resolved["min_duration_s"],
+        labels=labels,
+    )
+
+    x = validate_samples(samples)
+    frame_time = np.asarray(arrays["frame_time"], dtype=np.float64)
+    frequency = np.asarray(arrays["frequency"], dtype=np.float64)
+    # 原始 PSD：detect_signals 的 arrays 里存的是 dB，逐跳测量需要线性功率
+    psd = 10.0 ** (np.asarray(arrays["spectrogram_db"], dtype=np.float64) / 10.0)
+    # 帧起始样点由帧中心反推（arrays 只保留中心时刻，舍入可无损还原整数索引）
+    starts = np.rint(frame_time * rate - (nfft - 1) / 2.0).astype(np.int64)
+    noise_floor_db = float(np.asarray(arrays["noise_floor_db"]).reshape(-1)[0])
+    noise_linear = 10.0 ** (noise_floor_db / 10.0)
+
+    tracks = _boxes_to_tracks(candidates, frequency, frame_time, resolution)
+    hops = _finalise_hops(tracks, psd, frequency, starts, nfft, rate, duration,
+                          noise_linear, hop_resolved)
+    _refine_hop_bands(hops, x, rate, noise_linear, hop_resolved,
+                      hop_resolved["threshold_db"], nfft)
+    if len(hops) > hop_resolved["max_hops"]:
+        hops.sort(key=lambda item: -item["power_linear"])
+        hops = hops[:hop_resolved["max_hops"]]
+    hops.sort(key=lambda item: (item["t_start_s"], item["center_hz"]))
+    for index, item in enumerate(hops, start=1):
+        item["id"] = index
+        item["session_id"] = None
+    _attach_model_scores(hops, tracks, frame_time, frequency)
+    sessions = _group_hop_sessions(hops, noise_linear, duration, resolution,
+                                   hop_samples / rate)
+    transition_frames = _multi_hop_frames(hops, frame_time)
+    dwell_limit_s = hop_resolved["min_dwell_frames"] * hop_samples / rate
+    resolvable = bool(hops) and min(item["dwell_s"] for item in hops) >= dwell_limit_s
+
+    hop_entries = _hop_entries(hops)
+    session_entries = _session_entries(sessions)
+    smoothed = _smooth_psd(psd, hop_resolved["smooth_frames"])
+    summary = {
+        "contract": HOP_CONTRACT,
+        "algorithm": f"{HOP_ALGORITHM}:{model_name}",
+        "snr_definition": SNR_DEFINITION,
+        "frequency_reference": "baseband_offset",
+        "sample_rate_hz": rate,
+        "sample_count": int(x.size),
+        "duration_s": duration,
+        "nfft": nfft,
+        "hop_samples": hop_samples,
+        "frame_count": int(psd.shape[0]),
+        "config": {
+            "nfft": nfft,
+            "threshold_db": hop_resolved["threshold_db"],
+            "smooth_frames": hop_resolved["smooth_frames"],
+            "min_bandwidth_hz": round(hop_resolved["min_bandwidth_hz"], 6),
+            "min_dwell_s": round(hop_resolved["min_dwell_s"], 9),
+            "merge_bins": hop_resolved["merge_bins"],
+            "max_gap_frames": hop_resolved["max_gap_frames"],
+            "max_gap_bins": hop_resolved["max_gap_bins"],
+            "transition_ratio": hop_resolved["transition_ratio"],
+            "max_hops": hop_resolved["max_hops"],
+            "score_threshold": resolved["score_threshold"],
+            "iou_threshold": resolved["iou_threshold"],
+            "image_size": resolved["image_size"],
+            "dynamic_range_db": resolved["dynamic_range_db"],
+        },
+        "freq_resolution_hz": resolution,
+        "frame_interval_s": hop_samples / rate,
+        "noise_floor_dbfs_per_hz": round(noise_floor_db, 3),
+        "threshold_dbfs_per_hz": energy_summary["threshold_dbfs_per_hz"],
+        "dwell_limit_s": dwell_limit_s,
+        "hop_rate_limit_hz": 1.0 / dwell_limit_s,
+        "resolvable": resolvable,
+        "reason": _hop_reason(hop_resolved, hops, resolvable, rate, hop_samples),
+        "transition_frames": transition_frames,
+        "model": _model_info(runner, manifest),
+        "image": {
+            "layout": meta["layout"],
+            "size": meta["size"],
+            "db_floor": round(meta["db_floor"], 3),
+            "db_ceiling": round(meta["db_ceiling"], 3),
+        },
+        "raw_boxes": {
+            "output_shape": list(np.shape(output)),
+            "rows": int(rows.shape[0]),
+            "candidates": len(candidates),
+            "score_threshold": resolved["score_threshold"],
+        },
+        "timing": {
+            "context_ms": round(context_ms, 3),
+            "inference_ms": round(inference_ms, 3),
+            "total_ms": round((time.perf_counter() - started) * 1000.0, 3),
+        },
+        "hops": hop_entries,
+        "sessions": session_entries,
+    }
+    if with_sessions:
+        summary["baseline"] = {
+            "contract": energy_summary["contract"],
+            "algorithm": energy_summary["algorithm"],
+            "threshold_dbfs_per_hz": energy_summary["threshold_dbfs_per_hz"],
+            "detections": energy_summary["detections"],
+        }
+        # 会话与会话级检出互链（取频带重叠最多的一条），与 detect_hops 同一规则
+        for session in summary["sessions"]:
+            best, best_overlap = None, 0.0
+            for detection in energy_summary["detections"]:
+                overlap = min(session["f_high_hz"], detection["f_high_hz"]) \
+                    - max(session["f_low_hz"], detection["f_low_hz"])
+                if overlap > best_overlap:
+                    best, best_overlap = detection["id"], overlap
+            session["session_detection_id"] = best
+    if with_traditional:
+        from ..core_api import detect_hops
+
+        traditional, _ = detect_hops(x, rate, hop_config, False)
+        summary["traditional"] = traditional
+
+    hop_boxes = [[item["f_low_hz"], item["f_high_hz"], item["t_start_s"], item["t_end_s"]]
+                 for item in hop_entries]
+    arrays = dict(arrays)
+    arrays.update({
+        "spectrogram_db": (10.0 * np.log10(np.maximum(smoothed, 1e-30))).astype(np.float32),
+        "spectrogram_raw_db": (10.0 * np.log10(np.maximum(psd, 1e-30))).astype(np.float32),
+        "hop_boxes": np.asarray(hop_boxes, dtype=np.float64).reshape(-1, 4),
+        "hop_id": np.array([item["id"] for item in hop_entries], dtype=np.int64),
+        "hop_session_id": np.array([item["session_id"] for item in hop_entries], dtype=np.int64),
+        "hop_snr_db": np.array([item["snr_db"] for item in hop_entries], dtype=np.float64),
+        "hop_power_dbfs": np.array([item["power_dbfs"] for item in hop_entries],
+                                   dtype=np.float64),
+        "model_boxes": np.asarray([item["box"] for item in candidates],
+                                  dtype=np.float64).reshape(-1, 4),
+        "model_scores": np.asarray([item["confidence"] for item in candidates],
+                                   dtype=np.float64),
+        "model_labels": np.array([item["label"] for item in candidates], dtype=object),
+        "image_size": np.array([meta["size"]], dtype=np.int64),
+    })
+    return summary, arrays
+
+
+__all__ = ["CONTEXT_KEYS", "HOP_CONTRACT", "HOP_KEYS", "ML_KEYS", "ml_detect",
+           "ml_detect_hops"]

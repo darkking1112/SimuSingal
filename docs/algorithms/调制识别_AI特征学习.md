@@ -6,6 +6,7 @@
 | 特征契约 | `amc_feature_vector_v1`（34 维，**与"传统特征"文档完全同一份**） |
 | 模型契约 | `amc_model_v1`（线性 JSON）/ `amc_feature_vector_v1`（ONNX 清单） |
 | 结果契约 | `amc_classify_v1` |
+| 原始 IQ 通路 | `iq_waveform_v1`（输入）/ `amc_iq_classify_v1`（结果），§7；训练侧 `training/iq_cnn.py`、`build_iq_dataset.py`、`train_iq.py`、`verify_iq.py` |
 | 判别器实现 | `src/signal_analysis/ml/amc.py::fit_model` / `predict` / `onnx_scores` |
 | 训练实现 | `training/amc_transformer.py`、`training/train_amc.py`（**不随 wheel 分发**） |
 | 数据集 | `training/build_amc_dataset.py`，产出 `(features, label, snr_db)` 记录 |
@@ -14,7 +15,7 @@
 | 文档日期 | 2026-09-11 |
 
 > **本项目的 "AI 调制识别" 是"确定性物理特征 + 学习判别器"。**
-> 特征提取（§1–§9 项）**不是**神经网络——它逐项有闭式定义、可复算、可人工判读；
+> 特征提取（[调制识别_传统特征与启发式判定](调制识别_传统特征与启发式判定.md) §2.3–§2.8 统计出的 34 维）**不是**神经网络——它逐项有闭式定义、可复算、可人工判读；
 > 只有最后一层"从 34 维到 6 类"的映射是学出来的。
 > 这样做的直接好处是：**线性基线与 Transformer 共用同一份输入**，
 > 两者的差距就是"判别器的贡献"，不掺任何特征工程的差异。
@@ -25,9 +26,9 @@
 
 ## 1. 算法思路
 
-### 1.1 为什么不让网络直接看 IQ
+### 1.1 为什么默认不让网络直接看 IQ
 
-把原始 IQ 直接喂给深度网络（CNN/LSTM/ResNet）是 RadioML 路线的标准做法，本项目**没走这条路**，原因有三：
+把原始 IQ 直接喂给深度网络（CNN/LSTM/ResNet）是 RadioML 路线的标准做法，本项目**默认没走这条路**，原因有三：
 
 1. **数据量不够**。合成数据可以无限生成，但生成器只能覆盖它建模过的物理效应
    （本项目生成器：理想信道 + 白噪声 + RRC 成形），网络很容易学成"认生成器的指纹"，
@@ -36,6 +37,13 @@
    与文献里的累积量参考表逐项核对。端到端网络做不到这一点。
 3. **与检测路径同构**。检测是"网络判决 + 物理测量"，识别是"网络判决 + 物理特征"，
    同一套工程范式（清单强校验、契约冻结、失败即报错）可以复用。
+
+> **这三条是"默认路径选特征"的理由，不是"禁止用 IQ"。** 本项目后来把原始 IQ
+> 做成了**另一条显式通路**（§7，`iq_waveform_v1` + `amc_iq_classify_v1`），
+> 只有两个入口上的硬区别：输入契约不同（`(2, N)` 波形 vs 34 维向量）、类别字典由模型声明
+> （`a09` 或自定义）而不是冻结。两条通路**互不替代**：特征通路是默认交付与可审计兜底，
+> IQ 通路用于"有足够多样数据时让网络自己学特征"的探索，且**必须与自己的基线比**，
+> 不能与 34 维特征通路直接比数字（输入信息不同，不是同一道题）。
 
 ### 1.2 两个判别器，一个特征
 
@@ -321,7 +329,7 @@ amc_classify(samples, sample_rate, config=None, model=None, threads=None) -> dic
 | 线性模型 JSON 路径 | `amc_linear_v1` | `file` |
 | ONNX 清单路径（`contract == amc_feature_vector_v1`） | `amc_onnx_v1` | `onnx` |
 
-结果键**恰好**为 §2.10 列出的 12 个（见
+结果键**恰好**为 12 个（见
 [调制识别_传统特征与启发式判定 §4.4](调制识别_传统特征与启发式判定.md)），
 其中 `model` 在 ONNX 分支额外带 `simplify` 后的 `sha256` 与实际清单路径。
 
@@ -350,58 +358,7 @@ GUI、CLI、HTML 报表的每一个 AMC 结果都会带上这两条，**不允�
 
 ---
 
-## 5. 当前相关参考文献
-
-**表格数据上的 Transformer**
-
-1. Gorishniy, Y., Rubachev, I., Khrulkov, V., Babenko, A. *Revisiting deep learning models for tabular data (FT-Transformer).* NeurIPS, 2021. —— **本项目的直接依据**：每个数值特征一个标量词元 + CLS 词元。
-2. Vaswani, A. et al. *Attention is all you need.* NeurIPS, 2017. —— 编码器/多头注意力。
-3. Devlin, J., Chang, M.-W., Lee, K., Toutanova, K. *BERT.* NAACL, 2019. —— CLS 词元用法的来源。
-4. Dosovitskiy, A. et al. *An image is worth 16×16 words (ViT).* ICLR, 2021. —— 另一个"标量化 + Transformer"的范式参照。
-5. Xiong, R. et al. *On layer normalization in the transformer architecture (Pre-LN).* ICML, 2020. —— `norm_first=True` 的依据（训练更稳，可省 warmup）。
-6. Loshchilov, I., Hutter, F. *Decoupled weight decay regularization (AdamW).* ICLR, 2019.
-7. Loshchilov, I., Hutter, F. *SGDR: stochastic gradient descent with warm restarts.* ICLR, 2017. —— CosineAnnealingLR。
-8. Hendrycks, D., Gimpel, K. *Gaussian error linear units (GELUs).* arXiv:1606.08415, 2016.
-
-**表格数据上的经典/树模型对照**
-
-9. Grinsztajn, L., Oyallon, E., Varoquaux, G. *Why do tree-based models still outperform deep learning on typical tabular data?* NeurIPS Datasets & Benchmarks, 2022. —— **本项目必须引用**：它说明"在 34 维表格数据上，树模型常常优于深度模型"，这正是保留线性/树基线的方法论依据。
-10. Friedman, J. H. *Greedy function approximation: a gradient boosting machine.* Ann. Statist. **29**(5):1189–1232, 2001.
-11. Breiman, L. *Random forests.* Machine Learning **45**(1):5–32, 2001.
-12. Cortes, C., Vapnik, V. *Support-vector networks.* Machine Learning **20**(3):273–297, 1995.
-
-**无线电/调制识别领域的深度模型**
-
-13. O'Shea, T. J., Corgan, J., Clancy, T. C. *Convolutional radio modulation recognition networks.* EANN, 2016.
-14. O'Shea, T. J., Roy, T., Clancy, T. C. *Over-the-air deep learning based radio signal classification.* IEEE J. Sel. Topics Signal Process. **12**(1):168–179, 2018. —— RadioML 数据集与"深度模型 + 真实数据"的标杆。
-15. West, N. E., O'Shea, T. J. *Deep architectures for modulation recognition.* IEEE DySPAN, 2017.
-16. Rajendran, S., Meert, W., Giustiniano, D., Lenders, V., Pollin, S. *Deep learning models for wireless signal classification with distributed low-cost spectrum sensors.* IEEE Trans. Cogn. Commun. Netw. **4**(3):433–445, 2018.
-17. Dobre, O. A., Abdi, A., Bar-Ness, Y., Su, W. *Survey of automatic modulation classification techniques.* IET Communications **1**(2):137–156, 2007. —— 传统特征方法的综述（与本项目特征族的对照）。
-18. Swami, A., Sadler, B. M. *Hierarchical digital modulation classification using cumulants.* IEEE Trans. Commun. **48**(3):416–429, 2000. —— 34 维特征中累积量项的来源。
-19. TorchSig, MIT License 数据集生成库（**本项目未使用**，仅列出可选数据来源）。
-20. DeepSig RadioML 2018.01A，**CC BY-NC-SA 4.0**——**不可商用、不可随产品分发**，本项目**未使用**。
-
-**概率校准与可信度**
-
-21. Guo, C., Pleiss, G., Sun, Y., Weinberger, K. Q. *On calibration of modern neural networks.* ICML, 2017. —— **Transformer 分支置信度未标定的直接依据**。
-22. Platt, J. *Probabilistic outputs for support vector machines and comparisons to regularized likelihood methods.* Advances in Large Margin Classifiers, 1999.
-23. Zadrozny, B., Elkan, C. *Transforming classifier scores into accurate multiclass probability estimates.* KDD, 2002. —— 面向多类的保序回归/温度标定。
-
-**正则化与线性判别**
-
-24. Hoerl, A. E., Kennard, R. W. *Ridge regression: biased estimation for nonorthogonal problems.* Technometrics **12**(1):55–67, 1970. —— 岭回归原始文献。
-25. Hastie, T., Tibshirani, R., Friedman, J. *The Elements of Statistical Learning.* 2nd ed., Springer, 2009. —— 岭回归与 LDA 的系统论述。
-26. Guyon, I., Elisseeff, A. *An introduction to variable and feature selection.* JMLR **3**:1157–1182, 2003.
-
-**部署与运行时**
-
-27. ONNX Runtime documentation, Microsoft, 2024. —— 会话、线程数、算子集。
-28. Jacob, B. et al. *Quantization and training of neural networks for efficient integer-arithmetic-only inference.* CVPR, 2018. —— INT8 量化部署。
-29. Hinton, G., Vinyals, O., Dean, J. *Distilling the knowledge in a neural network.* NeurIPS Workshop, 2015. —— 把 Transformer 蒸馏回线性模型是后续可选项。
-
----
-
-## 6. 设计局限
+## 5. 设计局限
 
 1. **合格门限未确认 —— 因此不给"通过/不通过"。**
    `pending[0]` 原文："识别准确率的合格门限尚未确认（技术方案待确认项）"。
@@ -476,9 +433,9 @@ GUI、CLI、HTML 报表的每一个 AMC 结果都会带上这两条，**不允�
 
 ---
 
-## 7. 可以改进的地方与相关文献
+## 6. 可以改进的地方与相关文献
 
-### 7.1 先把"对标与标定"做对（成本最低、收益最直接）
+### 6.1 先把"对标与标定"做对（成本最低、收益最直接）
 
 1. **独立验证集上做温度标定/保序回归**，替换当前 in-sample 校准
    —— Guo 2017 [21]、Zadrozny & Elkan 2002 [23]；
@@ -488,7 +445,7 @@ GUI、CLI、HTML 报表的每一个 AMC 结果都会带上这两条，**不允�
 3. **报告必须分档**：按 SNR 桶（`per_snr` 已有）、按调制样式、按目标数分列，
    避免单一总分掩盖 16/64QAM 这个真问题。
 
-### 7.2 特征侧（性价比通常高于换判别器）
+### 6.2 特征侧（性价比通常高于换判别器）
 
 - **恢复 34 维之外的物理量**：符号速率、滚降系数、循环谱特征
   —— Gardner 1991；Dobre 2007 [17]。加特征属于契约破坏性变更，
@@ -499,7 +456,7 @@ GUI、CLI、HTML 报表的每一个 AMC 结果都会带上这两条，**不允�
 - **特征选择/降维**：34 → 15–20 维可显著降低过拟合 —— Guyon & Elisseeff 2003 [26]；
   LDA / PCA 白化也是对线性判别友好的预处理 —— Hastie 2009 [25]。
 
-### 7.3 判别器侧
+### 6.3 判别器侧
 
 | 方向 | 具体做法 | 文献 |
 | --- | --- | --- |
@@ -510,7 +467,7 @@ GUI、CLI、HTML 报表的每一个 AMC 结果都会带上这两条，**不允�
 | 深度但更省 | TabNet / 1D-CNN 替代全 Transformer；MLP + 特征交互（DCN-V2） | Arik & Pfister *TabNet.* AAAI 2021；Wang, R. et al. *DCN V2.* WWW 2021 |
 | 不确定性 | MC dropout / 深度集成给"不知道" | Gal & Ghahramani *Dropout as a Bayesian approximation.* ICML 2016；Lakshminarayanan et al. *Simple and scalable predictive uncertainty estimation using deep ensembles.* NeurIPS 2017 |
 
-### 7.4 数据与领域自适应
+### 6.4 数据与领域自适应
 
 - **规模**：每类 400 条只能跑通链路；要有意义的模型建议**每类数千到上万条**，
   并覆盖每个 SNR 档位（`build_amc_dataset.py --per-class --snr-range --seed`）；
@@ -522,7 +479,7 @@ GUI、CLI、HTML 报表的每一个 AMC 结果都会带上这两条，**不允�
 - **干净的数据集卡**：把生成器版本、参数、SNR 分布、划分种子全部写进数据集卡
   （`build_amc_dataset.py` 已输出），否则数字无法复现。
 
-### 7.5 部署
+### 6.5 部署
 
 - **INT8 量化** ONNX 分类器（Jacob 2018 [28]），并用 `verify_amc.py --manifest`
   的端到端比对卡住数值漂移；
@@ -532,7 +489,7 @@ GUI、CLI、HTML 报表的每一个 AMC 结果都会带上这两条，**不允�
   可以做逐类权重分析和漂移检测（新数据的特征均值 vs `standardize.mean`）
   —— 文献 [9] 关于表格数据可解释性的讨论。
 
-### 7.6 评测规范
+### 6.6 评测规范
 
 - 建立**固定验证集**（seed 固定、写进数据集卡），禁止用训练集数字对外；
 - 引入**真实采集数据**做独立验证集，与合成数据结果**分列报告**；
@@ -540,3 +497,204 @@ GUI、CLI、HTML 报表的每一个 AMC 结果都会带上这两条，**不允�
   并把"不适用"样本单列统计——把它们算进分母会系统性低估准确率；
 - 置信度**标定之后**再谈阈值：当前 `reliable` 里的 `confidence < 0.5`
   与 `snr < 5 dB` 都是工程经验值，没有 ROC/PR 曲线支撑。
+
+---
+
+## 7. 原始 IQ 通路（`iq_waveform_v1` / `amc_iq_classify_v1`）
+
+§1–§7 讲的是"确定性特征 + 学习判别器"。本节是**同一任务的第二条通路**：不给网络 34 维物理量，
+直接把定长 IQ 波形喂给卷积网络。它**不是**对 §1.1 三条理由的否定，而是把"让网络自己学特征"
+做成一个契约完备、可验收、可回退的选项。
+
+### 7.1 定位与边界
+
+| | 特征通路（§1–§7） | 原始 IQ 通路（本节） |
+| --- | --- | --- |
+| 输入 | `amc_feature_vector_v1`，34 维确定性物理量 | `iq_waveform_v1`，`(2, N)` float32 波形 |
+| 类别字典 | **冻结** A09 六类 | 由清单声明：`a09` 六类或 `custom` 自定义（≤ 64 类） |
+| 解释性 | 每次判决可展开成 34 个物理量 | 无逐项物理量，只能看概率与波形摘要 |
+| 传统对照 | 有（数字/模拟、恒包络/非恒包络启发式） | 无（没有确定特征可对照） |
+| 结果契约 | `amc_classify_v1` | `amc_iq_classify_v1` |
+| 入口 | `amc-classify` | `amc-iq-classify` |
+| 依赖 | 仅 numpy（线性基线） | `.[ml]`（推理）/ `.[train]`（训练） |
+
+**两条通路不能互相"调包"**：清单里的 `input.contract` 是硬门禁，特征清单拿给 `amc-iq-classify`
+会被拒绝，IQ 清单拿给 `amc-classify` 同样被拒绝。这是刻意的——两者的 `samples`、通道数、
+前端口径含义完全不同，一旦静默兼容，产出的分类结果就无法解释。
+
+同样，**两个通路的数字不可直接比较**：输入信息不同（34 维压缩量 vs 原始波形），
+IQ 通路的对手只有它自己的基线（同一数据划分上的 CNN vs TCN，以及后续的更强骨干）。
+
+### 7.2 输入契约与前端
+
+输入张量 $x\in\mathbb{R}^{2\times N}$，通道 0 为 $I$、通道 1 为 $Q$，排布 `iq_channels_first_v1`，
+归一化 `unit_rms`：
+
+$$
+\hat{x} = \frac{x}{\sqrt{\frac{1}{2N}\sum_{c=0}^{1}\sum_{n=0}^{N-1} x_{c,n}^2}}
+$$
+
+窗口长度 $64 \le N \le 65536$，默认 $N=1024$，且**必须与清单** `input.samples` **一致**。
+生成方式（`ml/iq.py::iq_waveform`）：
+
+1. 取请求频带内的**中段**：若可用分析点数为 $M\ge N$，起点为 $\lfloor (M-N)/2 \rfloor$；
+2. $M<N$ 时**直接报错**，不补零。补零会制造一段"人工噪声"，让网络在信噪比不可用的情况下
+   给出高置信度结果，比"拒答"危险得多；
+3. 归一化到单位 RMS，使输入功率无关、只保留调制结构。
+
+前端（混频/抗混叠滤波/抽取）与特征通路**共用同一份实现**：抽取比 `samples_per_band = 8.0`、
+低通抽头 `lowpass_taps = 65`，因此对同一带宽，两条通路的分析率
+$f_\text{analysis}=f_s/8$ 与滤波器完全一致，差别只在"交给判别器的东西"。
+
+波形摘要（结果与数据集都记录）字段：`sample_rate_hz`、`offset_hz`、`bandwidth_hz`、
+`analysis_rate_hz`、`decimation`、`samples_per_band`、`lowpass_taps`、`source_samples`、
+`analysis_samples`、`window_start`、`power_dbfs`、`rms`、`peak`、`crest_factor`；
+`snr_estimate_db` 是**带内信噪比粗估**（与检测通路同一套带内功率口径），
+只作为上下文提示，**不参与判别**。
+
+### 7.3 两个基线
+
+| | `IQCNN` | `IQTCN` |
+| --- | --- | --- |
+| 结构 | 步长卷积堆叠（默认 32/64/128 通道，卷积核 7） | 膨胀因果残差块（默认 64 通道、5 级、核 3） |
+| 感受野 | 由层数与步长决定 | 指数增长，适合长窗口 |
+| 依据 | 一维 CNN 调制识别 [13] | 通用序列卷积优于 RNN 的实证 [30] |
+| 产出 | ONNX（输入 `iq (1,2,N)`、输出 `scores (1,C)`） | 同左 |
+
+设计约束（都是踩过的坑，写进 `training/iq_cnn.py`）：
+
+* **softmax 写进图内**：图外再算 softmax 会让"ONNX 输出"与"产品展示的概率"失去唯一的定义处；
+* **导出按 batch = 1 探测**：产品侧 `iq_scores` 永远喂 `(1, 2, N)`，若按批导出静态形状，
+  运行时会因维度不符失败；
+* **类别顺序即输出下标顺序**：`classes[i]` 必须与模型第 $i$ 个输出对应，清单里写死，
+  不允许运行时按名字重排；
+* **数值一致性门槛**：验收用 `2e-4` 容差比对 torch 与 ONNX 的同输入 logits，
+  超过这个量级说明导出不忠实（训练脚本还会用 ONNX 入口重算一遍验证集，两条路径准确率必须相等）。
+
+### 7.4 数据集与标签
+
+数据集由 `training/build_iq_dataset.py` 产出：每个样本的场景参数随机化
+（中心频率抖动、带宽比例、时长、带内 SNR、功率），标签是**生成器已知的调制样式**
+（不是"猜"出来的），因此不存在标注噪声。关键设计：
+
+* **样本窗口由推理端入口产出**：构建数据集时直接调用 `ml/iq.py::iq_waveform`，
+  保证"窗口长度 / 取中规则 / 归一化 / 抽取比"在训练与推理之间只有一份实现，
+  从根上避免"训练与推理不一致"；
+* **凑不满就换场景重抽**，绝不补零（同 §7.2）；
+* **类内分层划分**：每类的 train/val 按同一比例切分，避免某类整类落进验证集；
+* **字节级可复现**：同种子同参数两次生成的数据集逐字节相同，便于复盘；
+* **确定性场景网格**：`--snr-range` 与 `--per-class` 决定 SNR 覆盖，数据集卡里按来源与
+  SNR 分段统计，避免"看起来每类一样多、实际全在 20 dB"。
+
+**类别字典可以是自定义的**（`--class-set custom --classes ...`），这是与特征通路最大的语义差别：
+A09 六类是交付口径，而 IQ 通路允许把数据里真实存在的类别（例如加入扩频、OFDM）训进来。
+代价是**结果不再可跨模型直接比较**，所以 `amc_iq_classify_v1` 里必须原样带上
+`class_set` 与 `labels`（已实现，不允许在展示层丢掉）。
+
+**外部数据必须显式映射**：TorchSig [19] 的 `class_name` 属于它自己的体系，
+把它的"信号实例/调制族"直接当成项目的跳频会话或 A09 类别是错的。
+`build_iq_dataset.py` 要求 `--torchsig-map` 给出 `TorchSig 类名 → 项目类别`，
+未映射的类名**原样**记进 `unmapped_classes` 并跳过该记录（不猜、不兜底），
+映射目标不在类别字典内则直接报错；混合样本用 `source` 字段区分，卡片按来源分段统计。
+
+### 7.5 实测（冒烟规模，**不是性能结论**）
+
+用 `--samples 512 --per-class 24` 生成的 180 条样本（144 训练 / 36 验证）、
+`--arch cnn --epochs 30` 实跑：
+
+| 项 | 数值 |
+| --- | --- |
+| 训练集内准确率（144 条） | 0.9722 |
+| 独立验证集准确率 / 宏平均 F1（36 条，每类 6 条） | 0.5833 / 0.5727 |
+| ONNX 入口验证集准确率 | 0.5833（与 torch 路径一致） |
+| `training/verify_iq.py` | 10 项检查全通过（契约/确定性场景端到端/重复推理一致/数据集独立验证） |
+
+训练集 0.97 对验证集 0.58 正是**小样本过拟合**的教科书现象，也说明这条通路目前只证明
+"链路是通的、导出是忠实的"，**不能作为任何精度声明**。有意义的结论需要
+**每类数千条**以上（可用 TorchSig 补充多样性）并覆盖全部 SNR 档位，
+最后在**独立实采数据**上与特征通路分别报告。
+
+### 7.6 设计局限
+
+* **无实采验证**：训练与验证都用本项目生成器（理想信道 + AWGN + RRC 成形），
+  没有多径、频偏漂移、IQ 不平衡、非线性的实测数据，泛化性未知 [14]；
+* **概率未标定**：与 §6.6 / 文献 [21] 同样的问题，`reliable` 与 `confidence` 只是工程值；
+* **类别字典不冻结的代价**：模型之间不可直接比较，需要靠 `class_set` + `labels` 追溯；
+* **无数据增强**：时移、相位旋转、小频偏、噪声注入这些**保标签**的增强尚未接入，
+  而这恰恰是提升泛化性成本最低的一步；
+* **无超参搜索**：通道数/核长/层数都是经验值，没有网格或贝叶斯搜索证据；
+* **单窗口判决**：一次只看一个 $N$ 点窗口，没有跨窗口的时序融合（跳频、突发信号的时序结构被丢弃）；
+* **没有不合格门限**：识别准确率的合格线仍为待确认项，结果里的 `pending` 原样提示，
+  因此**不做通过/不通过判定**。
+
+### 7.7 可以改进的地方
+
+按性价比排序：
+
+1. **数据增强（保标签）**：随机时移 + 随机相位 + 小频偏 + 重采样 + 噪声注入——
+   参考 [13]–[15] 的实测数据增强做法；
+2. **规模与 SNR 覆盖**：每类数千条、全 SNR 档位；低 SNR 可用课程学习（先高 SNR 后低 SNR）；
+3. **更强骨干**：ResNet 风格的残差一维卷积 [31]、CLDNN（CNN + LSTM + DNN）[15]，
+   或直接把时频图骨干迁移过来做双分支融合（波形 + 时频图），这是 RadioML 2018 之后的主流方向 [14]；
+4. **校准与拒识**：温度标定 [21][23] 后再谈阈值，并加上开集拒识（未知调制不应被强判成六类之一）；
+5. **实采验证**：这是**收益最大也最必须**的一步，没有它，任何提升都能被"生成器指纹"解释掉；
+6. **蒸馏回特征通路**：把 IQ 通路的知识蒸馏到 34 维判别器 [29]，在保持可解释性的前提下拿收益。
+
+---
+
+## 8. 当前相关参考文献
+
+**表格数据上的 Transformer**
+
+1. Gorishniy, Y., Rubachev, I., Khrulkov, V., Babenko, A. *Revisiting deep learning models for tabular data (FT-Transformer).* NeurIPS, 2021. —— **本项目的直接依据**：每个数值特征一个标量词元 + CLS 词元。
+2. Vaswani, A. et al. *Attention is all you need.* NeurIPS, 2017. —— 编码器/多头注意力。
+3. Devlin, J., Chang, M.-W., Lee, K., Toutanova, K. *BERT.* NAACL, 2019. —— CLS 词元用法的来源。
+4. Dosovitskiy, A. et al. *An image is worth 16×16 words (ViT).* ICLR, 2021. —— 另一个"标量化 + Transformer"的范式参照。
+5. Xiong, R. et al. *On layer normalization in the transformer architecture (Pre-LN).* ICML, 2020. —— `norm_first=True` 的依据（训练更稳，可省 warmup）。
+6. Loshchilov, I., Hutter, F. *Decoupled weight decay regularization (AdamW).* ICLR, 2019.
+7. Loshchilov, I., Hutter, F. *SGDR: stochastic gradient descent with warm restarts.* ICLR, 2017. —— CosineAnnealingLR。
+8. Hendrycks, D., Gimpel, K. *Gaussian error linear units (GELUs).* arXiv:1606.08415, 2016.
+
+**表格数据上的经典/树模型对照**
+
+9. Grinsztajn, L., Oyallon, E., Varoquaux, G. *Why do tree-based models still outperform deep learning on typical tabular data?* NeurIPS Datasets & Benchmarks, 2022. —— **本项目必须引用**：它说明"在 34 维表格数据上，树模型常常优于深度模型"，这正是保留线性/树基线的方法论依据。
+10. Friedman, J. H. *Greedy function approximation: a gradient boosting machine.* Ann. Statist. **29**(5):1189–1232, 2001.
+11. Breiman, L. *Random forests.* Machine Learning **45**(1):5–32, 2001.
+12. Cortes, C., Vapnik, V. *Support-vector networks.* Machine Learning **20**(3):273–297, 1995.
+
+**无线电/调制识别领域的深度模型**
+
+13. O'Shea, T. J., Corgan, J., Clancy, T. C. *Convolutional radio modulation recognition networks.* EANN, 2016.
+14. O'Shea, T. J., Roy, T., Clancy, T. C. *Over-the-air deep learning based radio signal classification.* IEEE J. Sel. Topics Signal Process. **12**(1):168–179, 2018. —— RadioML 数据集与"深度模型 + 真实数据"的标杆。
+15. West, N. E., O'Shea, T. J. *Deep architectures for modulation recognition.* IEEE DySPAN, 2017.
+16. Rajendran, S., Meert, W., Giustiniano, D., Lenders, V., Pollin, S. *Deep learning models for wireless signal classification with distributed low-cost spectrum sensors.* IEEE Trans. Cogn. Commun. Netw. **4**(3):433–445, 2018.
+17. Dobre, O. A., Abdi, A., Bar-Ness, Y., Su, W. *Survey of automatic modulation classification techniques.* IET Communications **1**(2):137–156, 2007. —— 传统特征方法的综述（与本项目特征族的对照）。
+18. Swami, A., Sadler, B. M. *Hierarchical digital modulation classification using cumulants.* IEEE Trans. Commun. **48**(3):416–429, 2000. —— 34 维特征中累积量项的来源。
+19. TorchSig, MIT License 数据集生成库（**本仓库已作为可选补充数据源接入**，见 §7.4：
+    `training/build_torchsig.py` 把它转成本项目自描述的 `torchsig_bundle_v1`，
+    `ingest_torchsig.py` / `build_iq_dataset.py` 再转成检测/识别数据集；
+    它的产物只落本地目录，不随产品分发，训练侧也不依赖它）。
+20. DeepSig RadioML 2018.01A，**CC BY-NC-SA 4.0**——**不可商用、不可随产品分发**，本项目**未使用**。
+
+**概率校准与可信度**
+
+21. Guo, C., Pleiss, G., Sun, Y., Weinberger, K. Q. *On calibration of modern neural networks.* ICML, 2017. —— **Transformer 分支置信度未标定的直接依据**。
+22. Platt, J. *Probabilistic outputs for support vector machines and comparisons to regularized likelihood methods.* Advances in Large Margin Classifiers, 1999.
+23. Zadrozny, B., Elkan, C. *Transforming classifier scores into accurate multiclass probability estimates.* KDD, 2002. —— 面向多类的保序回归/温度标定。
+
+**正则化与线性判别**
+
+24. Hoerl, A. E., Kennard, R. W. *Ridge regression: biased estimation for nonorthogonal problems.* Technometrics **12**(1):55–67, 1970. —— 岭回归原始文献。
+25. Hastie, T., Tibshirani, R., Friedman, J. *The Elements of Statistical Learning.* 2nd ed., Springer, 2009. —— 岭回归与 LDA 的系统论述。
+26. Guyon, I., Elisseeff, A. *An introduction to variable and feature selection.* JMLR **3**:1157–1182, 2003.
+
+**部署与运行时**
+
+27. ONNX Runtime documentation, Microsoft, 2024. —— 会话、线程数、算子集。
+28. Jacob, B. et al. *Quantization and training of neural networks for efficient integer-arithmetic-only inference.* CVPR, 2018. —— INT8 量化部署。
+29. Hinton, G., Vinyals, O., Dean, J. *Distilling the knowledge in a neural network.* NeurIPS Workshop, 2015. —— 把 Transformer 蒸馏回线性模型是后续可选项。
+
+**原始 IQ 通路的额外依据（§7）**
+
+30. Bai, S., Kolter, J. Z., Koltun, V. *An empirical evaluation of generic convolutional and recurrent networks for sequence modeling.* arXiv:1803.01271, 2018. —— 膨胀因果卷积（`IQTCN` 的依据），并说明长序列上卷积常优于 RNN。
+31. He, K., Zhang, X., Ren, S., Sun, J. *Deep residual learning for image recognition.* CVPR, 2016. —— 残差连接（`IQTCN` 残差块与"更强骨干"的依据）。

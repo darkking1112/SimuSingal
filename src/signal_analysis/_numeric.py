@@ -1213,3 +1213,811 @@ def detect_signals(samples, sample_rate, config=None):
         "detection_power_dbfs": np.array([item["power_dbfs"] for item in detections], dtype=np.float64),
     }
     return summary, arrays
+
+
+# ---------------------------------------------------------------------------
+# 跳频逐跳参数估计（算法 ``hop_track_v1``，结果契约 ``fh_hops_v1``）
+#
+# 与 :func:`detect_signals` 的「一段会话一个实例」互补而不替代：那条通路先对
+# 时间求平均，只能在平均 PSD 上给出会话级频带；本通路不做时间平均，逐帧提取
+# 游程、再沿时间把游程链成「跳」，因此能给出逐跳的跳频点、驻留时长与跳速。
+# 冻结契约 ``detect_result_v1`` 与 :func:`detect_signals` 的行为完全不变。
+#
+# 全程复用同一份 STFT（:func:`_stft_psd`）与同一个带内信噪比口径
+# （``inband_snr_v1``），所以逐跳结果可以直接与会话级结果并排比较。
+# ---------------------------------------------------------------------------
+
+HOP_ALGORITHM = "hop_track_v1"
+HOP_CONTRACT = "fh_hops_v1"
+#: 一跳至少占这么多帧，否则驻留过短、无法从时频面上可靠分辨
+_HOP_MIN_DWELL_FRAMES = 4
+_HOP_DEFAULTS = {
+    "nfft": 512,
+    # 单帧周期图只有约 2 个自由度，逐点起伏约 5.6 dB，远大于时间平均后的
+    # 0.5 dB。故先按 smooth_frames 帧滑动平均把起伏压到约 2.8 dB，再取
+    # 6 dB 门限，使单点虚警概率降到 1e-6 量级（否则 512 点 × 数百帧上会
+    # 长出大量噪声游程）。逐跳的频域闭运算半径也相应取小（见下）。
+    "threshold_db": 6.0,
+    "smooth_frames": 4,
+    "min_bandwidth_hz": 0.0,
+    "min_dwell_s": 0.0,
+    "merge_bins": 0,
+    "max_gap_frames": 1,
+    "max_gap_bins": 0,
+    "transition_ratio": 1.5,
+    "max_hops": 256,
+}
+
+
+def _hop_config(rate, duration, config):
+    """Validate and resolve the per-hop tracker configuration.
+
+    Mirrors :func:`_detect_config`: unknown keys are rejected instead of
+    silently ignored, so a typo in the GUI/CLI never changes the algorithm
+    without telling the user. The effective minimum dwell is forced up to
+    :data:`_HOP_MIN_DWELL_FRAMES` analysis frames — below that a hop simply
+    has no time-frequency signature to track.
+    """
+    if config is None:
+        settings = {}
+    elif isinstance(config, dict):
+        settings = dict(config)
+    else:
+        raise ValueError("逐跳配置必须是字典")
+    unknown = set(settings) - set(_HOP_DEFAULTS)
+    if unknown:
+        raise ValueError(f"未知的逐跳参数：{', '.join(sorted(unknown))}")
+    nfft = settings.get("nfft", _HOP_DEFAULTS["nfft"])
+    if isinstance(nfft, bool) or int(nfft) != nfft or not 16 <= int(nfft) <= 4096:
+        raise ValueError("FFT 点数必须为 16～4096 的整数")
+    nfft = int(nfft)
+    resolution = rate / nfft
+    threshold_db = _finite(settings.get("threshold_db", _HOP_DEFAULTS["threshold_db"]),
+                           "检测门限", 0.0, 80.0)
+    smooth_frames = settings.get("smooth_frames", _HOP_DEFAULTS["smooth_frames"])
+    if isinstance(smooth_frames, bool) or int(smooth_frames) != smooth_frames \
+            or not 1 <= int(smooth_frames) <= 64:
+        raise ValueError("时间平滑帧数必须为 1～64 的整数")
+    min_bandwidth = _finite(settings.get("min_bandwidth_hz", 0.0), "最小带宽", 0.0, rate)
+    if min_bandwidth <= 0:
+        # 同一默认：至少 3 个频点宽，抑制单点毛刺
+        min_bandwidth = 3.0 * resolution
+    min_dwell = _finite(settings.get("min_dwell_s", 0.0), "最短驻留时间", 0.0, duration)
+    min_dwell = max(min_dwell, _HOP_MIN_DWELL_FRAMES * nfft / rate)
+    merge_bins = settings.get("merge_bins", 0)
+    if isinstance(merge_bins, bool) or int(merge_bins) != merge_bins \
+            or not 0 <= int(merge_bins) <= nfft // 4:
+        raise ValueError(f"谱合并宽度必须为 0～{nfft // 4} 的整数")
+    # 逐跳的闭运算半径取 1 个频点（桥接 2 点）：单帧上信道内部已经平坦，
+    # 半径取大只会把相邻信道在跳变帧里焊成一条，掩盖真正的跳变。
+    merge_bins = int(merge_bins) or max(1, nfft // 512)
+    max_gap_frames = settings.get("max_gap_frames", _HOP_DEFAULTS["max_gap_frames"])
+    if isinstance(max_gap_frames, bool) or int(max_gap_frames) != max_gap_frames \
+            or not 0 <= int(max_gap_frames) <= 16:
+        raise ValueError("允许的跟踪间断帧数必须为 0～16 的整数")
+    max_gap_bins = settings.get("max_gap_bins", 0)
+    if isinstance(max_gap_bins, bool) or int(max_gap_bins) != max_gap_bins \
+            or not 0 <= int(max_gap_bins) <= nfft // 4:
+        raise ValueError(f"频点跳变门限必须为 0～{nfft // 4} 的整数")
+    max_gap_bins = int(max_gap_bins) or merge_bins
+    transition_ratio = _finite(settings.get("transition_ratio", _HOP_DEFAULTS["transition_ratio"]),
+                               "过渡帧宽度比", 1.1, 4.0)
+    max_hops = settings.get("max_hops", _HOP_DEFAULTS["max_hops"])
+    if isinstance(max_hops, bool) or int(max_hops) != max_hops or not 1 <= int(max_hops) <= 256:
+        raise ValueError("最大跳数必须为 1～256 的整数")
+    return {
+        "nfft": nfft,
+        "threshold_db": threshold_db,
+        "smooth_frames": int(smooth_frames),
+        "min_bandwidth_hz": min_bandwidth,
+        "min_dwell_s": min_dwell,
+        "merge_bins": merge_bins,
+        "max_gap_frames": int(max_gap_frames),
+        "max_gap_bins": max_gap_bins,
+        "transition_ratio": transition_ratio,
+        "max_hops": int(max_hops),
+        "freq_resolution_hz": resolution,
+        "min_bandwidth_bins": max(1, int(np.ceil(min_bandwidth / resolution))),
+        "min_dwell_frames": max(_HOP_MIN_DWELL_FRAMES, int(np.ceil(min_dwell * rate / nfft))),
+    }
+
+
+def _smooth_psd(psd, window):
+    """Sliding mean of ``window`` consecutive PSD frames, aligned to input.
+
+    A single-frame periodogram has about two degrees of freedom, so its
+    level fluctuates by roughly 5.6 dB from bin to bin; a fixed threshold
+    applied to it would fire on noise everywhere. Averaging ``window``
+    frames divides that fluctuation by ``sqrt(window)`` while keeping the
+    original frame grid, which is what makes the per-frame mask usable. The
+    mean is centred (edge-replicated at both ends) so frame ``i`` of the
+    result still refers to frame ``i`` of the input.
+    """
+    if window <= 1:
+        return psd
+    half = window // 2
+    padded = np.pad(psd, ((half, window - 1 - half), (0, 0)), mode="edge")
+    # ``sliding_window_view`` 把窗口维度追加在**末尾**（不是挂在 axis 位置上），
+    # 所以这里按最后一维求均值。
+    frames = np.lib.stride_tricks.sliding_window_view(padded, window, axis=0)
+    return frames.mean(axis=-1)
+
+
+def _frame_runs(psd_db, threshold_dbfs, merge_bins, min_bins):
+    """Per-frame spectral runs above the threshold.
+
+    One list of inclusive ``(first_bin, last_bin)`` pairs per frame. The
+    frequency-domain closing fills ripples narrower than ``merge_bins``
+    (2FSK tone spacing, OFDM in-band dips) before short runs are discarded,
+    exactly as :func:`detect_signals` does on the averaged PSD.
+    """
+    rows = []
+    for index in range(psd_db.shape[0]):
+        mask = _binary_close(psd_db[index] > threshold_dbfs, merge_bins)
+        rows.append([(start, stop) for start, stop in _true_runs(mask)
+                     if stop - start + 1 >= min_bins])
+    return rows
+
+
+def _track_band(track):
+    """Inclusive ``(first_bin, last_bin)`` of a track's accepted runs."""
+    runs = track["runs"]
+    return min(start for start, _ in runs), max(stop for _, stop in runs)
+
+
+def _best_track(tracks, frame, first, last, max_gap_frames, max_gap_bins, excluded,
+                allow_gap=True):
+    """The open track that best explains one run (``None`` when there is none).
+
+    Prefers the largest spectral overlap; a track whose band does not touch
+    the run can still be linked when the gap is no wider than
+    ``max_gap_bins`` bins — that is what carries a track across a single
+    faded frame without letting it jump onto an unrelated emitter.
+    ``allow_gap=False`` restricts the search to genuine spectral overlap,
+    which is what a frame carrying several runs requires (see
+    :func:`_link_tracks`).
+    """
+    ranked = []
+    for track in tracks:
+        if track["id"] in excluded:
+            continue
+        if frame - track["last_frame"] - 1 > max_gap_frames:
+            continue
+        low, high = _track_band(track)
+        overlap = min(last, high) - max(first, low) + 1
+        if overlap > 0:
+            ranked.append((0, -overlap, track["id"], track))
+            continue
+        if not allow_gap or track["last_frame"] == frame:
+            # 同帧内已经有一只游程续上了这条轨道，再靠频隙衔接会把
+            # 相邻信道（跳变帧）焊在一起，因此只允许严格重叠。
+            continue
+        distance = max(low - last, first - high)
+        if distance <= max_gap_bins:
+            ranked.append((1, distance, track["id"], track))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: (item[0], item[1], item[2]))
+    return ranked[0][3]
+
+
+def _overlaps_any(tracks, frame, first, last, max_gap_frames):
+    """Whether a *live* track's band already covers this run.
+
+    A frame can show several runs inside one track's band (a deep spectral
+    null of a single wideband emission, an AM carrier with its sidebands).
+    The track is claimed by the first of them, so the remaining runs must not
+    spawn bogus one-frame tracks.
+
+    Only tracks that are still trackable (last seen no longer than
+    ``max_gap_frames`` ago) may veto a run. A stale track is history: an
+    emitter that revisits a channel later shows a run in a band that a dead
+    track happens to cover, and vetoing it would delete a legitimate hop —
+    which is what happens to every revisit in a record where a second
+    concurrent emitter forces ``allow_gap=False`` on every frame.
+    """
+    for track in tracks:
+        if frame - track["last_frame"] - 1 > max_gap_frames:
+            continue
+        low, high = _track_band(track)
+        if min(last, high) - max(first, low) + 1 > 0:
+            return True
+    return False
+
+
+def _link_tracks(rows, frequencies, resolved, transition_frames):
+    """Link per-frame runs into hop tracks (time-frequency ridge tracking).
+
+    A frame that shows a single run is a *geometry* observation: the run may
+    extend the track's band, and it may be linked across a small frequency
+    gap (a briefly faded bin inside one hop). A frame that shows several
+    runs is a transition frame — either a hop boundary straddling the
+    analysis window or several emitters working at once. There, a run may
+    only continue a track it spectrally overlaps (a gap link is refused
+    because the neighbouring hop channel would be welded on), every run
+    already inside a claimed track's band is part of that track and is
+    dropped, and every *other* run starts a new track — that is what keeps a
+    hop boundary from inflating the single-hop bandwidth, while still
+    allowing two simultaneous emitters to be tracked side by side. Finally,
+    a run much wider than the track's typical width is a fused two-hop
+    artefact and is never accepted as geometry.
+    """
+    ratio = resolved["transition_ratio"]
+    max_gap_frames = resolved["max_gap_frames"]
+    max_gap_bins = resolved["max_gap_bins"]
+    tracks = []
+    counter = 0
+    for frame, runs in enumerate(rows):
+        if not runs:
+            continue
+        if len(runs) > 1:
+            transition_frames[0] += 1
+        claimed = set()
+        for first, last in runs:
+            track = _best_track(tracks, frame, first, last, max_gap_frames,
+                                max_gap_bins, claimed, allow_gap=len(runs) == 1)
+            if track is None and len(runs) > 1 and _overlaps_any(
+                    tracks, frame, first, last, max_gap_frames):
+                continue
+            if track is None:
+                counter += 1
+                tracks.append({"id": counter, "first_frame": frame, "last_frame": frame,
+                               "frames": [frame], "runs": [(first, last)],
+                               "transition_frames": 0})
+                claimed.add(counter)
+                continue
+            claimed.add(track["id"])
+            width = last - first + 1
+            widths = sorted(stop - start + 1 for start, stop in track["runs"])
+            median = widths[len(widths) // 2]
+            track["last_frame"] = frame
+            track["frames"].append(frame)
+            if len(runs) > 1 or (len(track["runs"]) >= 2 and width > ratio * median):
+                track["transition_frames"] += 1
+                continue
+            track["runs"].append((first, last))
+    return tracks
+
+
+def _finalise_hops(tracks, psd, frequencies, starts, nfft, rate, duration,
+                   noise_linear, resolved):
+    """Turn tracks into hop measurements (band, dwell, power, in-band SNR).
+
+    The frequency band comes from the geometry runs only. The dwell time is
+    then re-measured on the **raw** frame power inside that band, which
+    removes the smear introduced by the temporal smoothing: the first and
+    last frame that genuinely carry the hop are found by threshold crossing,
+    exactly like the session-level time support in :func:`detect_signals`.
+    Because a channel can be visited twice, the active run overlapping the
+    track most is taken — the two visits become two separate hops.
+    """
+    resolution = resolved["freq_resolution_hz"]
+    threshold_db = resolved["threshold_db"]
+    min_dwell_frames = resolved["min_dwell_frames"]
+    hops = []
+    for track in tracks:
+        first_bin, last_bin = _track_band(track)
+        bandwidth = (last_bin - first_bin + 1) * resolution
+        f_low = float(frequencies[first_bin] - resolution / 2.0)
+        f_high = float(frequencies[last_bin] + resolution / 2.0)
+        band_power = np.asarray(psd[:, first_bin:last_bin + 1].sum(axis=1),
+                                dtype=np.float64) * resolution
+        active = band_power > noise_linear * bandwidth * 10.0 ** (threshold_db / 10.0)
+        if not active.any():
+            continue
+        best, best_overlap = None, 0
+        for start, stop in _true_runs(active):
+            overlap = min(stop, track["last_frame"]) - max(start, track["first_frame"]) + 1
+            if overlap > best_overlap:
+                best, best_overlap = (start, stop), overlap
+        if best is None:
+            best = (track["first_frame"], track["last_frame"])
+        start_frame, stop_frame = best
+        if stop_frame - start_frame + 1 < min_dwell_frames:
+            continue
+        t_start = float(starts[start_frame]) / rate
+        t_end = float(min((starts[stop_frame] + nfft) / rate, duration))
+        dwell = t_end - t_start
+        if dwell < resolved["min_dwell_s"]:
+            continue
+        segment = band_power[start_frame:stop_frame + 1]
+        power_linear = float(segment.mean())
+        band_frequencies = frequencies[first_bin:last_bin + 1]
+        profile = psd[start_frame:stop_frame + 1, first_bin:last_bin + 1].mean(axis=0)
+        weight_sum = float(profile.sum())
+        centroid = (float((profile * band_frequencies).sum() / weight_sum)
+                    if weight_sum > 0 else float(band_frequencies.mean()))
+        # 单跳带宽取「扣噪声后的 99% 功率占用带宽」：检测掩膜会被 OFDM/2FSK 的
+        # 频谱旁瓣撑宽数个频点（实测约 1.3～2.4 个频点/侧），只有功率占用带宽才代表
+        # 信号真正占用的频带。
+        corrected = np.maximum(profile.astype(np.float64) - noise_linear, 0.0)
+        occupancy_low, occupancy_high = _occupied_span(corrected, 0, corrected.size - 1)
+        occupied_low = float(frequencies[first_bin + occupancy_low] - resolution / 2.0)
+        occupied_high = float(frequencies[first_bin + occupancy_high] + resolution / 2.0)
+        occupied_bandwidth = occupied_high - occupied_low
+        # inband_snr_v1：信号功率按检测掩膜频带内的实测功率扣掉该频带噪声，
+        # 噪声参考功率按信号自身占用带宽计算（N0·B_hop）。
+        signal_power = max(power_linear - noise_linear * bandwidth, 1e-30)
+        noise_band = max(noise_linear * occupied_bandwidth, 1e-30)
+        snr_db = float(max(10.0 * np.log10(signal_power / noise_band), _SNR_FLOOR_DB))
+        hops.append({
+            "center_hz": 0.5 * (occupied_low + occupied_high),
+            "centroid_hz": centroid,
+            "bandwidth_hz": occupied_bandwidth,
+            "f_low_hz": occupied_low,
+            "f_high_hz": occupied_high,
+            "mask_bandwidth_hz": bandwidth,
+            "mask_f_low_hz": f_low,
+            "mask_f_high_hz": f_high,
+            "t_start_s": t_start,
+            "t_end_s": t_end,
+            "dwell_s": dwell,
+            "power_linear": power_linear,
+            "snr_db": snr_db,
+            "confidence": float(np.clip((snr_db + 5.0) / 25.0, 0.0, 1.0)),
+            "frame_count": int(stop_frame - start_frame + 1),
+            "bin_count": int(sum(stop - start + 1 for start, stop in track["runs"])),
+            "band_nfft": resolved["nfft"],
+        })
+    return hops
+
+
+#: 频带精测的分析点数上限。跟踪需要时间分辨率、带宽需要频率分辨率，一个网格
+#: 满足不了两者，所以跟踪用粗网格、频带测量再在细网格上复算一遍。
+_HOP_REFINE_NFFT = 2048
+
+
+def _refine_hop_bands(hops, x, rate, noise_linear, resolved, threshold_db, coarse_nfft):
+    """Re-measure each hop's band on a finer grid, in place.
+
+    Only the spectral parameters are recomputed: the hop *times* keep the
+    coarse grid (the finer grid would smear the dwell). The refined search
+    band is the coarse mask band plus a small guard, the noise reference
+    stays the coarse noise floor, and the pass is skipped when the finer
+    grid would leave fewer than :data:`_HOP_MIN_DWELL_FRAMES` frames in the
+    shortest hop — then nothing would be gained.
+    """
+    if not hops:
+        return
+    shortest = min(item["dwell_s"] for item in hops) * rate
+    limit = int(2.0 ** np.floor(np.log2(max(shortest / _HOP_MIN_DWELL_FRAMES, 16.0))))
+    refine_nfft = int(min(_HOP_REFINE_NFFT, limit))
+    if refine_nfft <= coarse_nfft:
+        return
+    psd, frequencies, starts, _ = _stft_psd(x, rate, refine_nfft)
+    resolution = rate / refine_nfft
+    centers = (starts + (refine_nfft - 1) / 2.0) / rate
+    threshold_linear = 10.0 ** (threshold_db / 10.0)
+    guard = 2.0 * resolved["freq_resolution_hz"]
+    for item in hops:
+        low_bin = int(np.searchsorted(frequencies, item["mask_f_low_hz"] - guard, side="left"))
+        high_bin = int(np.searchsorted(frequencies, item["mask_f_high_hz"] + guard, side="right"))
+        low_bin = max(0, min(low_bin, frequencies.size - 2))
+        high_bin = min(frequencies.size - 1, max(high_bin, low_bin + 1))
+        inside = np.flatnonzero((centers >= item["t_start_s"]) & (centers <= item["t_end_s"]))
+        if inside.size == 0:
+            continue
+        profile = psd[inside, low_bin:high_bin + 1].mean(axis=0).astype(np.float64)
+        band = frequencies[low_bin:high_bin + 1]
+        mask = profile > noise_linear * threshold_linear
+        if not mask.any():
+            continue
+        occupied_low, occupied_high = _occupied_span(
+            np.maximum(profile - noise_linear, 0.0), 0, profile.size - 1)
+        f_low = float(band[occupied_low]) - resolution / 2.0
+        f_high = float(band[occupied_high]) + resolution / 2.0
+        mask_bins = np.flatnonzero(mask)
+        mask_low = float(band[int(mask_bins[0])]) - resolution / 2.0
+        mask_high = float(band[int(mask_bins[-1])]) + resolution / 2.0
+        power_linear = float(profile[mask].sum() * resolution)
+        weight_sum = float(profile.sum())
+        centroid = (float((profile * band).sum() / weight_sum)
+                    if weight_sum > 0 else float(band.mean()))
+        signal_power = max(power_linear - noise_linear * (mask_high - mask_low), 1e-30)
+        noise_band = max(noise_linear * (f_high - f_low), 1e-30)
+        snr_db = float(max(10.0 * np.log10(signal_power / noise_band), _SNR_FLOOR_DB))
+        item.update({
+            "f_low_hz": f_low,
+            "f_high_hz": f_high,
+            "bandwidth_hz": f_high - f_low,
+            "center_hz": 0.5 * (f_low + f_high),
+            "centroid_hz": centroid,
+            "mask_f_low_hz": mask_low,
+            "mask_f_high_hz": mask_high,
+            "mask_bandwidth_hz": mask_high - mask_low,
+            "power_linear": power_linear,
+            "snr_db": snr_db,
+            "confidence": float(np.clip((snr_db + 5.0) / 25.0, 0.0, 1.0)),
+            "band_nfft": refine_nfft,
+        })
+
+
+#: 同一会话内频点间隔的最大/最小比：超过它说明这个时间组里混进了另一部
+#: 发射机（两部发射机的频带之间会留下一道明显更宽的缝）。
+_HOP_SESSION_SPLIT_RATIO = 3.0
+_HOP_SESSION_OVERLAP_TOL_FRAMES = 1.5
+
+
+def _cluster_centres(values, resolution):
+    """Deduplicate hop centres into visited channels (1-resolution gap).
+
+    The centre of a channel measured on two different visits differs by less
+    than one frequency point, so values closer than one bin are the same
+    channel and are averaged.
+    """
+    clusters = []
+    for value in sorted(values):
+        if not clusters or value - clusters[-1][-1] > resolution:
+            clusters.append([value])
+        else:
+            clusters[-1].append(value)
+    return [float(np.mean(group)) for group in clusters]
+
+
+def _split_session(members, resolution):
+    """Split a time group where the channel gaps prove two emitters.
+
+    Hops that follow each other in time form a session, but two emitters
+    working at the same time also interleave that way. Their frequency plans
+    are the only remaining evidence: one emitter visits channels spread over
+    *its* hopping span, so an absolute gap outlier (``>``
+    :data:`_HOP_SESSION_SPLIT_RATIO` times the **median** gap of the same
+    session) means the group holds two emitters and is split there. The
+    median is used rather than the narrowest gap so that an irregular but
+    single-emitter plan (one channel pair closer than the rest) is kept
+    together; fewer than three distinct channels can never show such an
+    outlier and are always kept together.
+    """
+    if len(members) < 2:
+        return [members]
+    channels = _cluster_centres((item["center_hz"] for item in members), resolution)
+    if len(channels) < 3:
+        return [members]
+    gaps = [(channels[index + 1] - channels[index], index)
+            for index in range(len(channels) - 1)]
+    widest, index = max(gaps)
+    values = sorted(gap for gap, _ in gaps)
+    median = values[len(values) // 2]
+    if widest <= _HOP_SESSION_SPLIT_RATIO * max(median, resolution):
+        return [members]
+    limit = 0.5 * (channels[index] + channels[index + 1])
+    lower = [item for item in members if item["center_hz"] <= limit]
+    upper = [item for item in members if item["center_hz"] > limit]
+    return _split_session(lower, resolution) + _split_session(upper, resolution)
+
+
+def _group_hop_sessions(hops, noise_linear, duration, resolution, frame_interval_s):
+    """Group hop measurements into emitter sessions by time contiguity.
+
+    ``_same_session`` (the session-level heuristic used by
+    :func:`detect_signals`) cannot be reused here: it compares a new hop
+    against the *whole* accumulated session band, so a wide hopping span
+    gets split arbitrarily — that is exactly how a four-channel session ends
+    up reported with ``sub_bands`` 2. For hop tracks the reliable
+    discriminator is the channel plan: every hop of one emitter falls inside
+    that emitter's hopping span, so the *nearest* open session wins, with
+    time used as an availability gate (independent emitters either overlap in
+    time by much more than a transition frame, or are separated by a pause
+    far longer than one dwell). Emitters that still interleave are separated
+    afterwards by :func:`_split_session`, which uses their channel plans as
+    evidence.
+
+    Each session also exposes the session-level aggregate in-band SNR
+    (signal power averaged over the record divided by ``N0·B_session``),
+    which is directly comparable with ``signal_truth``'s ``snr_inband_db``.
+    """
+    overlap_tol = _HOP_SESSION_OVERLAP_TOL_FRAMES * frame_interval_s
+    ordered = sorted(hops, key=lambda item: (item["t_start_s"], item["center_hz"]))
+    groups = []
+    for hop in ordered:
+        chosen, chosen_score = None, None
+        for index, session in enumerate(groups):
+            pause = hop["t_start_s"] - session["t_end_s"]
+            if pause < -overlap_tol:
+                # 与已在进行的会话明显重叠：只能是另一部发射机（不足
+                # 两帧的重叠是跳变帧本身的展宽，不算证据）
+                continue
+            if pause > _SESSION_GAP_RATIO * session["dwell_median_s"]:
+                continue
+            centres = [item["center_hz"] for item in session["hops"]]
+            distance = max(min(centres) - hop["center_hz"],
+                           hop["center_hz"] - max(centres), 0.0)
+            # 先看频距再看时间：同一部发射机的跳频点落在一段固定的跨度里，
+            # 因此「最近的会话」是稳定的判据；两部交错的发射机也由此分开，
+            # 而时间只作为可用性门限（跳变帧会带来不足两帧的重叠）。
+            score = (distance, pause)
+            if chosen_score is None or score < chosen_score:
+                chosen, chosen_score = index, score
+        if chosen is None:
+            groups.append({"t_end_s": hop["t_end_s"],
+                           "dwell_median_s": hop["dwell_s"],
+                           "hops": [hop]})
+            continue
+        session = groups[chosen]
+        session["hops"].append(hop)
+        session["t_end_s"] = max(session["t_end_s"], hop["t_end_s"])
+        dwells = sorted(item["dwell_s"] for item in session["hops"])
+        session["dwell_median_s"] = dwells[len(dwells) // 2]
+    sessions = [{"hops": members}
+                for group in groups
+                for members in _split_session(group["hops"], resolution)]
+    sessions.sort(key=lambda session: session["hops"][0]["t_start_s"])
+    for identifier, session in enumerate(sessions, start=1):
+        members = session["hops"]
+        for item in members:
+            item["session_id"] = identifier
+        dwells = sorted(item["dwell_s"] for item in members)
+        widths = sorted(item["bandwidth_hz"] for item in members)
+        # 跳频点聚合：同一信道被多次访问时测得的中心会有不到一个频点的抖动，
+        # 先按一个频点宽度聚类再去重，得到「访问过的跳频点集合」。
+        channels = _cluster_centres((item["center_hz"] for item in members), resolution)
+        spacings = [channels[index + 1] - channels[index]
+                    for index in range(len(channels) - 1)]
+        # 跳速取「跳起点间隔中位数」的倒数：它是发射机的跳频周期，与驻留时间
+        # （信号真正存在的时间）不同——本工程 OFDM 图传样式每跳尾部有空闲，两者
+        # 相差正好是一个占空比。
+        starts_sorted = sorted(item["t_start_s"] for item in members)
+        periods = [starts_sorted[index + 1] - starts_sorted[index]
+                   for index in range(len(starts_sorted) - 1)]
+        hop_period = sorted(periods)[len(periods) // 2] if periods else None
+        dwell_median = dwells[len(dwells) // 2]
+        f_low = min(item["f_low_hz"] for item in members)
+        f_high = max(item["f_high_hz"] for item in members)
+        # 会话级功率：按驻留时长加权摊到整段记录，与生成器的 power_dbfs_actual 同口径
+        power_linear = sum(item["power_linear"] * item["dwell_s"]
+                           for item in members) / max(duration, 1e-30)
+        noise_band = max(noise_linear * (f_high - f_low), 1e-30)
+        signal_power = max(power_linear - noise_band, 1e-30)
+        session.update({
+            "session_id": identifier,
+            "hop_count": len(members),
+            "sequence": [item["center_hz"] for item in members],
+            "hop_frequencies_hz": channels,
+            "channel_spacing_hz": (min(spacings) if spacings else None),
+            "hop_span_hz": (channels[-1] - channels[0]) if len(channels) > 1 else 0.0,
+            "hop_bandwidth_hz": widths[len(widths) // 2],
+            "hop_period_s": hop_period,
+            "hop_rate_hz": (1.0 / hop_period) if hop_period else None,
+            "duty_cycle": ((dwell_median / hop_period) if hop_period else None),
+            "dwell_median_s": dwell_median,
+            "dwell_min_s": dwells[0],
+            "dwell_max_s": dwells[-1],
+            "center_hz": 0.5 * (f_low + f_high),
+            "bandwidth_hz": f_high - f_low,
+            "f_low_hz": f_low,
+            "f_high_hz": f_high,
+            "t_start_s": members[0]["t_start_s"],
+            "t_end_s": max(item["t_end_s"] for item in members),
+            "power_linear": power_linear,
+            "snr_db": float(max(10.0 * np.log10(signal_power / noise_band), _SNR_FLOOR_DB)),
+            "session_detection_id": None,
+        })
+    return sessions
+
+
+def detect_hops(samples, sample_rate, config=None, with_sessions=True):
+    """Per-hop frequency-hopping parameter estimation (``hop_track_v1``).
+
+    Pipeline (all NumPy, Cython-compilable), deliberately *not* a variant of
+    :func:`detect_signals`:
+
+    1. The same Hanning STFT as :func:`analyze`/:func:`detect_signals`, but
+       the per-frame PSD is kept instead of being averaged over time —
+       averaging is exactly what fuses neighbouring hop channels on a wide
+       hopping span.
+    2. Noise floor from the time-averaged PSD (identical convention to the
+       session detector, so the two results are directly comparable).
+    3. Per-frame spectral mask: threshold, frequency-domain closing, drop
+       runs narrower than ``min_bandwidth_hz``.
+    4. Ridge tracking: runs are linked from frame to frame by spectral
+       overlap (with a small frequency-gap tolerance for single-run frames).
+       A frame carrying several runs is a transition frame — a hop boundary
+       or a second concurrent emitter — where every run other than the one
+       overlapping a known track starts a new track. Runs much wider than
+       the track's typical width are fused two-hop artefacts and are also
+       refused as geometry.
+    5. Per hop: band from the accepted runs, then re-measured on a finer
+       second STFT grid (the coarse grid alone inflates a single-hop band by
+       two to three bins of Hann leakage); dwell re-measured on the raw frame
+       power inside that band, power as the mean in-band power over the
+       dwell, in-band SNR ``10·log10(P_band/(N0·B_hop))``
+       (``inband_snr_v1``, the per-hop bandwidth being the signal's own
+       occupied bandwidth).
+    6. Hops are grouped into emitter sessions by time contiguity; each
+       session reports the hop count, the visited channel set, the hop rate
+       (``1/median`` start-to-start interval, see ``duty_cycle``) and the
+       session-level aggregate SNR.
+
+    Everything is expressed as a baseband offset; no RF parameter is
+    invented. The frozen ``detect_result_v1`` contract is untouched: this
+    function has its own contract ``fh_hops_v1``. ``resolvable`` plus
+    ``reason`` state honestly when the record is too short or the hopping is
+    too fast for the STFT grid (a hop needs at least
+    :data:`_HOP_MIN_DWELL_FRAMES` frames), instead of silently reporting
+    fused hops. Two consecutive hops that reuse the same channel are
+    physically indistinguishable and are reported as one longer dwell.
+
+    ``with_sessions`` additionally runs :func:`detect_signals` on the same
+    record (read-only reuse, no behaviour change) and attaches its summary
+    as ``baseline``, cross-linking every session to the matching detection
+    through ``session_detection_id``.
+
+    Returns ``(summary, arrays)``.
+    """
+    x = validate_samples(samples)
+    rate = validate_rate(sample_rate)
+    duration = float(x.size / rate)
+    resolved = _hop_config(rate, duration, config)
+    nfft = resolved["nfft"]
+    resolution = resolved["freq_resolution_hz"]
+    threshold_db = resolved["threshold_db"]
+
+    psd, frequencies, starts, hop = _stft_psd(x, rate, nfft)
+    psd_average = psd.mean(axis=0)
+    psd_average_db = 10.0 * np.log10(np.maximum(psd_average, 1e-30))
+    noise_floor_db = _noise_floor_db(psd_average_db, threshold_db)
+    threshold_dbfs = noise_floor_db + threshold_db
+    noise_linear = 10.0 ** (noise_floor_db / 10.0)
+
+    smoothed = _smooth_psd(psd, resolved["smooth_frames"])
+    smoothed_db = 10.0 * np.log10(np.maximum(smoothed, 1e-30))
+    rows = _frame_runs(smoothed_db, threshold_dbfs, resolved["merge_bins"],
+                       resolved["min_bandwidth_bins"])
+    transition_frames = [0]
+    tracks = _link_tracks(rows, frequencies, resolved, transition_frames)
+    hops = _finalise_hops(tracks, psd, frequencies, starts, nfft, rate, duration,
+                          noise_linear, resolved)
+    _refine_hop_bands(hops, x, rate, noise_linear, resolved, threshold_db, nfft)
+    if len(hops) > resolved["max_hops"]:
+        hops.sort(key=lambda item: -item["power_linear"])
+        hops = hops[:resolved["max_hops"]]
+    hops.sort(key=lambda item: (item["t_start_s"], item["center_hz"]))
+    for index, item in enumerate(hops, start=1):
+        item["id"] = index
+        item["session_id"] = None
+    sessions = _group_hop_sessions(hops, noise_linear, duration, resolution,
+                                   hop / rate)
+
+    dwell_limit_s = resolved["min_dwell_frames"] * hop / rate
+    resolvable = bool(hops) and min(item["dwell_s"] for item in hops) >= dwell_limit_s
+    if not hops:
+        reason = (f"没有任何游程同时满足最小带宽 {resolved['min_bandwidth_hz']:.0f} Hz 与"
+                  f"最短驻留 {resolved['min_dwell_frames']} 帧；请降低门限或增大分析点数")
+    elif not resolvable:
+        reason = (f"STFT 帧间距 {hop / rate * 1000.0:.3f} ms、一跳至少"
+                  f"{resolved['min_dwell_frames']} 帧，跳速高于"
+                  f"{rate / hop / resolved['min_dwell_frames']:.1f} Hz 时驻留不足、逐跳不可分辨")
+    else:
+        reason = None
+
+    hop_entries = []
+    for item in hops:
+        hop_entries.append({
+            "id": item["id"],
+            "session_id": item["session_id"],
+            "center_hz": round(item["center_hz"], 3),
+            "centroid_hz": round(item["centroid_hz"], 3),
+            "bandwidth_hz": round(item["bandwidth_hz"], 3),
+            "f_low_hz": round(item["f_low_hz"], 3),
+            "f_high_hz": round(item["f_high_hz"], 3),
+            "t_start_s": round(item["t_start_s"], 6),
+            "t_end_s": round(item["t_end_s"], 6),
+            "dwell_s": round(item["dwell_s"], 6),
+            "power_dbfs": round(float(10.0 * np.log10(max(item["power_linear"], 1e-30))), 3),
+            "snr_db": round(item["snr_db"], 3),
+            "confidence": round(item["confidence"], 3),
+            "frame_count": int(item["frame_count"]),
+            "bin_count": int(item["bin_count"]),
+            "band_nfft": int(item["band_nfft"]),
+            "mask_f_low_hz": round(item["mask_f_low_hz"], 3),
+            "mask_f_high_hz": round(item["mask_f_high_hz"], 3),
+            "mask_bandwidth_hz": round(item["mask_bandwidth_hz"], 3),
+        })
+
+    session_entries = []
+    for session in sessions:
+        session_entries.append({
+            "session_id": session["session_id"],
+            "hop_count": int(session["hop_count"]),
+            "sequence": [round(value, 3) for value in session["sequence"]],
+            "hop_frequencies_hz": [round(value, 3) for value in session["hop_frequencies_hz"]],
+            "channel_spacing_hz": (None if session["channel_spacing_hz"] is None
+                                   else round(session["channel_spacing_hz"], 3)),
+            "hop_span_hz": round(session["hop_span_hz"], 3),
+            "hop_bandwidth_hz": round(session["hop_bandwidth_hz"], 3),
+            "hop_period_s": (None if session["hop_period_s"] is None
+                             else round(session["hop_period_s"], 6)),
+            "hop_rate_hz": (None if session["hop_rate_hz"] is None
+                            else round(session["hop_rate_hz"], 3)),
+            "duty_cycle": (None if session["duty_cycle"] is None
+                           else round(session["duty_cycle"], 4)),
+            "dwell_median_s": round(session["dwell_median_s"], 6),
+            "dwell_min_s": round(session["dwell_min_s"], 6),
+            "dwell_max_s": round(session["dwell_max_s"], 6),
+            "center_hz": round(session["center_hz"], 3),
+            "bandwidth_hz": round(session["bandwidth_hz"], 3),
+            "f_low_hz": round(session["f_low_hz"], 3),
+            "f_high_hz": round(session["f_high_hz"], 3),
+            "t_start_s": round(session["t_start_s"], 6),
+            "t_end_s": round(session["t_end_s"], 6),
+            "power_dbfs": round(float(10.0 * np.log10(max(session["power_linear"], 1e-30))), 3),
+            "snr_db": round(session["snr_db"], 3),
+            "session_detection_id": session["session_detection_id"],
+        })
+
+    summary = {
+        "contract": HOP_CONTRACT,
+        "algorithm": HOP_ALGORITHM,
+        "snr_definition": DETECT_SNR_DEFINITION,
+        "frequency_reference": "baseband_offset",
+        "sample_rate_hz": rate,
+        "sample_count": int(x.size),
+        "duration_s": duration,
+        "nfft": nfft,
+        "hop_samples": hop,
+        "frame_count": int(psd.shape[0]),
+        "config": {
+            "nfft": nfft,
+            "threshold_db": threshold_db,
+            "smooth_frames": resolved["smooth_frames"],
+            "min_bandwidth_hz": round(resolved["min_bandwidth_hz"], 6),
+            "min_dwell_s": round(resolved["min_dwell_s"], 9),
+            "merge_bins": resolved["merge_bins"],
+            "max_gap_frames": resolved["max_gap_frames"],
+            "max_gap_bins": resolved["max_gap_bins"],
+            "transition_ratio": resolved["transition_ratio"],
+            "max_hops": resolved["max_hops"],
+        },
+        "freq_resolution_hz": resolution,
+        "frame_interval_s": hop / rate,
+        "noise_floor_dbfs_per_hz": round(noise_floor_db, 3),
+        "threshold_dbfs_per_hz": round(threshold_dbfs, 3),
+        "dwell_limit_s": dwell_limit_s,
+        "hop_rate_limit_hz": 1.0 / dwell_limit_s,
+        "resolvable": resolvable,
+        "reason": reason,
+        "transition_frames": int(transition_frames[0]),
+        "hops": hop_entries,
+        "sessions": session_entries,
+    }
+    if with_sessions:
+        baseline, _ = detect_signals(x, rate, {
+            "nfft": nfft,
+            "threshold_db": threshold_db,
+            "min_bandwidth_hz": resolved["min_bandwidth_hz"],
+            "merge_bins": resolved["merge_bins"],
+        })
+        summary["baseline"] = {
+            "contract": baseline["contract"],
+            "algorithm": baseline["algorithm"],
+            "threshold_dbfs_per_hz": baseline["threshold_dbfs_per_hz"],
+            "detections": baseline["detections"],
+        }
+        # 会话与会话级检测互链：取频带重叠最多的一条（跳频会话必然是 hopping 实例）
+        for session in summary["sessions"]:
+            best, best_overlap = None, 0.0
+            for detection in baseline["detections"]:
+                overlap = min(session["f_high_hz"], detection["f_high_hz"]) \
+                    - max(session["f_low_hz"], detection["f_low_hz"])
+                if overlap > best_overlap:
+                    best, best_overlap = detection["id"], overlap
+            session["session_detection_id"] = best
+
+    hop_boxes = [[item["f_low_hz"], item["f_high_hz"], item["t_start_s"], item["t_end_s"]]
+                 for item in hop_entries]
+    arrays = {
+        "frequency": frequencies,
+        "frame_time": (starts + (nfft - 1) / 2.0) / rate,
+        "spectrogram_db": (smoothed_db).astype(np.float32),
+        "spectrogram_raw_db": (10.0 * np.log10(np.maximum(psd, 1e-30))).astype(np.float32),
+        "spectrum_db": psd_average_db,
+        "spectrum_median_db": 10.0 * np.log10(np.maximum(np.median(psd, axis=0), 1e-30)),
+        "threshold_db": np.array([threshold_dbfs], dtype=np.float64),
+        "noise_floor_db": np.array([noise_floor_db], dtype=np.float64),
+        "hop_boxes": np.array(hop_boxes, dtype=np.float64).reshape(-1, 4),
+        "hop_id": np.array([item["id"] for item in hop_entries], dtype=np.int64),
+        "hop_session_id": np.array([item["session_id"] for item in hop_entries], dtype=np.int64),
+        "hop_snr_db": np.array([item["snr_db"] for item in hop_entries], dtype=np.float64),
+        "hop_power_dbfs": np.array([item["power_dbfs"] for item in hop_entries], dtype=np.float64),
+    }
+    return summary, arrays

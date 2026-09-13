@@ -16,6 +16,10 @@ dev = ["pytest>=8,<10", "Cython>=3,<4", "build>=1,<2", "pyinstaller>=6,<7"]
 ml = ["onnxruntime>=1.17,<2"]
 # 模型训练：仅 training/ 目录下的脚本使用，不随发布包分发
 train = ["torch>=2.2,<3", "torchvision>=0.17,<1", "onnx>=1.16,<2"]
+# TorchSig 数据源：只服务 training/build_torchsig.py（生成 torchsig_bundle）。
+# 读端 training/ingest_torchsig.py 只需要 NumPy；本仓库测试不依赖该 extra。
+# 依赖重（会拉入 torch），前置条件：Ubuntu ≥ 22.04 / ≥ 4 核 / ≥ 1 TB 可用磁盘 / Python ≥ 3.10
+torchsig = ["torch>=2.2,<3", "torchvision>=0.17,<1", "torchsig>=2.2,<3"]
 
 [project.scripts]
 signal-analysis = "signal_analysis.cli:main"

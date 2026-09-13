@@ -1,0 +1,5 @@
+{
+  "<bundle 里真实出现的 class_name，例如 QPSK>": "qpsk",
+  "<另一个 class_name>": "qam16",
+  "<第三个 class_name>": "fm"
+}

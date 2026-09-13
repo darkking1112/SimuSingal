@@ -41,6 +41,10 @@ def main():
                        check=True, env=env, cwd=stage)
         subprocess.run([sys.executable, "-m", "pytest", str(root / "tests/analysis/test_numeric.py"),
                         str(root / "tests/analysis/test_detect.py"),
+                        str(root / "tests/analysis/test_detect_hops.py"),
+                        # AI 逐跳估计完全建立在编译后的频谱/时频图上，值得在真实
+                        # 二进制产物上再跑一遍（它只用假推理器，不需要 torch）。
+                        str(root / "tests/analysis/test_ml_detect_hops.py"),
                         "-q", "-o", "pythonpath="], check=True, env=env, cwd=stage)
 
 

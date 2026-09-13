@@ -1,6 +1,7 @@
 # training/ — AI 检测与调制识别模型的训练、导出与验收
 
-本目录是 **AI 信号检测（P3）与 A09 六类调制识别（P4）的训练侧**，只包含脚本与文档，**不打包进 wheel**
+本目录是 **AI 信号检测（P3）与调制识别（P4：A09 六类特征通路 + 原始 IQ 通路）的训练侧**，
+只包含脚本与文档，**不打包进 wheel**
 （`pyproject.toml` 里 `[tool.setuptools.packages.find] where = ["src"]`），因此：
 
 * 运行期依赖保持轻量：产品只需要 `.[ml]`（onnxruntime），训练才需要 `.[train]`（torch / onnx）；
@@ -19,10 +20,16 @@ flowchart LR
     E[build_amc_dataset.py<br/>场景 → 34 维特征] --> F[train_amc.py<br/>线性基线 / Transformer → ONNX]
     F --> G[verify_amc.py<br/>契约/验证集/与线性一致率]
     G --> H[GUI「调制识别」/ signal-analysis amc-classify]
+    T[build_torchsig.py<br/>TorchSig → torchsig_bundle_v1] --> J[ingest_torchsig.py<br/>bundle → tf_image_v1 数据集]
+    T --> K[build_iq_dataset.py<br/>场景 → (2,N) 单位 RMS IQ 窗口]
+    J --> B
+    K --> L[train_iq.py<br/>CNN / TCN → ONNX + iq_waveform_v1 清单]
+    L --> M[verify_iq.py<br/>契约/端到端/数据集独立验证]
+    M --> N[GUI「调制识别」/ signal-analysis amc-iq-classify]
 ```
 
 `training/detectors/` 是对外框架的适配器层（只做"补输入预处理 + 补输出几何转换"，
-见 §7）；`tiny` 是本仓库自带的最小检测头，用于在没有第三方框架时跑通全链路。
+见 §9）；`tiny` 是本仓库自带的最小检测头，用于在没有第三方框架时跑通全链路。
 
 ---
 
@@ -36,8 +43,9 @@ flowchart LR
 | 输出契约 | `normalized_boxes_v1`：`(N, 6) = [x_center, y_center, width, height, confidence, class]` | `ml/decode.py::BOX_COLUMNS` |
 | 坐标含义 | 前四列是**边框坐标**：`x_center/width` 按时间跨度归一化，`y_center/height` 按采样率归一化；`confidence ∈ [0, 1]`；`class` 为清单 `labels` 的下标 | 同上 |
 | 标签生成 | 只允许 `band_to_box(meta, f_low_hz, f_high_hz, t_start_s, t_end_s)` | `ml/tensor.py` |
-| 真值来源 | `evaluation.signal_truth(generation)` | `evaluation.py` |
-| 结果契约 | 推理输出仍是冻结的 `detect_result_v1`，可直接与能量检测器并排评分 | `evaluation.py::evaluate_detections` |
+| 标签语义 | `session_v1`（一段传输一个框，**默认**）或 `per_hop_v1`（一跳一个框，供逐跳通路用） | `build_dataset.py::LABEL_SEMANTICS`、`ml/manifest.py::LABEL_SEMANTICS_FIELD` |
+| 真值来源 | 会话级 `evaluation.signal_truth(generation)`；逐跳 `evaluation.hop_truth(generation)` | `evaluation.py` |
+| 结果契约 | 推理输出仍是冻结的 `detect_result_v1`（会话级）或 `fh_hops_v1`（逐跳），可直接与传统路径并排评分 | `evaluation.py::evaluate_detections` |
 
 `y` 的约定值得特别说明：图像行自上而下频率递减，因此 `y_center` 用「距最高频率」的归一化量表示
 （`y_center = (fs/2 − f_center) / fs`）。这正是 `band_to_box` / `box_to_band` 的实现，**不要**在
@@ -48,8 +56,8 @@ flowchart LR
 按本项目的既有约定，**跳频信号是"一段会话一个实例"**：真值给出一条会话记录，
 `t_start_s = 0`、`t_end_s = duration`，频率维覆盖所有去重后的跳频信道 ± 半跳带宽。
 所以稳态记录里**标签框的时间维恒为整帧宽**（`width = 1.0`），网络主要学习的是频率维定位；
-这与推理端 `_merge_sessions` 的会话合并口径一致。若将来需要更细的时间定位（例如同一会话内的
-多段突发），应先扩展 `signal_truth` 的时间语义，再重训模型——属于后续工作。
+这与推理端 `_merge_sessions` 的会话合并口径一致。需要同一会话内的多段突发定位（跳频逐跳
+参数估计）时，用 `--labels hop` 换成**逐跳标签**（§2.1），推理端用 `ml-detect-hops`（§5）。
 
 ---
 
@@ -77,7 +85,7 @@ flowchart LR
   `scene.seed` / `scene.duration_s`），训练脚本的端到端验证与 `verify_onnx.py` 都靠它
   重新生成完全相同的波形（`tests/analysis/test_training_tools.py` 对此有断言）；
 * **标签互不重叠**：场景先在 ±fs/2 内划分互斥频段槽，再把各种调制的实际占用带宽压在槽内
-  （SSB 占一侧、FM 的 `deviation ≤ 0.19 × 槽宽`、跳频用 `hop_bandwidth = 槽宽/(跳数+1)`），
+  （SSB 占一侧、FM 的 `deviation ≤ 0.19 × 槽宽`、跳频用 `hop_bandwidth = 跳频总带宽/(跳频点数量+1)`），
   因此 NMS 与匹配评测不受"标签互相打架"干扰；
 * **纯噪声场景**占 `--noise-only-ratio`，标签为空，用来压制虚警；
 * 只用 NumPy 与项目代码，不需要 torch。
@@ -95,6 +103,30 @@ flowchart LR
 | `--modes` | 全部 9 种 | `am,fm,ssb,ask2,qpsk,qam16,qam64,fh_rc,fh_video` |
 | `--max-signals` / `--snr-range` | 3 / −5,30 | 单场景信号数上限与带内信噪比区间 |
 | `--train-fraction` | 0.8 | 按顺序切分（样本 i.i.d.，顺序切分即可） |
+| `--labels` | `session` | 标签粒度：`session` = 一段传输一个框；`hop` = fh* 信号一跳一个框（§2.1） |
+| `--min-bandwidth-ratio` / `--max-bandwidth-ratio` | 0.02 / 0.12 | 信号占用带宽相对采样率的区间；跳频的总带宽取该值，单跳带宽 = 总带宽/(跳频点数量+1)，所以最窄的一跳由下限与跳频点数量共同决定 |
+| `--hop-rate-range` | 10,200 | 跳频跳速区间（Hz），逐跳数据集用它保证驻留可分辨 |
+
+### 2.1 逐跳标签（`--labels hop`）
+
+默认 `session_v1` 的标签在时间维上是整帧宽，无法回答“一跳在什么时刻、占多宽”。逐跳参数估计
+（`ml_detect_hops`，见[信号检测_AI时频图检测](../docs/algorithms/信号检测_AI时频图检测.md) §7）
+必须用 `--labels hop` 重建数据集：
+
+```bash
+.venv/bin/python training/build_dataset.py \
+    --output training/data/hops --count 2000 --seed 7 \
+    --image-size 1024 --nfft 512 --duration-range 0.2,0.5 --max-signals 2 \
+    --labels hop --hop-rate-range 20,200 --min-bandwidth-ratio 0.06 \
+    --snr-range -5,30 --noise-only-ratio 0.12
+```
+
+* **标签来源**：跳频会话改用 `evaluation.hop_truth`（一跳一个框），**非跳频波形仍按会话出框**；
+  语义写入 `dataset.json.contract.label_semantics`，`statistics.labels` 额外给出
+  `min/median_width_px`、`min/median_height_px` 与 `boxes_per_sample`（供§3.1 的量化守卫用）；
+* **`--min-bandwidth-ratio` 要调高**：默认 0.02 时最窄的一跳在 1024 像素图上只有约 2 px，
+  比网格步长还小、会被训练侧丢弃；实测逐跳数据集用 **0.06**（最小标签约 9.8 px）；
+* **没有 `label_semantics` 字段的旧数据集按 `session_v1` 处理**，向后兼容。
 
 ---
 
@@ -111,7 +143,7 @@ flowchart LR
 `sigmoid / softplus / topk / gather` 直接完成解码，输出形状固定为 `(1, K, 6)`，
 因此 `torch.onnx.export` 之后**无需任何后处理**就能被 `parse_model_output` 解码。
 
-它的定位是**冒烟基线与链路验收**，不是可用精度的模型。真要做精度，请按 §7 用
+它的定位是**冒烟基线与链路验收**，不是可用精度的模型。真要做精度，请按 §9 用
 `training/export_contract.py` 接入 YOLOX / RT-DETR（首选）或 Ultralytics（仅内网基线）。
 
 训练脚本会：
@@ -119,13 +151,38 @@ flowchart LR
 1. 校验数据集契约（`input_contract` / `layout` / `output_layout` 与推理端一致才继续）；
 2. 训练并打印每轮平均 loss；
 3. **用项目自身的评测口径做端到端验证**：从 `scene` 重建波形 → 注入 torch 会话跑
-   `ml_detect` → `evaluate_detections`，得到召回 / 精确率 / 中心频率 MAE（与 GUI、CLI 完全同一条路径）；
+   `ml_detect`（逐跳数据集则跑 `ml_detect_hops`）→ `evaluate_detections`，得到召回 / 精确率 /
+   中心频率 MAE（与 GUI、CLI 完全同一条路径）；
 4. 导出 `detector.onnx` 并调用 `write_model_manifest` 生成 `detector.json`（清单里含 sha256、
    图像契约、训练参数与验证指标）；
 5. 写出 `validation.json`（逐场景指标与 loss 曲线），便于回归比较。
 
 注意：**`.onnx` 与清单必须放在同一目录**（清单里保存的是相对路径），脚本默认都是
 `--output` 目录；`--save-state` 可额外保存 torch `state_dict`。
+
+### 3.1 逐跳模型的训练参数
+
+```bash
+.venv/bin/python training/train_yolox.py \
+    --data training/data/hops --output training/runs/hops \
+    --strides 2 --max-boxes 128 --epochs 20 --batch 8
+```
+
+逐跳标签只有十几像素高，**开训前的量化守卫**（`train_yolox.py::_grid_guard`）会拦住两个必然
+踩到的坑，避免“训练正常、指标看似正常、但与真值对不上”：
+
+| 守卫 | 触发条件 | 提示 |
+| --- | --- | --- |
+| 网格步长 | 最小标签边 < `image_size / 2**strides`（默认 `--strides 4` 即 16 px） | 给出可用的 `--strides`（$\lfloor\log_2(\text{最小标签像素})\rfloor$）；不足 1 px 时要求提高 `--image-size` 后重建数据集 |
+| 输出框数 | 单样本标签数 > `--max-boxes`（默认 32） | 逐跳数据集建议 `≥ 128` |
+
+实测：$S=1024$ 时一跳高度约 9.8 px，`--strides 2`（网格步长 4 px）通过，
+`--strides 4` 被拒。导出时脚本会**自动把数据集的标签语义写进清单**；手工改写已有 ONNX 时用：
+
+```bash
+.venv/bin/signal-analysis ml-manifest training/runs/hops/detector.onnx \
+    training/runs/hops/detector.json --label-semantics per_hop_v1
+```
 
 ---
 
@@ -147,6 +204,8 @@ flowchart LR
    输入节点名必须是 `images`；输出必须含 6 列——这些从 Python 侧清单看不出来，只有读图才能验证；
 4. 端到端：确定性场景（单载波数字、**跳频会话**、双信号、纯噪声）跑 `ml_detect`，
    结果必须 JSON 安全（`allow_nan=False`），并用 `evaluate_detections` 给出召回/精确率；
+   清单语义为 `per_hop_v1` 时**自动改跑逐跳链路**（`ml_detect_hops` + `hop_truth` +
+   `contract=fh_hops_v1`），并打印“标签语义：`per_hop_v1`；端到端验收按 `fh_hops_v1`（逐跳，`ml_detect_hops`）评分”；
 5. 可复现：同一批样本重复推理，检测结果必须完全一致；
 6. 数值一致性：`--reference` 时在同一张时频图上比较两个模型的原始输出，报最大绝对偏差。
 
@@ -157,10 +216,15 @@ flowchart LR
 ```bash
 .venv/bin/python -m pip install -e ".[ml]"                       # onnxruntime
 .venv/bin/signal-analysis ml-detect <asset_id> training/runs/tiny/detector.json
+# 逐跳参数估计（必须用 per_hop_v1 清单；--workspace 是全局选项，要放在子命令之前）
+.venv/bin/signal-analysis --workspace workspace_data/analysis ml-detect-hops \
+    <asset_id> training/runs/hops/detector.json
 ```
 
 GUI：**信号检测 → AI 检测**（选择 `detector.json`，可与能量基线叠加对照，表格里同时给出
-AI 框与灰色虚线基线框）。没有安装 onnxruntime 时 AI 控件自动禁用并提示安装方式，传统检测不受影响。
+AI 框与灰色虚线基线框）；逐跳模型在**跳频参数 → AI 估计逐跳参数**（可选“附带传统逐跳基线”，
+与 [`hop_track_v1`](../docs/algorithms/信号检测_跳频逐跳参数估计.md) 并排对比）。
+没有安装 onnxruntime 时 AI 控件自动禁用并提示安装方式，传统检测不受影响。
 
 ---
 
@@ -246,7 +310,160 @@ GUI：**调制识别**标签页（可手填分析中心/带宽，或先用“信
 
 ---
 
-## 7. 接入 YOLOX / RT-DETR / Ultralytics 的适配器框架
+## 7. 原始 IQ 调制识别（`iq_waveform_v1`，P4 第二条通路）
+
+§6 的特征通路把"人工设计的 34 维统计量"交给分类头；本节这条通路把 **原始 IQ 波形本身**交给
+CNN / TCN，让网络自己学调制特征。两者是**互不替代**的两条通路：
+
+| | 特征通路（§6） | 原始 IQ 通路（本节） |
+| --- | --- | --- |
+| 输入契约 | `amc_feature_vector_v1`，34 维 | `iq_waveform_v1`，`(2, N)` float32 单位 RMS |
+| 类别字典 | **冻结**为 A09 六类 | 由模型清单声明（`a09` 或 `custom`，≤ 64 类） |
+| 基线 | 线性判别 / Transformer | `IQCNN`（步长卷积）/ `IQTCN`（膨胀因果卷积） |
+| 结果契约 | `amc_classify_v1` | `amc_iq_classify_v1` |
+| 推理入口 | `signal-analysis amc-classify` | `signal-analysis amc-iq-classify` |
+
+**不要把特征向量当成 IQ，也不要把 TorchSig 的"信号类别"当成项目的调制类别**：TorchSig 的
+信号实例/调制族与项目的跳频会话、A09 类别不是一套东西（映射只能显式给，见 §8）。
+
+### 7.1 训练-推理契约
+
+| 项目 | 取值 | 定义位置 |
+| --- | --- | --- |
+| 波形契约 | `iq_waveform_v1`：`(2, N)`、通道排布 `iq_channels_first_v1`、归一化 `unit_rms` | `ml/iq.py` |
+| 窗口长度 | 64 ≤ N ≤ 65536，默认 1024；**必须与清单 `input.samples` 一致** | `iq_waveform(window_samples=...)` |
+| 前端口径 | 抽取比 `samples_per_band = 8.0`、低通抽头 `lowpass_taps = 65`，与特征通路**同一份实现**（`ml/amc.py` 的混频/抽取） | `ml/iq.py::_require_front_end` |
+| ONNX 契约 | 输入 `iq (1, 2, N)` float32、输出 `scores (1, C)` 概率（softmax 已写进图） | `training/iq_cnn.py::export_onnx` |
+| 清单 | `iq_waveform_v1` + `runtime=onnxruntime` + sha256 + 类别字典 + 前端口径 + 声明式默认中心/带宽 | `ml/iq.py::write_iq_manifest` |
+| 结果契约 | `amc_iq_classify_v1`：波形摘要、`snr_estimate_db`、概率、可信度提示、待确认项 | `ml/iq.py::amc_iq_classify` |
+
+与检测/特征通路的清单**不能互串**：`read_model_manifest` 仍硬校验 `tf_image_v1` + 单通道，
+IQ 清单由 `read_iq_manifest` 单独解析，两者都会拒绝对方的契约（见到 `tf_image_v1` 用
+`ml-detect`，见到 `iq_waveform_v1` 用 `amc-iq-classify`）。
+
+### 7.2 构建数据集、训练与验收
+
+```bash
+# 1) 数据集：只用项目生成器（纯 NumPy，不需要 torch）
+.venv/bin/python training/build_iq_dataset.py --output training/data/iq \
+    --per-class 200 --samples 1024 --seed 7
+
+# 2) 训练 CNN/TCN 并导出 ONNX + 清单（需要 .[train]）
+.venv/bin/python -m pip install -e ".[train]"
+.venv/bin/python training/train_iq.py --data training/data/iq \
+    --arch cnn --epochs 30 --onnx-dir training/runs/iq
+
+# 3) 验收：清单/图形状/四个确定性场景端到端/可复现/数据集独立验证
+.venv/bin/python training/verify_iq.py --manifest training/runs/iq/iq_manifest.json \
+    --data training/data/iq --json training/runs/iq/verify.json
+```
+
+数据集产物：`iq_dataset.json`（契约、类别字典、分层划分、两条来源的分段统计）与
+`iq_dataset.npz`（`waveforms (M,2,N) float32`、`labels`、`split`、`source`、`snr_db`、
+`offset_hz`、`bandwidth_hz`、`sample_rate_hz`、`index`）。关键设计：
+
+* **标签与输入同源**：每个样本的窗口都由推理端入口 `iq_waveform` 自己产出，所以"窗口长度 /
+  归一化 / 抽取比 / 窗口取中"在训练与推理之间只有一份实现；落盘的 `offset_hz` /
+  `bandwidth_hz` 与分析窗抖动一起保存，便于复盘；
+* **样本可逐字节复现**：`--seed` 固定后同参数两次生成的 `.npz` 逐字节相同（卡片里只有
+  `created` 时间戳不同）；
+* **凑不满窗口就重抽，绝不补零**：`iq_waveform` 在可用样本不足时直接报错，数据集侧换个场景重抽，
+  避免"用零样本伪造信号"；
+* **分层划分按类内位置**：每类的 train/val 都按同一比例切分，不会出现某类全落验证集。
+
+训练脚本会：校验数据集契约（`input_contract` / 通道 / 窗口长度 / 类别）→ 训练并打印每轮
+损失与验证准确率 → 导出 ONNX（softmax 在图内）→ `write_iq_manifest` 生成清单 →
+**再用 ONNX 入口 `iq_scores` 重算一遍验证集**（train 与 ONNX 两条路径的准确率必须一致，
+否则说明导出不忠实）→ 打印分信噪比分档与混淆矩阵。
+
+`--torchsig-bundle` 可把 TorchSig 补充数据混进同一份数据集（同一批样本用 `source` 字段区分，
+卡片里按来源分段统计），见 §8。
+
+### 7.3 实测（冒烟规模，**不是性能结论**）
+
+用 `build_iq_dataset.py --samples 512 --per-class 24 --seed 7` 生成的 180 条样本
+（144 训练 / 36 验证，窗口 512 点）、`train_iq.py --arch cnn --epochs 30` 实跑：
+
+| 项 | 数值 |
+| --- | --- |
+| 训练集内准确率 | 0.9722（144 条） |
+| 独立验证集准确率 / 宏平均 F1 | 0.5833 / 0.5727（36 条） |
+| ONNX 入口验证集准确率 | 0.5833（与 torch 路径一致 → 导出忠实） |
+| `verify_iq.py` | 10 项检查全部通过（含 4 个确定性场景端到端、重复推理一致、数据集独立验证） |
+
+训练集内 0.97、验证集 0.58 就是"**这个规模远不够**"的直接证据：36 条验证样本分 6 类，
+每类 6 条，单条错判就会让宏平均 F1 动 1~2 个点。这里只用于证明**链路是通的**，
+不能当作任何精度声明。要得到有意义的结论，建议 **每类 2000～10000 条**（可用 §8 的 TorchSig
+补充数据提高多样性），并在**独立实采数据**上比较：分 SNR 召回、固定虚警率下的检测率、
+AMC Macro-F1、参数误差与端到端延迟。
+
+> 与 §6 一样，**原始 IQ 通路的识别准确率合格门限仍是技术方案的待确认项**：
+> CLI / GUI / 报表里的每个结果都带着这条提示（`pending` 字段）。
+
+### 7.4 在产品里使用
+
+```bash
+.venv/bin/signal-analysis amc-iq-classify <asset_id> --model training/runs/iq/iq_manifest.json
+.venv/bin/signal-analysis amc-iq-classify <asset_id> --model training/runs/iq/iq_manifest.json \
+    --offset-hz 0 --bandwidth-hz 30000 --threads 4
+# 手工为已有 ONNX 写清单（--class 的重复顺序即输出下标顺序）
+.venv/bin/signal-analysis amc-iq-manifest training/runs/iq/onnx/iq.onnx \
+    training/runs/iq/iq_manifest.json --id iq-cnn-v1 --version 0.2.0 --samples 1024
+```
+
+GUI：**调制识别 → 选择模型清单**。清单若是 `iq_waveform_v1`，页面自动走 IQ 分支（展示输入口径、
+带内信噪比粗估、概率柱状图与真值对照），不再显示 34 维特征表——因为这条通路没有特征向量，
+也不提供传统启发式对照行（传统判定只对确定性特征有意义）。
+
+---
+
+## 8. 用 TorchSig 扩充数据（可选）
+
+TorchSig（MIT）只用来**补充数据多样性**，不参与产品运行：它的产物是本地 bundle 目录，
+不随发行包分发。链路固定为三步，每步之间都是可复现的落盘产物：
+
+```bash
+# 0) 装到独立环境（产品依赖里没有它；torchsig 也拿不到就不要用这条链路）
+.venv/bin/python -m pip install -e ".[torchsig]"
+
+# 1) TorchSig 生成 → torchsig_bundle_v1（IQ + 每条记录的实例元数据）
+.venv/bin/python training/build_torchsig.py --output /data/ts_bundle \
+    --count 256 --seed 7 --sample-rate 1000000 --num-iq-samples 262144 \
+    --nfft 512 --signals-range 0,3 --snr-range -5,30
+
+# 2a) bundle → 检测数据集（tf_image_v1，直接给 train_yolox.py 用）
+.venv/bin/python training/ingest_torchsig.py --bundle /data/ts_bundle \
+    --output training/data/detector_ts --image-size 1024 --nfft 512 --labels session
+
+# 2b) bundle → 原始 IQ 数据集（必须显式给出类名映射）
+.venv/bin/python training/build_iq_dataset.py --output training/data/iq \
+    --torchsig-bundle /data/ts_bundle --torchsig-map training/iq_map.example.json
+```
+
+* **bundle 是自描述格式**：`manifest.json` + 每条记录的 `iq.npy` 与 `meta.json`，
+  由 `training/torchsig_bundle.py` 统一读写，`ingest_torchsig` / `build_iq_dataset` 共用同一份
+  解析实现；
+* **逐跳标签不适用**：TorchSig 没有跳频族，`ingest_torchsig.py --labels hop` 会直接报错退出，
+  而不是给出一份语义错误的逐跳数据集；
+* **标签框必须可达**：`ingest_torchsig.py` 拒绝"框数超 `--max-boxes`"或"框小到网格化时会丢"
+  的记录（默认一旦拒绝就失败，`--skip-rejected` 才改为只计数），避免"训练正常但标签对不上"；
+* **类名映射不猜**：TorchSig 的 `class_name` 属于它自己的体系。`build_iq_dataset.py` 要求
+  `--torchsig-map` 显式给出 `TorchSig 类名 → 项目类别`（仓库里 `training/iq_map.example.json`
+  是占位版示例，左边的 `<...>` 要换成 bundle 里真实出现的类名）；没有映射到的类名**原样**记进
+  数据卡片的 `unmapped_classes` 并跳过该记录，映射目标不在类别字典内则直接报错；
+* **混合方式**：TorchSig 样本与生成器样本进**同一份数据集**，用 `source` 字段区分，
+  卡片 `sources` 下分段统计（`generator` / `torchsig`），`--torchsig-per-class` 限制每类条数
+  （0 = 全部），避免某一类被第三方数据完全挤掉；
+* **`--sample-rate` / `--nfft` 要与下游一致**：`build_torchsig.py` 写成 bundle 级默认值，
+  `ingest_torchsig.py` 的 `--nfft` 必须等于推理清单的 `input.spectrogram_nfft`（否则时频图口径不一致）。
+
+回归测试：`tests/analysis/test_torchsig_ingest.py`（bundle 读写、ingest 拒绝路径、契约字段）与
+`tests/analysis/test_iq_training_tools.py`（映射/跳过计数/未映射类名原样记录）
+**都不需要安装 torchsig**——链路里所有对外行为都由本项目自己的格式模块定义。
+
+---
+
+## 9. 接入 YOLOX / RT-DETR / Ultralytics 的适配器框架
 
 `training/detectors/` 把这套"胶水"做成了**可插拔适配器 + 统一命令行**，
 `training/export_contract.py` 是所有框架的唯一入口。设计原则是
@@ -260,7 +477,7 @@ GUI：**调制识别**标签页（可手填分析中心/带宽，或先用“信
 .venv/bin/python training/export_contract.py --list-layouts
 ```
 
-### 7.1 两条路径
+### 9.1 两条路径
 
 | 路径 | 什么时候用 | 命令骨架 |
 | --- | --- | --- |
@@ -271,7 +488,7 @@ GUI：**调制识别**标签页（可手填分析中心/带宽，或先用“信
 `--onnx` 路径**不导入框架的 Python 包**（图已经是导出的成品），只需要 `onnx` / `onnxruntime`。
 `--max-boxes` 必须 ≤ 原生候选框数，否则直接报错而不是导出形状错误的图。
 
-### 7.2 适配器清单
+### 9.2 适配器清单
 
 | `--arch` | 框架 | 许可证 | 期望的原生输出布局（`--layout`） | 输入预处理（均已对上游源码核对） |
 | --- | --- | --- | --- | --- |
@@ -303,7 +520,7 @@ Python 侧只喂 `[0, 1]` 单通道时频图，绝不偷偷改语义。
 另外：三个框架都期待 3 通道，我们的单通道灰度复制成 3 份后 BGR/RGB 等价（无需翻转）；
 方形时频图且 `--imgsz` 等于图像边长时，letterbox / resize 是恒等变换（无需补边）。
 
-### 7.3 检查清单（对任何框架都成立）
+### 9.3 检查清单（对任何框架都成立）
 
 - [ ] **标签**：直接用 `build_dataset.py` 的数据集，或至少用 `band_to_box` 生成标签；
       `training/detectors/labels.py` 只从 `record["boxes"]` 取框，**不做任何 y 翻转**
@@ -325,18 +542,18 @@ Python 侧只喂 `[0, 1]` 单通道时频图，绝不偷偷改语义。
 - [ ] **训练图像参数三件套**（`image_size` / `spectrogram_nfft` / `dynamic_range_db`）必须写进清单，
       推理端会强制与清单一致（不一致直接报错，而不是静默改变输入）。
 
-### 7.4 排查顺序
+### 9.4 排查顺序
 
 1. `--probe`（torch 路径）或先跑一遍原生图，用 `--list-layouts` 的 `examples` 对号入座，
    确认真实输出形状与最后一维列数；
 2. 形状对但数值不对 → 十有八九是 `--input-scale` / `--input-mean` / `--input-std` 声明错了，
-   回 §7.2 的分支表逐项核对（`rtdetr` 缺 `--input-scale` 会直接报错，这是刻意设计）；
+   回 §9.2 的分支表逐项核对（`rtdetr` 缺 `--input-scale` 会直接报错，这是刻意设计）；
 3. `--max-boxes` 报"候选框不足" → 调到 ≤ 原生候选框数（YOLO26 端到端头固定 300）；
-4. `--allow-copyleft` 被要求 → 见 §8。
+4. `--allow-copyleft` 被要求 → 见 §10。
 
 ---
 
-## 8. 许可证与数据集注意事项
+## 10. 许可证与数据集注意事项
 
 | 组件 | 许可证 | 本项目中的用法 |
 | --- | --- | --- |
@@ -344,7 +561,7 @@ Python 侧只喂 `[0, 1]` 单通道时频图，绝不偷偷改语义。
 | RT-DETR（官方 / PaddleDetection 实现） | Apache-2.0 | **推荐** |
 | Ultralytics YOLO11 | AGPL-3.0 | **仅可作内网基线对照** |
 | Ultralytics YOLO26 | AGPL-3.0 | **仅可作内网基线对照**。若确要用 Ultralytics，选 YOLO26 而不是 YOLO11：`nms=False` 的端到端头直接输出 `(1, 300, 6)`（无需 NMS），且去掉 DFL 后 CPU 端 ONNX 推理显著更快 |
-| TorchSig（库） | MIT | 可用于数据生成/增强（本目录未使用） |
+| TorchSig（库） | MIT | 可选补充数据源（`build_torchsig.py` / `ingest_torchsig.py`，见 §8）；bundle 与生成物只落本地目录，不随产品发行，训练侧也不依赖它 |
 | RadioML 2018.01A | CC BY-NC-SA 4.0 | **不可商用、不可随产品分发** |
 | Sig53 等公开数据集 | CC BY-NC-SA 4.0 | 同上 |
 | 本项目生成器合成的数据 | 本项目 `LICENSE` | 可自由使用与分发 |
@@ -356,7 +573,7 @@ Python 侧只喂 `[0, 1]` 单通道时频图，绝不偷偷改语义。
 
 ---
 
-## 9. 常用命令速查
+## 11. 常用命令速查
 
 ```bash
 # 1) 依赖
@@ -376,7 +593,18 @@ Python 侧只喂 `[0, 1]` 单通道时频图，绝不偷偷改语义。
 
 # 4) 回归测试（训练工具链本身）
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest \
-    tests/analysis/test_training_tools.py tests/analysis/test_detector_adapters.py -q
+    tests/analysis/test_training_tools.py tests/analysis/test_detector_adapters.py \
+    tests/analysis/test_dataset_labels.py tests/analysis/test_iq_training_tools.py \
+    tests/analysis/test_torchsig_ingest.py -q
+
+# 4a) 逐跳模型（AI 逐跳参数估计，§2.1 / §3.1）
+.venv/bin/python training/build_dataset.py --output training/data/hops --count 2000 \
+    --image-size 1024 --nfft 512 --labels hop --min-bandwidth-ratio 0.06 --hop-rate-range 20,200
+.venv/bin/python training/train_yolox.py --data training/data/hops \
+    --output training/runs/hops --strides 2 --max-boxes 128 --epochs 20 --batch 8
+.venv/bin/python training/verify_onnx.py --manifest training/runs/hops/detector.json
+.venv/bin/signal-analysis --workspace workspace_data/analysis ml-detect-hops \
+    <asset_id> training/runs/hops/detector.json
 
 # 4b) 第三方检测框架接入（不需要安装框架，只要 onnx / onnxruntime）
 .venv/bin/python training/export_contract.py --list-frameworks
@@ -385,7 +613,7 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest \
 .venv/bin/python training/export_contract.py --framework rtdetr \
     --data /tmp/ds --dataset-only --dataset-output /tmp/ds_coco --dataset-format coco
 # 把框架自己导出的 ONNX 改写成契约图 + 清单
-# 注意：rtdetr 的输入量纲各分支不同，必须显式声明（见 §7.2 分支表）
+# 注意：rtdetr 的输入量纲各分支不同，必须显式声明（见 §9.2 分支表）
 .venv/bin/python training/export_contract.py --framework rtdetr \
     --onnx /tmp/rtdetr.onnx --layout normalized_cxcywh --imgsz 1024 \
     --max-boxes 32 --output /tmp/run_rtdetr --input-scale 255
@@ -398,4 +626,20 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest \
 .venv/bin/python training/build_amc_dataset.py --output training/data/amc --per-class 400 --seed 11
 .venv/bin/python training/train_amc.py --data training/data/amc
 .venv/bin/python training/verify_amc.py --data training/data/amc
+
+# 6) 原始 IQ 调制识别：数据集 → CNN → 导出 → 验收（§7）
+.venv/bin/python training/build_iq_dataset.py --output training/data/iq \
+    --per-class 200 --samples 1024 --seed 7
+.venv/bin/python training/train_iq.py --data training/data/iq --arch cnn \
+    --epochs 30 --onnx-dir training/runs/iq
+.venv/bin/python training/verify_iq.py --manifest training/runs/iq/iq_manifest.json \
+    --data training/data/iq
+.venv/bin/signal-analysis amc-iq-classify <asset_id> training/runs/iq/iq_manifest.json
+
+# 7) TorchSig 补充数据（可选，§8；需要 .[torchsig] 与本地数据集）
+.venv/bin/python training/build_torchsig.py --output /data/ts_bundle --count 256 --seed 7
+.venv/bin/python training/ingest_torchsig.py --bundle /data/ts_bundle \
+    --output training/data/detector_ts --image-size 1024 --nfft 512
+.venv/bin/python training/build_iq_dataset.py --output training/data/iq_ts \
+    --torchsig-bundle /data/ts_bundle --torchsig-map training/iq_map.example.json
 ```

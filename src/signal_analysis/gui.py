@@ -1,4 +1,5 @@
 """Independent signal analysis desktop."""
+import json
 import time
 from pathlib import Path
 
@@ -437,6 +438,7 @@ class MainWindow(DesktopWindow):
         self.tabs.insertTab(2, self.build_detect(), "信号检测")
         self.tabs.insertTab(3, self.build_amc(), "调制识别")
         self.tabs.insertTab(4, self.build_compare(), "算法对比")
+        self.tabs.insertTab(5, self.build_hops(), "跳频参数")
         self.last_result = None
         self._play_data = None
         self._play_rate = 1.0
@@ -458,7 +460,8 @@ class MainWindow(DesktopWindow):
 
     def job_buttons(self):
         return (self.demo_button, self.import_button, self.analyze_button, self.native_button,
-                self.generate_button, self.detect_button, self.ml_button, self.amc_button)
+                self.generate_button, self.detect_button, self.hops_button, self.ml_button,
+                self.hops_ml_button, self.amc_button)
 
     def result_ready(self, result):
         self.refresh_assets()
@@ -1168,6 +1171,140 @@ class MainWindow(DesktopWindow):
         return box
 
 
+    def build_hops(self):
+        box = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(box)
+        intro = QtWidgets.QLabel(
+            "逐跳参数估计（契约 fh_hops_v1，算法 hop_track_v1）：在短时傅里叶变换的时频图上把相邻帧里"
+            "同频段的能量连成轨迹，再对每条轨迹用较低门限在原框架上收敛一次频带、用时域带内功率"
+            "收敛一次起止时间，得到每一跳的中心频率、单跳带宽、驻留时间与带内信噪比；一跳内的功率"
+            "重心（质心）与中点一并给出，便于判断跳变帧是否被包进来。逐跳结果再按时间连续性聚成会话，"
+            "给出跳速（跳起点间隔中位数的倒数）、跳频点数、跳频跨度与占空比。"
+            "与会话级“信号检测”是两个粒度：那里只给整条跳频链路的频带，这里给每一跳的参数。"
+            "同一页也可以渲染 AI 逐跳结果（算法 ml_detect_hops）：逐跳模型只在时频图上定位跳的"
+            "频段与粗糙时间，驻留、带宽、功率与逐跳 SNR 仍在原始 PSD 上用同一套门限重测，"
+            "所以两种算法的物理量口径一致、可以并排比较。"
+            "IQ 为复基带记录：中心频率指基带频率偏移，不是射频载频。")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        bar = QtWidgets.QHBoxLayout()
+        bar.addWidget(QtWidgets.QLabel("STFT 点数"))
+        self.hops_nfft = QtWidgets.QComboBox()
+        self.hops_nfft.addItems(["128", "256", "512", "1024", "2048", "4096"])
+        self.hops_nfft.setCurrentText("512")
+        self.hops_nfft.setToolTip("时间频率折衷：点数越大频率越精细，但每跳可用的帧数越少；"
+                                  "可分辨的最快跳速 = 采样率 / (4 × 点数)")
+        bar.addWidget(self.hops_nfft)
+        bar.addWidget(QtWidgets.QLabel("逐帧门限"))
+        threshold_row, self.hops_threshold = _plain_spin(0.5, 60.0, 6.0, 1, "dB")
+        self.hops_threshold.setToolTip("逐帧判定跳频信号是否存在的门限（高于本底多少 dB），默认 6 dB；"
+                                       "比会话级检测更保守，以抑制跳变帧的展宽")
+        bar.addWidget(threshold_row)
+        bar.addWidget(QtWidgets.QLabel("时间平滑"))
+        self.hops_smooth = QtWidgets.QSpinBox()
+        self.hops_smooth.setRange(1, 64)
+        self.hops_smooth.setValue(4)
+        self.hops_smooth.setToolTip("功率谱在时间方向上的滑动平均帧数，用于抑制噪声引起的虚假跳变")
+        bar.addWidget(self.hops_smooth)
+        bar.addWidget(QtWidgets.QLabel("最小带宽"))
+        width_row, self.hops_min_bandwidth = _freq_spin(0.0, 1e9, 0.0, 1)
+        self.hops_min_bandwidth.setToolTip("小于该带宽的频段不构成一跳，0 表示自动取 3 个频点")
+        bar.addWidget(width_row)
+        bar.addWidget(QtWidgets.QLabel("最小驻留"))
+        dwell_row, self.hops_min_dwell = _plain_spin(0.0, 3600.0, 0.0, 4, "s")
+        self.hops_min_dwell.setToolTip("驻留时间短于该值的轨迹被丢弃，0 表示自动取 4 帧")
+        bar.addWidget(dwell_row)
+        bar.addWidget(QtWidgets.QLabel("最多跳数"))
+        self.hops_max = QtWidgets.QSpinBox()
+        self.hops_max.setRange(1, 256)
+        self.hops_max.setValue(256)
+        self.hops_max.setToolTip("按带内功率从大到小保留的跳数上限")
+        bar.addWidget(self.hops_max)
+        bar.addWidget(QtWidgets.QLabel("粘合丢帧"))
+        self.hops_gap = QtWidgets.QComboBox()
+        self.hops_gap.addItems(["自动", "0", "1", "2", "4", "8", "16"])
+        self.hops_gap.setToolTip("轨迹在时间上允许粘合的最大丢帧间隔，0 表示不允许（保守模式）")
+        bar.addWidget(self.hops_gap)
+        self.hops_sessions = QtWidgets.QCheckBox("附带会话基线")
+        self.hops_sessions.setChecked(True)
+        self.hops_sessions.setToolTip("勾选时在同一次任务里跑一遍会话级能量检测，给出两种粒度的指标对照")
+        bar.addWidget(self.hops_sessions)
+        self.hops_button = QtWidgets.QPushButton("估计逐跳参数")
+        self.hops_button.setObjectName("primary")
+        self.hops_button.clicked.connect(self.hops_selected)
+        bar.addWidget(self.hops_button)
+        bar.addStretch(1)
+        layout.addLayout(bar)
+        ai_bar = QtWidgets.QHBoxLayout()
+        ai_bar.addWidget(QtWidgets.QLabel("逐跳模型清单"))
+        self.hops_manifest = QtWidgets.QLineEdit()
+        self.hops_manifest.setPlaceholderText(
+            "选择声明 label_semantics=per_hop_v1 的 JSON（逐跳训练产出或 ml-manifest --label-semantics）")
+        self.hops_manifest.setToolTip(
+            "只有逐跳标签（per_hop_v1）训练的模型可以走这条通路；会话级模型会被直接拒绝并提示"
+            "改用“信号检测”页，避免把整条跳频链路当成一跳。")
+        ai_bar.addWidget(self.hops_manifest, 1)
+        self.hops_ml_choose = QtWidgets.QPushButton("选择…")
+        self.hops_ml_choose.clicked.connect(self.choose_hops_manifest)
+        ai_bar.addWidget(self.hops_ml_choose)
+        self.hops_ml_traditional = QtWidgets.QCheckBox("并排对比传统逐跳")
+        self.hops_ml_traditional.setChecked(True)
+        self.hops_ml_traditional.setToolTip(
+            "勾选时在同一次任务里按同样的参数跑一遍能量逐跳（hop_track_v1）作为基线；"
+            "两条通路的驻留、带宽、功率与 SNR 都在原始 PSD 上重测，可直接比较")
+        ai_bar.addWidget(self.hops_ml_traditional)
+        self.hops_ml_button = QtWidgets.QPushButton("AI 估计逐跳参数")
+        self.hops_ml_button.setObjectName("primary")
+        self.hops_ml_button.clicked.connect(self.ml_hops_selected)
+        ai_bar.addWidget(self.hops_ml_button)
+        self.hops_ml_status = QtWidgets.QLabel()
+        ai_bar.addWidget(self.hops_ml_status)
+        ai_bar.addStretch(1)
+        layout.addLayout(ai_bar)
+        grid = QtWidgets.QGridLayout()
+        self.hops_spectrum = pg.PlotWidget(title="平均功率谱密度与逐跳频带")
+        self.hops_spectrum.setLabel("bottom", "基带频率偏移", units="Hz")
+        self.hops_spectrum.setLabel("left", "PSD（dB，参考 1 任意单位²/Hz）")
+        self.hops_tf = pg.PlotWidget(title="时频图与逐跳框")
+        self.hops_tf.setLabel("bottom", "基带频率偏移", units="Hz")
+        self.hops_tf.setLabel("left", "时间", units="s")
+        self.hops_tf_image = pg.ImageItem(axisOrder="row-major")
+        self.hops_tf_image.setLookupTable(pg.colormap.get("viridis").getLookupTable())
+        self.hops_tf.addItem(self.hops_tf_image)
+        grid.addWidget(self.hops_spectrum, 0, 0)
+        grid.addWidget(self.hops_tf, 0, 1)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid, 1)
+        self._hops_items = []
+        lower = QtWidgets.QHBoxLayout()
+        self.hops_table = QtWidgets.QTableWidget(0, 10)
+        self.hops_table.setHorizontalHeaderLabels(
+            ["跳号", "会话", "中心频率", "单跳带宽", "频段范围", "时间范围", "驻留",
+             "功率 dBFS", "逐跳 SNR", "备注"])
+        self.hops_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.hops_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.hops_table.horizontalHeader().setStretchLastSection(True)
+        self.hops_table.setMaximumHeight(180)
+        lower.addWidget(self.hops_table, 3)
+        self.hops_session_table = QtWidgets.QTableWidget(0, 9)
+        self.hops_session_table.setHorizontalHeaderLabels(
+            ["会话", "跳数", "跳速", "跳周期", "驻留中位", "占空比", "跳频点数", "跳频跨度", "会话带宽"])
+        self.hops_session_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.hops_session_table.horizontalHeader().setStretchLastSection(True)
+        self.hops_session_table.setMaximumHeight(180)
+        lower.addWidget(self.hops_session_table, 2)
+        layout.addLayout(lower)
+        self.hops_summary = QtWidgets.QPlainTextEdit()
+        self.hops_summary.setReadOnly(True)
+        self.hops_summary.setMaximumHeight(205)
+        self.hops_summary.setPlaceholderText("估计后显示本底与门限、可分辨上限、逐跳统计与真值误差。")
+        layout.addWidget(self.hops_summary)
+        self.update_hops_controls()
+        self.update_ml_controls()
+        return box
+
+
     def build_amc(self):
         box = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(box)
@@ -1178,6 +1315,9 @@ class MainWindow(DesktopWindow):
             "也可以选择自训练模型 JSON 或 ONNX 分类器清单。识别准确率的合格门限尚未确认；低信噪比"
             "（<5 dB）或最高类概率偏低时会标注“仅供参考”，无法映射到六类的样式（如 AM、跳频会话）"
             "按“不适用”计数，不丢弃样本。"
+            "若所选清单声明 contract = iq_waveform_v1，本页自动改走原始 IQ 通路：在同一分析频带内取"
+            "定长复基带窗口（单位 RMS 归一化）直接交给 1D CNN／TCN，由网络自行学习调制特征；标签集合"
+            "由清单决定（A09 六类或更宽的独立字典），结果契约 amc_iq_classify_v1，与特征通路互不影响。"
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -1205,7 +1345,8 @@ class MainWindow(DesktopWindow):
         model_bar.addWidget(QtWidgets.QLabel("识别模型"))
         self.amc_model = QtWidgets.QLineEdit()
         self.amc_model.setPlaceholderText("留空使用内置线性基线；也可选择自训练模型 JSON 或 ONNX 清单")
-        self.amc_model.setToolTip("模型 JSON 为 amc_model_v1；ONNX 清单为 amc-manifest 生成的 JSON")
+        self.amc_model.setToolTip("模型 JSON 为 amc_model_v1；ONNX 清单为 amc-manifest（特征通路）或"
+                                  "amc-iq-manifest（原始 IQ 通路）生成的 JSON，本页按清单契约自动分流")
         model_bar.addWidget(self.amc_model, 1)
         self.amc_choose = QtWidgets.QPushButton("选择…")
         self.amc_choose.clicked.connect(self.choose_amc_model)
@@ -1253,9 +1394,10 @@ class MainWindow(DesktopWindow):
         layout = QtWidgets.QVBoxLayout(box)
         intro = QtWidgets.QLabel(
             "把同一个数据资产上的两条路径排在一起：信号检测侧的“检测结果 / 传统基线”取自 AI 检测运行时"
-            "同步跑的能量检测，两者使用同一套真值、同一套会话合并口径；调制识别侧列出模型输出、"
-            "生成器真值与命中情况。没有生成器真值（导入或原生插件产出）时只列结果、不计算指标，"
-            "按“不适用”计数而不是静默丢弃。"
+            "同步跑的能量检测，两者使用同一套真值、同一套会话合并口径；逐跳参数侧把“AI 逐跳 /"
+            "传统逐跳 / 会话口径”三列排在一起，三者的驻留、带宽、功率与 SNR 都在原始 PSD 上重测；"
+            "调制识别侧列出模型输出、生成器真值与命中情况。没有生成器真值（导入或原生插件产出）时"
+            "只列结果、不计算指标，按“不适用”计数而不是静默丢弃。"
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -1274,7 +1416,8 @@ class MainWindow(DesktopWindow):
         self.compare_summary = QtWidgets.QPlainTextEdit()
         self.compare_summary.setReadOnly(True)
         self.compare_summary.setPlaceholderText(
-            "运行“信号检测”（或 AI 检测）与“调制识别”后，这里显示并排对比与未确认项。")
+            "运行“信号检测”（或 AI 检测）、“跳频参数”（或 AI 逐跳）与“调制识别”后，"
+            "这里显示并排对比与未确认项。")
         layout.addWidget(self.compare_summary, 2)
         return box
 
@@ -1292,9 +1435,10 @@ class MainWindow(DesktopWindow):
 
 
     def _render_compare(self, switch=False):
-        """把最近一次检测（AI/传统）与调制识别结果整理成并排表格。"""
+        """把最近一次检测（AI/传统）、逐跳与调制识别结果整理成并排表格。"""
         detect = self.tab_results.get(2)
         amc = self.tab_results.get(3)
+        hops = self.tab_results.get(5)
         rows = []
         lines = []
         if detect:
@@ -1322,6 +1466,34 @@ class MainWindow(DesktopWindow):
                                  "AI 检测页勾选“同时跑能量检测”即可对照。")
             else:
                 lines.append("该数据没有生成器真值，只列检测结果，不计算指标（不适用）。")
+        if hops:
+            summary = hops.get("summary") or {}
+            metrics = hops.get("metrics")
+            if metrics:
+                main_label = self._object_label(
+                    "AI 逐跳" if hops.get("model") else "逐跳", hops)
+                for name, value in detection_metrics(metrics):
+                    rows.append(("跳频参数", main_label, name, value))
+                traditional = hops.get("traditional_metrics")
+                if traditional:
+                    for name, value in detection_metrics(traditional):
+                        rows.append(("跳频参数", "传统逐跳（hop_track_v1）", name, value))
+                    lines.append(_comparison_line(main_label, metrics, "传统逐跳", traditional))
+                else:
+                    lines.append("本次逐跳估计没有同步运行传统基线：跳频参数页勾选"
+                                 "“并排对比传统逐跳”即可对照。")
+                baseline = hops.get("baseline_metrics")
+                if baseline:
+                    for name, value in detection_metrics(baseline):
+                        rows.append(("跳频参数", "会话口径（能量检测基线）", name, value))
+                    lines.append(_comparison_line("逐跳口径", metrics, "会话口径", baseline))
+                lines.append(f"逐跳结果：{len(hops.get('hops') or [])} 跳 · "
+                             f"{len(hops.get('sessions') or [])} 个会话 · "
+                             f"可分辨 {summary.get('hop_rate_limit_hz', '--')} Hz 以内")
+            else:
+                truth = hops.get("truth") or {}
+                lines.append("该数据没有逐跳真值，只列逐跳结果，不计算指标（不适用）："
+                             + str(truth.get("reason") or "不适用"))
         if amc:
             prediction = amc.get("prediction") or {}
             model = amc.get("model") or {}
@@ -1337,8 +1509,11 @@ class MainWindow(DesktopWindow):
                              "命中" if hit else "未命中"))
             else:
                 rows.append(("调制识别", "生成器真值", "对照", truth.get("reason") or "不适用"))
-            lines.append(f"识别模型来源 {model.get('source', '--')}（{model.get('id', '--')}）· "
-                         f"带内信噪比粗估 {_fmt_metric(amc.get('snr_estimate_db'), '.2f')} dB")
+            lines.append(f"识别模型 {model.get('id')}@{model.get('version', '--')} · "
+                         + (f"来源 {_AMC_SOURCE_TEXT.get(str(model.get('source')), model.get('source'))} · "
+                            if model.get("source") else
+                            f"契约 {amc.get('contract', '--')}（标签集合 {amc.get('class_set', '--')}）· ")
+                         + f"带内信噪比粗估 {_fmt_metric(amc.get('snr_estimate_db'), '.2f')} dB")
             for item in amc.get("pending") or []:
                 lines.append(f"待确认项：{item}")
         self.compare_table.setRowCount(len(rows))
@@ -1359,6 +1534,31 @@ class MainWindow(DesktopWindow):
             self, "选择调制识别模型", str(self.workspace.root), "模型文件 (*.json *.onnx)")
         if path:
             self.amc_model.setText(path)
+
+
+    def _amc_model_contract(self):
+        """读取所选清单声明的契约；不是 JSON 清单或读不动时返回 ``None``。
+
+        只做分流判断，真正的校验交给识别入口：这里不能替用户“宽容”非法清单，
+        所以任何读取失败都按“非 IQ 清单”处理，再由 amc_classify 给出明确报错。
+        """
+        path = self.amc_model.text().strip()
+        if not path or Path(path).suffix.lower() != ".json":
+            return None
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return str(payload.get("contract") or "") or None
+
+
+    def _use_iq_branch(self):
+        """所选清单是否声原始 IQ 通路（决定调 amc_iq_classify 还是 amc_classify）。"""
+        from .ml.iq import IQ_WAVEFORM_CONTRACT
+
+        return self._amc_model_contract() == IQ_WAVEFORM_CONTRACT
 
 
     def use_detected_band(self):
@@ -1389,16 +1589,12 @@ class MainWindow(DesktopWindow):
         if bandwidth > 0:
             config["bandwidth_hz"] = bandwidth
         model = self.amc_model.text().strip() or None
-        self.start_job("amc_classify", asset_id=asset["id"], config=config, model=model)
+        action = "amc_iq_classify" if self._use_iq_branch() else "amc_classify"
+        self.start_job(action, asset_id=asset["id"], config=config, model=model)
 
 
-    def _render_amc(self, result):
-        summary = result["summary"]
-        prediction = result["prediction"]
-        classes = summary["classes"]
-        labels = summary["labels"]
-        features = summary["features"]
-        scores = prediction["scores"]
+    def _plot_amc_scores(self, classes, labels, scores, title):
+        """画出类别后验概率柱状图（特征通路与 IQ 通路共用）。"""
         values = [float(scores.get(name, 0.0)) for name in classes]
         positions = np.arange(len(classes), dtype=float)
         if self.amc_bars is not None:
@@ -1409,8 +1605,19 @@ class MainWindow(DesktopWindow):
         self.amc_plot.getAxis("bottom").setTicks(
             [[(float(position), labels[name]) for position, name in zip(positions, classes)]])
         self.amc_plot.setYRange(0.0, max(1.0, max(values) * 1.15), padding=0.0)
-        self.amc_plot.setTitle(f"六类后验概率 · 预测 {prediction['label_text']}"
-                               f"（{prediction['confidence']:.2f}）")
+        self.amc_plot.setTitle(title)
+
+
+    def _render_amc(self, result):
+        summary = result["summary"]
+        prediction = result["prediction"]
+        classes = summary["classes"]
+        labels = summary["labels"]
+        features = summary["features"]
+        self._plot_amc_scores(classes, labels, prediction["scores"],
+                              f"六类后验概率 · 预测 {prediction['label_text']}"
+                              f"（{prediction['confidence']:.2f}）")
+        self.amc_table.setHorizontalHeaderLabels(["特征", "取值"])
         self.amc_table.setRowCount(len(features))
         for row, name in enumerate(features):
             self.amc_table.setItem(row, 0, QtWidgets.QTableWidgetItem(name))
@@ -1459,6 +1666,74 @@ class MainWindow(DesktopWindow):
         self.amc_summary.setPlainText("\n".join(lines))
 
 
+    def _render_amc_iq(self, result):
+        """原始 IQ 通路的展示：类别后验概率 + 输入窗口口径（没有 34 维特征表）。
+
+        右侧表格改成“输入口径/取值”：这条通路没有可逐项对照的确定性特征，
+        列无可列的假特征反而是误导，因此只列真正决定模型输入的那几个量。
+        """
+        summary = result["summary"]
+        prediction = result["prediction"]
+        classes = summary["classes"]
+        labels = summary["labels"]
+        waveform = summary["waveform"]
+        model = summary["model"] or {}
+        self._plot_amc_scores(classes, labels, prediction["scores"],
+                              f"类别后验概率 · 预测 {prediction['label_text']}"
+                              f"（{prediction['confidence']:.2f}）")
+        rows = [("输入契约", waveform["contract"]), ("通道排布", waveform["layout"]),
+                ("窗口采样点", f"{waveform['samples']:,}"),
+                ("归一化", waveform["normalization"]),
+                ("分析率 / Hz", _fmt_hz(waveform["analysis_rate_hz"])),
+                ("抽样比", waveform["decimation"]),
+                ("窗口起点（分析后）", f"{waveform['window_start']:,}"),
+                ("源样本 / 分析样本", f"{waveform['source_samples']:,} / "
+                                      f"{waveform['analysis_samples']:,}"),
+                ("带内功率 / dBFS", f"{waveform['power_dbfs']:.2f}"),
+                ("窗口 RMS / 峰均比", f"{waveform['rms']:.4f} / {waveform['crest_factor']:.4f}"),
+                ("带内信噪比粗估 / dB", _fmt_metric(waveform.get("snr_estimate_db"), ".2f"))]
+        self.amc_table.setHorizontalHeaderLabels(["输入口径", "取值"])
+        self.amc_table.setRowCount(len(rows))
+        for index, (name, value) in enumerate(rows):
+            self.amc_table.setItem(index, 0, QtWidgets.QTableWidgetItem(str(name)))
+            self.amc_table.setItem(index, 1, QtWidgets.QTableWidgetItem(str(value)))
+        timing = summary["timing"]
+        lines = [
+            f"数据：{result.get('asset_name', result['asset_id'])}  |  采样率 "
+            f"{_fmt_hz(waveform['sample_rate_hz'])}  |  分析频带 中心 {_fmt_hz(waveform['offset_hz'])}"
+            f" · 带宽 {_fmt_hz(waveform['bandwidth_hz'])}  |  输入窗口 {waveform['samples']:,} 点"
+            f"（I/Q 两通道 · 单位 RMS）",
+            f"算法 {summary['algorithm']}（契约 {summary['contract']}）· 标签集合 "
+            f"{summary['class_set']}（{len(classes)} 类）· 预处理 {timing['preprocess_ms']} ms + "
+            f"推理 {timing['inference_ms']} ms = {timing['total_ms']} ms",
+            f"模型 {model.get('id')}@{model.get('version')}"
+            + (f" · 摘要 {str(model['sha256'])[:12]}…" if model.get("sha256") else "")
+            + (f" · 运行时 onnxruntime {model['runtime_version']}"
+               if model.get("runtime_version") else "")
+            + (f" · 训练 {model['training']}" if model.get("training") else ""),
+            f"预测：{prediction['label_text']}（概率 {prediction['confidence']:.4f} · 与次高类差值 "
+            f"{_fmt_metric(prediction.get('margin'), '.4f')}）· 带内信噪比粗估 "
+            f"{_fmt_metric(summary['snr_estimate_db'], '.1f')} dB",
+        ]
+        if prediction["reliable"]:
+            lines.append("可信度：未发现低信噪比或区分度不足的提示；" + prediction["snr_note"])
+        else:
+            lines.append(f"可信度：仅供参考 —— {prediction['reason']}；{prediction['snr_note']}")
+        lines.append("对照说明：原始 IQ 通路没有传统启发式基线（传统判定只对确定性特征有意义），"
+                     "因此这里不列对照行，也不拿它与特征通路的结果互相顶替。")
+        truth = result.get("truth") or {}
+        if truth.get("available"):
+            lines.append(
+                f"生成器真值：{truth['class']}（样式 {truth['mode']}）· 带内信噪比 "
+                f"{_fmt_metric(truth['snr_inband_db'], '.2f')} dB · 识别"
+                f"{'命中' if result.get('truth_hit') else '未命中'}")
+        else:
+            lines.append(f"生成器真值：不适用 —— {truth.get('reason', '没有真值')}；样本仍计入统计，不丢弃")
+        for item in summary["pending"]:
+            lines.append(f"待确认：{item}")
+        self.amc_summary.setPlainText("\n".join(lines))
+
+
     def update_detect_controls(self, *_):
         """带宽门限默认跟随检测门限的一半；手动模式只做上界约束。"""
         auto = self.detect_band_auto.isChecked()
@@ -1471,16 +1746,26 @@ class MainWindow(DesktopWindow):
 
 
     def update_ml_controls(self):
-        """推理运行时缺失时禁用 AI 入口并给出安装提示（传统路径不受影响）。"""
+        """推理运行时缺失时禁用 AI 入口并给出安装提示（传统路径不受影响）。
+
+        tab 2 先于 tab 5 构建，所以这里按名字取控件：还没建的先跳过，
+        待对应标签页构建完成时再调一次即可。
+        """
         from .ml.runtime import runtime_version
 
         version = runtime_version()
         ready = version is not None
-        for widget in (self.ml_button, self.ml_choose, self.ml_score, self.ml_iou,
-                       self.ml_compare):
-            widget.setEnabled(ready)
-        self.ml_status.setText(f"onnxruntime {version}" if ready else
-                               "未安装 onnxruntime：pip install '.[ml]' 后可用")
+        for name in ("ml_button", "ml_choose", "ml_score", "ml_iou", "ml_compare",
+                     "hops_ml_button", "hops_ml_choose", "hops_ml_traditional"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.setEnabled(ready)
+        note = (f"onnxruntime {version}" if ready else
+                "未安装 onnxruntime：pip install '.[ml]' 后可用")
+        for name in ("ml_status", "hops_ml_status"):
+            label = getattr(self, name, None)
+            if label is not None:
+                label.setText(note)
 
 
     def choose_ml_manifest(self):
@@ -1488,6 +1773,42 @@ class MainWindow(DesktopWindow):
             self, "选择 AI 检测模型清单", str(self.workspace.root), "模型清单 (*.json)")
         if path:
             self.ml_manifest.setText(path)
+
+
+    def choose_hops_manifest(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "选择 AI 逐跳模型清单（per_hop_v1）", str(self.workspace.root),
+            "模型清单 (*.json)")
+        if path:
+            self.hops_manifest.setText(path)
+
+
+    def ml_hops_selected(self):
+        """AI 逐跳参数估计：模型只在时频图上定位跳，物理量仍在原始 PSD 上重测。"""
+        asset = self.selected_asset()
+        if not asset:
+            self.status.setText("请先导入并选择数据")
+            return
+        manifest = self.hops_manifest.text().strip()
+        if not manifest:
+            self.status.setText(
+                "请先选择逐跳模型清单（需声明 label_semantics=per_hop_v1）")
+            return
+        config = {"score_threshold": float(self.ml_score.value()),
+                  "iou_threshold": float(self.ml_iou.value()),
+                  "threshold_db": float(self.hops_threshold.value()),
+                  "smooth_frames": int(self.hops_smooth.value()),
+                  "max_hops": int(self.hops_max.value())}
+        if self.hops_min_bandwidth.value() > 0:
+            config["min_bandwidth_hz"] = float(self.hops_min_bandwidth.value())
+        if self.hops_min_dwell.value() > 0:
+            config["min_dwell_s"] = float(self.hops_min_dwell.value())
+        if self.hops_gap.currentText() != "自动":
+            config["max_gap_frames"] = int(self.hops_gap.currentText())
+        # nfft 与图像尺寸由清单声明，界面不覆盖：模型输入口径必须与训练时一致
+        self.start_job("ml_detect_hops", asset_id=asset["id"], manifest=manifest,
+                       config=config, with_sessions=bool(self.hops_sessions.isChecked()),
+                       with_traditional=bool(self.hops_ml_traditional.isChecked()))
 
 
     def ml_detect_selected(self):
@@ -1658,6 +1979,177 @@ class MainWindow(DesktopWindow):
         self.detect_summary.setPlainText("\n".join(lines))
 
 
+    def update_hops_controls(self, *_):
+        """占位：逐跳参数没有联动约束，保留与其他页一致的刷新入口。"""
+        return
+
+
+    def hops_selected(self):
+        asset = self.selected_asset()
+        if not asset:
+            self.status.setText("请先导入并选择数据")
+            return
+        config = {"nfft": int(self.hops_nfft.currentText()),
+                  "threshold_db": float(self.hops_threshold.value()),
+                  "smooth_frames": int(self.hops_smooth.value()),
+                  "max_hops": int(self.hops_max.value())}
+        if self.hops_min_bandwidth.value() > 0:
+            config["min_bandwidth_hz"] = float(self.hops_min_bandwidth.value())
+        if self.hops_min_dwell.value() > 0:
+            config["min_dwell_s"] = float(self.hops_min_dwell.value())
+        if self.hops_gap.currentText() != "自动":
+            config["max_gap_frames"] = int(self.hops_gap.currentText())
+        self.start_job("detect_hops", asset_id=asset["id"], config=config,
+                       with_sessions=bool(self.hops_sessions.isChecked()))
+
+
+    def _render_hops(self, result, arrays):
+        summary = result["summary"]
+        hops = result["hops"]
+        sessions = result["sessions"]
+        f = arrays["frequency"]
+        t = arrays["frame_time"]
+        matrix = arrays["spectrogram_db"]
+        boxes = arrays["hop_boxes"].reshape(-1, 4)
+        hop_ids = arrays["hop_id"].ravel().astype(int)
+        hop_sessions = arrays["hop_session_id"].ravel().astype(int)
+        df = float(summary["freq_resolution_hz"])
+        dt = float(summary["frame_interval_s"])
+        threshold_db = float(arrays["threshold_db"].ravel()[0])
+        noise_db = float(arrays["noise_floor_db"].ravel()[0])
+        high = float(matrix.max()) if matrix.size else -120.0
+        if arrays["spectrum_db"].size:
+            high = max(high, float(arrays["spectrum_db"].max()))
+        colours = ["#2365b3", "#e2564a", "#2f8f5b", "#b3732a", "#7a53a8", "#3f9fb5"]
+        # 平均功率谱密度：与会话级检测同一张图，逐跳频带按会话着色区分
+        self.hops_spectrum.clear()
+        self.hops_spectrum.plot(f, arrays["spectrum_median_db"], pen="#9fb6cd", name="中位数 PSD（对照）")
+        self.hops_spectrum.plot(f, arrays["spectrum_db"], pen="#2365b3", name="平均 PSD（检测依据）")
+        self.hops_spectrum.addItem(pg.InfiniteLine(
+            pos=threshold_db, angle=0, movable=False, pen=pg.mkPen("#e2564a", width=2)))
+        self.hops_spectrum.addItem(pg.InfiniteLine(
+            pos=noise_db, angle=0, movable=False,
+            pen=pg.mkPen("#7d8fa1", style=QtCore.Qt.PenStyle.DashLine)))
+        for index, item in enumerate(hops):
+            colour = colours[(int(hop_sessions[index]) - 1) % len(colours)]
+            self.hops_spectrum.addItem(pg.LinearRegionItem(
+                values=(item["f_low_hz"], item["f_high_hz"]), movable=False,
+                brush=pg.mkBrush(colour), pen=pg.mkPen(colour)))
+        # 时频图叠加逐跳框：同一会话同色，框内时间范围就是驻留时间
+        levels = [high - 80.0, high]
+        self.hops_tf_image.setImage(matrix.T, levels=levels, autoLevels=False)
+        self.hops_tf_image.setRect(QtCore.QRectF(f[0] - df / 2, t[0] - dt / 2,
+                                                 df * len(f), dt * len(t)))
+        view_box = self.hops_tf.getPlotItem().getViewBox()
+        for item in self._hops_items:
+            item.setParentItem(None)
+            self.hops_tf.scene().removeItem(item)
+        self._hops_items = []
+        for index, (f_low, f_high, t_start, t_end) in enumerate(boxes):
+            colour = colours[(int(hop_sessions[index]) - 1) % len(colours)]
+            rectangle = QtWidgets.QGraphicsRectItem(QtCore.QRectF(
+                float(f_low), float(t_start), float(f_high - f_low),
+                max(float(t_end - t_start), dt)))
+            rectangle.setPen(pg.mkPen(colour, width=2))
+            rectangle.setParentItem(view_box)
+            self._hops_items.append(rectangle)
+        self.hops_spectrum.setXRange(float(f[0]) - df / 2, float(f[-1]) + df / 2, padding=0.0)
+        self.hops_spectrum.setYRange(max(noise_db - 5.0, high - 80.0), high + 3.0, padding=0.0)
+        self.hops_tf.setXRange(float(f[0]) - df / 2, float(f[-1]) + df / 2, padding=0.0)
+        self.hops_tf.setYRange(float(t[0]) - dt / 2, float(t[-1]) + dt / 2, padding=0.0)
+        self.hops_spectrum.setTitle(
+            f"平均功率谱密度与逐跳频带 · 本底 {noise_db:.1f} dB/Hz · 逐帧门限 {threshold_db:.1f} dB/Hz"
+            f" · 频点 {df:g} Hz")
+        self.hops_tf.setTitle(f"时频图与逐跳框 · 动态范围 80 dB · 帧间隔 {dt * 1e3:.3f} ms"
+                              f" · 同色为同一会话")
+        self.hops_table.setRowCount(len(hops))
+        for row, item in enumerate(hops):
+            note = (f"频点 {item['bin_count']} 个 · 细化 FFT {item['band_nfft']} 点 · "
+                    f"质心偏移 {_fmt_hz(item['centroid_hz'] - item['center_hz'])}")
+            if item.get("model_confidence") is not None:
+                # 模型分数与置信度不是一回事：前者是“这一跳存在吗”，后者由带内 SNR 换算
+                note += (f" · 模型置信度 {item['model_confidence']:.3f}"
+                         f"（{item.get('model_label') or 'emitter'}）")
+            values = [str(item["id"]), str(item["session_id"]), _fmt_hz(item["center_hz"]),
+                      _fmt_hz(item["bandwidth_hz"]),
+                      f"{_fmt_hz(item['f_low_hz'])} ～ {_fmt_hz(item['f_high_hz'])}",
+                      f"{item['t_start_s']:.5f} ～ {item['t_end_s']:.5f} s",
+                      f"{(item['dwell_s'] or 0.0) * 1e3:.3f} ms",
+                      f"{item['power_dbfs']:.2f}", f"{item['snr_db']:.2f} dB", note]
+            for column, text in enumerate(values):
+                self.hops_table.setItem(row, column, QtWidgets.QTableWidgetItem(text))
+        self.hops_session_table.setRowCount(len(sessions))
+        for row, item in enumerate(sessions):
+            values = [str(item["session_id"]), str(item["hop_count"]),
+                      _fmt_metric(item["hop_rate_hz"], ".2f"), _fmt_metric(item["hop_period_s"], ".6f"),
+                      _fmt_metric(item["dwell_median_s"], ".6f"), _fmt_metric(item["duty_cycle"], ".3f"),
+                      str(len(item["hop_frequencies_hz"])), _fmt_hz(item["hop_span_hz"]),
+                      _fmt_hz(item["bandwidth_hz"])]
+            for column, text in enumerate(values):
+                self.hops_session_table.setItem(row, column, QtWidgets.QTableWidgetItem(text))
+        config = summary["config"]
+        lines = [
+            f"数据：{result.get('asset_name', result['asset_id'])}  |  "
+            f"采样数 {summary['sample_count']:,}  |  时长 {summary['duration_s']:.6f} s  |  "
+            f"采样率 {_fmt_hz(summary['sample_rate_hz'])}",
+            f"算法 {summary['algorithm']}（契约 {summary['contract']}）· "
+            f"带内信噪比定义 {summary['snr_definition']} · 频率参考 {summary['frequency_reference']}",
+            f"STFT {summary['nfft']} 点（频点 {df:g} Hz，帧 {summary['frame_count']} 个，"
+            f"跳变帧 {summary['transition_frames']} 个）· 噪声本底 "
+            f"{summary['noise_floor_dbfs_per_hz']:.1f} dB/Hz · 逐帧门限 "
+            f"{summary['threshold_dbfs_per_hz']:.1f} dB/Hz · 时间平滑 {config['smooth_frames']} 帧",
+            f"可分辨性：最短驻留过滤 {config['min_dwell_s'] * 1e3:.3f} ms · "
+            f"可分辨门限 {summary['dwell_limit_s'] * 1e3:.3f} ms（帧间距 × 4）· "
+            f"理论最快跳速 {summary['hop_rate_limit_hz']:.1f} Hz · "
+            f"{'可分辨' if summary['resolvable'] else '不可分辨'}",
+            f"逐跳结果：{len(hops)} 跳 · {len(sessions)} 个会话",
+        ]
+        if summary.get("reason"):
+            lines.append(f"提示：{summary['reason']}")
+        model = summary.get("model")
+        if isinstance(model, dict) and model.get("id"):
+            lines.append(
+                f"逐跳模型：{model['id']}@{model.get('version') or '--'} · "
+                f"运行时 {model.get('runtime_version') or '--'} · "
+                f"图像 {summary.get('image_size', '--')} 像素 · "
+                f"原始候选框 {summary.get('raw_boxes', '--')} 个（模型只定位跳，物理量重测）")
+        metrics = result.get("metrics")
+        if metrics:
+            lines.append(
+                f"逐跳真值 {metrics['true']} 个：匹配 {metrics['matched']} · 漏警 {metrics['missed']} · "
+                f"虚警 {metrics['false_alarm']} · 精确率 {_fmt_metric(metrics['precision'], '4g')} · "
+                f"召回 {_fmt_metric(metrics['recall'], '4g')} · F1 {_fmt_metric(metrics['f1'], '4g')}")
+            lines.append(
+                f"参数误差：中心频率 MAE {_fmt_metric(metrics['center_mae_hz'], '.1f')} Hz · "
+                f"单跳带宽相对误差 {_fmt_metric(metrics['bandwidth_mape'], '.1%')} · "
+                f"逐跳信噪比 MAE {_fmt_metric(metrics['snr_mae_db'], '.2f')} dB")
+        else:
+            truth = result.get("truth")
+            reason = truth.get("reason") if isinstance(truth, dict) else "没有生成器真值"
+            lines.append(f"逐跳真值：不适用 —— {reason}；结果仍然给出，不丢弃。")
+        for item in sessions:
+            lines.append(
+                f"  会话 {item['session_id']}：{item['hop_count']} 跳 · 跳速 "
+                f"{_fmt_metric(item['hop_rate_hz'], '.2f')} Hz"
+                f"（周期 {_fmt_metric(item['hop_period_s'], '.6f')} s · 驻留中位 "
+                f"{_fmt_metric(item['dwell_median_s'], '.6f')} s · 占空比 "
+                f"{_fmt_metric(item['duty_cycle'], '.3f')}）· "
+                f"跳频点 {len(item['hop_frequencies_hz'])} 个"
+                f"（{', '.join(_fmt_hz(value) for value in item['hop_frequencies_hz'][:8])}"
+                f"{'…' if len(item['hop_frequencies_hz']) > 8 else ''}）· "
+                f"跨度 {_fmt_hz(item['hop_span_hz'])} · 会话带宽 {_fmt_hz(item['bandwidth_hz'])} · "
+                f"带内信噪比 {_fmt_metric(item['snr_db'], '.2f')} dB · "
+                f"会话级检出 {item['session_detection_id'] or '未关联'}")
+        if result.get("traditional_metrics"):
+            lines.append(_comparison_line(
+                "AI 逐跳" if summary.get("model") else "逐跳口径", metrics, "传统逐跳",
+                result["traditional_metrics"]))
+        if result.get("baseline_metrics"):
+            lines.append(_comparison_line("逐跳口径", metrics, "会话口径",
+                                          result["baseline_metrics"]))
+        self.hops_summary.setPlainText("\n".join(lines))
+
+
     def display_result(self, result):
         self.last_result = result
         if result["kind"] == "analysis":
@@ -1671,9 +2163,20 @@ class MainWindow(DesktopWindow):
                 self._render_detect(result, arrays)
             self._render_compare()
             self.tabs.setCurrentIndex(2)
+        elif result["kind"] in ("detect_hops", "ml_detect_hops"):
+            self.tab_results[5] = result
+            with np.load(self.workspace.root / result["plots_path"], allow_pickle=False) as arrays:
+                self._render_hops(result, arrays)
+            self._render_compare()
+            self.tabs.setCurrentIndex(5)
         elif result["kind"] == "amc_classify":
             self.tab_results[3] = result
             self._render_amc(result)
+            self._render_compare()
+            self.tabs.setCurrentIndex(3)
+        elif result["kind"] == "amc_iq_classify":
+            self.tab_results[3] = result
+            self._render_amc_iq(result)
             self._render_compare()
             self.tabs.setCurrentIndex(3)
         elif result["kind"] == "native":

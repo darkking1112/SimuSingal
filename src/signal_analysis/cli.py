@@ -39,6 +39,17 @@ def main(argv=None):
     detect.add_argument("--min-duration", type=float, help="最小持续时间（s），默认 0")
     detect.add_argument("--max-detections", type=int, help="最多保留的目标数，1～256，默认 32")
     detect.add_argument("--merge-bins", type=int, help="形态学闭运算半径（频点），默认按 FFT 点数推导")
+    hops = commands.add_parser("detect-hops", help="逐跳参数估计（跳频信道、驻留、跳速与逐跳 SNR）")
+    hops.add_argument("asset_id")
+    hops.add_argument("--nfft", type=int, default=512, help="STFT 点数，16～4096，默认 512")
+    hops.add_argument("--threshold-db", type=float, help="逐帧检测门限，高于本底该值（dB），默认 6")
+    hops.add_argument("--smooth-frames", type=int, help="功率谱在时间方向上的平滑帧数，1～64，默认 4")
+    hops.add_argument("--min-bandwidth", type=float, help="最小单跳带宽（Hz），默认 3 个频点")
+    hops.add_argument("--min-dwell", type=float, help="最小驻留时间（s），默认 4 帧")
+    hops.add_argument("--merge-bins", type=int, help="频点形态学闭运算半径，0～nfft/4，默认按 FFT 点数推导")
+    hops.add_argument("--max-gap-frames", type=int, help="允许粘合的丢帧间隔，0～16，默认 1")
+    hops.add_argument("--max-hops", type=int, help="最多保留的跳数，1～256，默认 256")
+    hops.add_argument("--no-sessions", action="store_true", help="不附带会话级检测基线")
     ml_detect = commands.add_parser("ml-detect", help="AI 检测（ONNX 模型清单 + 时频图推理）")
     ml_detect.add_argument("asset_id")
     ml_detect.add_argument("manifest", help="模型清单 JSON（含 .onnx 相对路径与 SHA-256）")
@@ -51,6 +62,25 @@ def main(argv=None):
     ml_detect.add_argument("--min-duration", type=float, help="最小持续时间（s），默认 0")
     ml_detect.add_argument("--threads", type=int, help="ONNX Runtime 计算线程数")
     ml_detect.add_argument("--no-baseline", action="store_true", help="不附带传统能量检测基线")
+    ml_hops = commands.add_parser(
+        "ml-detect-hops",
+        help="AI 逐跳参数估计（逐跳模型 + 原始 PSD 重测驻留/功率/带宽/SNR）")
+    ml_hops.add_argument("asset_id")
+    ml_hops.add_argument("manifest", help="逐跳模型清单 JSON（需声明 label_semantics=per_hop_v1）")
+    ml_hops.add_argument("--nfft", type=int, help="时频图 STFT 点数，默认取清单声明值")
+    ml_hops.add_argument("--threshold-db", type=float, help="逐帧检测门限（dB），默认 6")
+    ml_hops.add_argument("--score-threshold", type=float, help="模型置信度阈值，默认 0.25")
+    ml_hops.add_argument("--iou-threshold", type=float, help="重叠框去重 IoU 阈值，默认 0.5")
+    ml_hops.add_argument("--smooth-frames", type=int, help="功率谱在时间方向上的平滑帧数，1～64，默认 4")
+    ml_hops.add_argument("--min-bandwidth", type=float, help="最小单跳带宽（Hz），默认 3 个频点")
+    ml_hops.add_argument("--min-dwell", type=float, help="最小驻留时间（s），默认 4 帧")
+    ml_hops.add_argument("--merge-bins", type=int, help="频点形态学闭运算半径，默认按 FFT 点数推导")
+    ml_hops.add_argument("--max-gap-frames", type=int, help="允许粘合的丢帧间隔，0～16，默认 1")
+    ml_hops.add_argument("--max-hops", type=int, help="最多保留的跳数，1～256，默认 256")
+    ml_hops.add_argument("--threads", type=int, help="ONNX Runtime 计算线程数")
+    ml_hops.add_argument("--no-sessions", action="store_true", help="不附带会话级检测基线")
+    ml_hops.add_argument("--no-traditional", action="store_true",
+                         help="不附带同配置的传统逐跳基线")
     native = commands.add_parser("native", help="运行显式选择的原生复制演示插件")
     native.add_argument("asset_id")
     native.add_argument("manifest")
@@ -77,6 +107,10 @@ def main(argv=None):
     model_manifest.add_argument("--framework", help="训练框架（如 yolox / rt-detr）")
     model_manifest.add_argument("--license", help="模型与训练代码的许可证（如 Apache-2.0）")
     model_manifest.add_argument("--dataset", help="训练数据来源与许可证说明")
+    model_manifest.add_argument("--label-semantics", choices=("session_v1", "per_hop_v1"),
+                                default="session_v1",
+                                help="训练标签粒度：session_v1 = 一段传输一个框（默认）；"
+                                     "per_hop_v1 = fh* 信号一跳一个框（供 ml-detect-hops 使用）")
     model_manifest.add_argument("--notes", default="")
     amc_manifest = commands.add_parser("amc-manifest", help="为已有调制识别 ONNX 分类器生成清单")
     amc_manifest.add_argument("model", help=".onnx 分类器文件（需与清单同目录）")
@@ -86,6 +120,33 @@ def main(argv=None):
     amc_manifest.add_argument("--opset", type=int, default=17)
     amc_manifest.add_argument("--dataset", help="训练数据来源与许可证说明")
     amc_manifest.add_argument("--notes", default="")
+    iq = commands.add_parser("amc-iq-classify",
+                             help="原始 IQ 调制识别（iq_waveform_v1 窗口 + ONNX 分类器）")
+    iq.add_argument("asset_id")
+    iq.add_argument("--model", required=True, help="IQ 分类器清单 JSON（contract=iq_waveform_v1）")
+    iq.add_argument("--offset-hz", type=float,
+                    help="分析频带中心（Hz），默认取清单里的默认值或基带中心")
+    iq.add_argument("--bandwidth-hz", type=float,
+                    help="分析频带带宽（Hz），默认取清单里的默认值或整段采样带宽")
+    iq.add_argument("--threads", type=int, help="ONNX Runtime 计算线程数")
+    iq_manifest = commands.add_parser("amc-iq-manifest",
+                                      help="为已有原始 IQ ONNX 分类器生成清单")
+    iq_manifest.add_argument("model", help=".onnx 分类器文件（需与清单同目录）")
+    iq_manifest.add_argument("output", help="要写入的清单 JSON")
+    iq_manifest.add_argument("--id", dest="identifier", help="模型标识，默认 iq-cnn-default")
+    iq_manifest.add_argument("--version", default="0.1.0")
+    iq_manifest.add_argument("--opset", type=int, default=17)
+    iq_manifest.add_argument("--samples", type=int,
+                             help="输入窗口采样点数（训练与推理必须一致）；"
+                                  "默认使用 IQ 契约的默认窗口长度（1024 点）")
+    iq_manifest.add_argument("--class", dest="classes", action="append",
+                             help="类别名（按模型输出顺序），可重复；默认 A09 六类")
+    iq_manifest.add_argument("--default-offset-hz", type=float,
+                             help="调用方未指定频带时的默认中心频率（Hz）")
+    iq_manifest.add_argument("--default-bandwidth-hz", type=float,
+                             help="调用方未指定频带时的默认占用带宽（Hz）")
+    iq_manifest.add_argument("--dataset", help="训练数据来源与许可证说明")
+    iq_manifest.add_argument("--notes", default="")
     commands.add_parser("list", help="列出最近数据")
     export = commands.add_parser("export", help="导出 JSON/HTML 报告")
     export.add_argument("run_id")
@@ -129,7 +190,8 @@ def main(argv=None):
                 identifier=args.identifier or Path(args.model).stem,
                 version=args.version, image_size=args.image_size, opset=args.opset,
                 labels=args.label, training=training, notes=args.notes,
-                spectrogram_nfft=args.nfft, dynamic_range_db=args.dynamic_range)
+                spectrogram_nfft=args.nfft, dynamic_range_db=args.dynamic_range,
+                label_semantics=args.label_semantics)
         elif args.command == "amc-manifest":
             from .ml import write_amc_manifest
             kwargs = {"identifier": args.identifier or "amc-linear-default",
@@ -140,6 +202,21 @@ def main(argv=None):
             result = {"manifest": str(Path(args.output)), "contract": manifest["contract"],
                       "sha256": manifest["sha256"], "input": manifest["input"],
                       "output": manifest["output"]}
+        elif args.command == "amc-iq-manifest":
+            from .ml import DEFAULT_IQ_SAMPLES, write_iq_manifest
+            kwargs = {"identifier": args.identifier or "iq-cnn-default",
+                      "version": args.version, "opset": args.opset, "notes": args.notes,
+                      "classes": args.classes,
+                      "samples": args.samples if args.samples is not None else DEFAULT_IQ_SAMPLES,
+                      "default_offset_hz": args.default_offset_hz,
+                      "default_bandwidth_hz": args.default_bandwidth_hz}
+            if args.dataset:
+                kwargs["training"] = {"dataset": args.dataset}
+            manifest, _ = write_iq_manifest(args.output, args.model, **kwargs)
+            result = {"manifest": str(Path(args.output)), "contract": manifest["contract"],
+                      "sha256": manifest["sha256"], "input": manifest["input"],
+                      "output": manifest["output"],
+                      "class_set": manifest["class_set"], "samples": manifest["input"]["samples"]}
         else:
             if args.command in ("demo", "import"):
                 request["sample_rate"] = args.sample_rate
@@ -168,6 +245,21 @@ def main(argv=None):
                     if value is not None:
                         config[key] = value
                 request["config"] = config
+            elif args.command == "detect-hops":
+                request["asset_id"] = args.asset_id
+                request["with_sessions"] = not args.no_sessions
+                config = {}
+                for key, value in (("nfft", args.nfft),
+                                   ("threshold_db", args.threshold_db),
+                                   ("smooth_frames", args.smooth_frames),
+                                   ("min_bandwidth_hz", args.min_bandwidth),
+                                   ("min_dwell_s", args.min_dwell),
+                                   ("merge_bins", args.merge_bins),
+                                   ("max_gap_frames", args.max_gap_frames),
+                                   ("max_hops", args.max_hops)):
+                    if value is not None:
+                        config[key] = value
+                request["config"] = config
             elif args.command == "ml-detect":
                 request.update(asset_id=args.asset_id, manifest=args.manifest)
                 request["with_baseline"] = not args.no_baseline
@@ -184,10 +276,41 @@ def main(argv=None):
                     if value is not None:
                         config[key] = value
                 request["config"] = config
+            elif args.command == "ml-detect-hops":
+                request.update(asset_id=args.asset_id, manifest=args.manifest)
+                request["with_sessions"] = not args.no_sessions
+                request["with_traditional"] = not args.no_traditional
+                if args.threads is not None:
+                    request["threads"] = args.threads
+                config = {}
+                for key, value in (("nfft", args.nfft),
+                                   ("threshold_db", args.threshold_db),
+                                   ("score_threshold", args.score_threshold),
+                                   ("iou_threshold", args.iou_threshold),
+                                   ("smooth_frames", args.smooth_frames),
+                                   ("min_bandwidth_hz", args.min_bandwidth),
+                                   ("min_dwell_s", args.min_dwell),
+                                   ("merge_bins", args.merge_bins),
+                                   ("max_gap_frames", args.max_gap_frames),
+                                   ("max_hops", args.max_hops)):
+                    if value is not None:
+                        config[key] = value
+                request["config"] = config
             elif args.command == "amc-classify":
                 request["asset_id"] = args.asset_id
                 if args.model:
                     request["model"] = args.model
+                if args.threads is not None:
+                    request["threads"] = args.threads
+                config = {}
+                for key, value in (("offset_hz", args.offset_hz),
+                                   ("bandwidth_hz", args.bandwidth_hz)):
+                    if value is not None:
+                        config[key] = value
+                request["config"] = config
+            elif args.command == "amc-iq-classify":
+                request["asset_id"] = args.asset_id
+                request["model"] = args.model
                 if args.threads is not None:
                     request["threads"] = args.threads
                 config = {}

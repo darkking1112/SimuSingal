@@ -3,6 +3,10 @@
 ``onnxruntime`` 是可选依赖（``pip install .[ml]``）。未安装时本模块给出
 可执行的中文提示，传统能量检测路径完全不受影响；导入本模块本身也不会
 加载推理运行时，因此仓库的默认测试环境无需安装它。
+
+两条输入契约各有一个会话类：:class:`ModelRunner`（单通道时频图
+``tf_image_v1``）与 :class:`IQModelRunner`（两通道原始 IQ ``iq_waveform_v1``）。
+它们的清单校验与形状规则不同，故意不合并成一个类。
 """
 
 from __future__ import annotations
@@ -122,4 +126,69 @@ def load_runner(manifest_path, *, threads=None):
 
     manifest, library = read_model_manifest(manifest_path)
     runner = ModelRunner(manifest, library, threads=threads)
+    return runner, manifest, library
+
+
+class IQModelRunner:
+    """原始 IQ 分类器会话（``iq_waveform_v1``，输入 ``(1, 2, N)`` float32）。
+
+    与 :class:`ModelRunner`（单通道时频图）并列而非同一条路径：两者的输入
+    契约、清单校验与预处理器都不同，混用会在加载阶段报错。这里同样在
+    ``run()`` 里按清单校验形状，不把整形工作留给调用方。
+    """
+
+    def __init__(self, manifest, library, *, threads=None, version=None):
+        self.manifest = dict(manifest)
+        self.library = str(library)
+        self.threads = None if threads is None else int(threads)
+        self.runtime_version = check_version(version)
+        self._session = None
+
+    @property
+    def model_name(self):
+        return f"{self.manifest['id']}@{self.manifest['version']}"
+
+    def _create(self):
+        if self._session is not None:
+            return self._session
+        runtime = runtime_module()
+        options = runtime.SessionOptions()
+        if self.threads:
+            options.intra_op_num_threads = self.threads
+            options.inter_op_num_threads = 1
+        self._session = runtime.InferenceSession(
+            self.library, sess_options=options, providers=["CPUExecutionProvider"])
+        return self._session
+
+    def _output_name(self):
+        wanted = self.manifest.get("output", {}).get("name")
+        names = [output.name for output in self._create().get_outputs()]
+        if wanted and wanted in names:
+            return wanted
+        return names[0] if names else None
+
+    def run(self, waveform):
+        """执行一次推理；``waveform`` 形状为 ``(2, N)``，通道 0 = I、1 = Q。"""
+        array = np.asarray(waveform, dtype=np.float32)
+        incoming = self.manifest.get("input", {})
+        length = int(incoming.get("samples", array.shape[-1] if array.ndim else 0))
+        if array.shape != (2, length):
+            raise ValueError(f"模型输入应为 (2, {length}) 的 IQ 张量，实际为 {array.shape}")
+        tensor = array.reshape(1, 2, length)
+        input_name = incoming.get("name") or "iq"
+        session = self._create()
+        names = {item.name for item in session.get_inputs()}
+        if input_name not in names:
+            if not names:
+                raise ManifestError("模型没有输入节点")
+            input_name = sorted(names)[0]
+        return session.run([self._output_name()], {input_name: tensor})[0]
+
+
+def load_iq_runner(manifest_path, *, threads=None):
+    """按 ``iq_waveform_v1`` 清单加载会话：``(runner, manifest, 模型绝对路径)``。"""
+    from .iq import read_iq_manifest  # 局部导入，避免与 iq.py 循环引用
+
+    manifest, library = read_iq_manifest(manifest_path)
+    runner = IQModelRunner(manifest, library, threads=threads)
     return runner, manifest, library

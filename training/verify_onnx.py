@@ -9,8 +9,9 @@
    ``input.image_size``，输出必须能被 :func:`parse_model_output` 解码
    （列数与 :data:`BOX_COLUMNS` 一致）——这一条只能从图上验证，清单里看不出来；
 4. **端到端**：用确定性场景（含跳频会话、双信号、纯噪声）跑
-   :func:`signal_analysis.ml.ml_detect`，检查结果是 JSON 安全的，并用项目自身
-   评测口径（:func:`evaluate_detections`）给出召回/精确率；
+   :func:`signal_analysis.ml.ml_detect`（逐跳清单则跑
+   :func:`signal_analysis.ml.ml_detect_hops`），检查结果是 JSON 安全的，并用项目
+   自身评测口径（:func:`evaluate_detections`）给出召回/精确率；
 5. **可复现**：同一批样本重复推理，检测结果必须逐字节一致；
 6. **数值一致性**（``--reference``）：把两个模型放在同一张时频图上比对原始
    输出，报最大绝对偏差（例如 FP32 与 FP16 导出、不同 opset 的回归检查）。
@@ -38,12 +39,20 @@ if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from signal_analysis.core_api import generate_iq  # noqa: E402
-from signal_analysis.evaluation import evaluate_detections, signal_truth  # noqa: E402
+from signal_analysis.evaluation import (  # noqa: E402
+    HOP_CONTRACT,
+    evaluate_detections,
+    hop_truth,
+    signal_truth,
+)
 from signal_analysis.ml import (  # noqa: E402
     BOX_COLUMNS,
+    DEFAULT_LABEL_SEMANTICS,
+    LABEL_SEMANTICS,
     RuntimeUnavailable,
     detection_image,
     ml_detect,
+    ml_detect_hops,
     parse_model_output,
     read_model_manifest,
     runtime_module,
@@ -126,6 +135,18 @@ def _output_contract(session):
     return True, f"{node.name} {shape}"
 
 
+def _decode(samples, rate, manifest_path, args, per_hop):
+    """按清单声明的标签粒度选解码通路（与运行期完全同一入口）。"""
+    if per_hop:
+        summary, _ = ml_detect_hops(samples, rate, model=manifest_path,
+                                    threads=args.threads or None,
+                                    with_sessions=True, with_traditional=False)
+        return summary["hops"], summary
+    summary, _ = ml_detect(samples, rate, model=manifest_path,
+                           threads=args.threads or None, with_baseline=True)
+    return summary["detections"], summary
+
+
 def main(argv=None):
     args = _parse_args(argv)
     manifest_path = Path(args.manifest)
@@ -138,10 +159,16 @@ def main(argv=None):
         return 2
 
     manifest, library = read_model_manifest(manifest_path)
+    semantics = manifest.get("label_semantics", DEFAULT_LABEL_SEMANTICS)
+    per_hop = semantics == "per_hop_v1"
     print(f"清单：{manifest['id']}@{manifest['version']}  运行时 {report['runtime']}  "
           f"opset {manifest['opset']}  {manifest['sha256'][:16]}…")
     _check(report, "清单校验（版本/契约/摘要）", True,
            f"library {manifest['library']}，标签 {manifest['labels']}")
+    _check(report, "标签语义", semantics in LABEL_SEMANTICS,
+           f"{semantics}；端到端验收按 "
+           + ("fh_hops_v1（逐跳，ml_detect_hops）" if per_hop else "detect_result_v1（会话级，ml_detect）")
+           + " 评分")
     _check(report, "输入时频图契约",
            manifest["input"]["layout"] == "time_frequency_grayscale_v1",
            f"{manifest['input']['layout']}，nfft {manifest['input']['spectrogram_nfft']}，"
@@ -156,25 +183,27 @@ def main(argv=None):
 
     failures = sum(1 for check in report["checks"] if not check["ok"])
     for index, scene in enumerate(_scenes(args.rate, args.duration)):
-        summary, _ = ml_detect(scene["samples"], args.rate, model=manifest_path,
-                               threads=args.threads or None, with_baseline=True)
-        truth = signal_truth(scene["generation"])
-        metrics = evaluate_detections(truth, summary["detections"])
+        detections, summary = _decode(scene["samples"], args.rate, manifest_path, args, per_hop)
+        if per_hop:
+            metrics = evaluate_detections(hop_truth(scene["generation"]), detections,
+                                          contract=HOP_CONTRACT)
+        else:
+            metrics = evaluate_detections(signal_truth(scene["generation"]), detections)
         try:
-            json.dumps(summary["detections"], allow_nan=False, ensure_ascii=False)
+            json.dumps(detections, allow_nan=False, ensure_ascii=False)
             safety = True
         except (TypeError, ValueError) as exc:
             safety = False
             metrics = {**metrics, "json_error": str(exc)}
+        label = f"跳 {metrics['true']} 个" if per_hop else f"真值 {metrics['true']}"
         ok = _check(report, f"场景「{scene['label']}」端到端推理", safety,
-                    f"真值 {metrics['true']} 检出 {metrics['detected']} 召回 {metrics['recall']} "
+                    f"{label} 检出 {metrics['detected']} 召回 {metrics['recall']} "
                     f"精确率 {metrics['precision']}")
         report["scenes"].append({"label": scene["label"], "metrics": metrics, "ok": ok})
         failures += 0 if ok else 1
         if index == 0:
-            repeat = ml_detect(scene["samples"], args.rate, model=manifest_path,
-                               threads=args.threads or None, with_baseline=True)[0]
-            same = repeat["detections"] == summary["detections"]
+            repeat = _decode(scene["samples"], args.rate, manifest_path, args, per_hop)[0]
+            same = repeat == detections
             _check(report, "重复推理结果一致（可复现）", same)
             failures += 0 if same else 1
             if reference is not None:

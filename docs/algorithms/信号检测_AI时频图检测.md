@@ -2,22 +2,33 @@
 
 | 项目 | 取值 |
 | --- | --- |
-| 算法标识 | `ml_detect:<模型 id>`（结果里的 `summary.algorithm`） |
-| 结果契约 | `detect_result_v1`（**与传统能量检测完全同一份契约**） |
-| 信噪比口径 | `inband_snr_v1`（由能量测量给出，不由网络给出） |
+| 算法标识 | 会话级 `ml_detect:<模型 id>`；逐跳 `ml_detect_hops:<模型 id>`（§7） |
+| 结果契约 | 会话级 `detect_result_v1`（**与传统能量检测完全同一份契约**）；逐跳 `fh_hops_v1`（**与 `hop_track_v1` 同一份契约**） |
+| 信噪比口径 | `inband_snr_v1`（由能量测量给出，不由网络给出；两条通路同口径） |
 | 输入契约 | `tf_image_v1` |
 | 图像排布 | `time_frequency_grayscale_v1` |
 | 输出契约 | `normalized_boxes_v1` |
+| 模型标签语义 | `session_v1`（一段传输一个框，默认）或 `per_hop_v1`（一跳一个框，§7） |
 | 实现位置 | `src/signal_analysis/ml/detector.py`、`tensor.py`、`decode.py`、`manifest.py`、`runtime.py` |
 | 训练/验收 | `training/build_dataset.py`、`train_yolox.py`、`tiny_detector.py`、`verify_onnx.py`（**不随 wheel 分发**） |
-| 第三方框架接入 | `training/detectors/`（适配器）+ `training/export_contract.py`（统一命令行）；详见 `training/README.md` §7 / §8 |
-| 调用入口 | CLI `signal-analysis ml-detect`；GUI「信号检测 → AI 检测」 |
-| 文档日期 | 2026-09-11 |
+| 第三方框架接入 | `training/detectors/`（适配器）+ `training/export_contract.py`（统一命令行）；详见 `training/README.md` §9 / §10 |
+| 调用入口 | CLI `signal-analysis ml-detect`（会话级）/ `ml-detect-hops`（逐跳）；GUI「信号检测 → AI 检测」与「跳频参数 → AI 估计逐跳参数」 |
+| 文档日期 | 2026-09-11（§5 第 5 条、§6.3 与 §7 的逐跳通路内容为 2026-09-13 补入） |
 
 > 本文档只描述**已实现**的代码路径。仓库内没有真实的 YOLOX / RT-DETR 权重，
 > 训练侧提供的是自研最小无锚框检测头（`tiny`）作为**契约验收基线**；
 > 精度模型的接入框架已经落地（`training/detectors/` + `training/export_contract.py`，
-> 适配 `tiny` / `yolox` / `rtdetr` / `ultralytics` 四个框架），框架选型与许可证约束见 §7.1。
+> 适配 `tiny` / `yolox` / `rtdetr` / `ultralytics` 四个框架），框架选型与许可证约束见 §6.1。
+> 传统路径侧的会话级算法见[信号检测_传统能量检测](信号检测_传统能量检测.md)，
+> 逐跳参数估计见[信号检测_跳频逐跳参数估计](信号检测_跳频逐跳参数估计.md)
+> （两者均使用本文档同源的能量测量与 `inband_snr_v1` 口径）。
+
+> **两条 AI 通路**：§1–§7 描述会话级 `ml_detect`（契约 `detect_result_v1`）；
+> §7 描述 2026-09-13 落地的逐跳通路 `ml_detect_hops`（契约 `fh_hops_v1`）。
+> 二者共用同一份时频图、同一套清单校验、同一个“网络只定位、物理量重测”的原则，
+> 差别只在**标签语义**（一段传输一个框 vs 一跳一个框）与**后处理**（是否绕开会话合并）。
+> 会话级模型清单不能被逐跳通路使用，反之亦然——清单里的 `training.label_semantics`
+> 就是这个门禁（§7.4）。
 
 ---
 
@@ -326,64 +337,13 @@ GUI 叠加显示 AI 实线框 + 基线灰色虚线框，两者共用同一张 `s
 
 ---
 
-## 5. 当前相关参考文献
-
-**时频表示与信号图像化**
-
-1. Boashash, B. (ed.) *Time-Frequency Signal Analysis and Processing: A Comprehensive Reference.* 2nd ed., Academic Press, 2016.
-2. Cohen, L. *Time-Frequency Analysis.* Prentice Hall, 1995.
-3. Welch, P. D. *The use of fast Fourier transform for the estimation of power spectra.* IEEE Trans. Audio Electroacoust. **15**(2):70–73, 1967.
-4. O'Shea, T. J., Corgan, J., Clancy, T. C. *Convolutional radio modulation recognition networks.* EANN, 2016. —— 把 IQ/时频表示直接交给 CNN 的开创性工作。
-5. O'Shea, T. J., Roy, T., Clancy, T. C. *Over-the-air deep learning based radio signal classification.* IEEE J. Sel. Topics Signal Process. **12**(1):168–179, 2018. —— 空口实测数据与深度模型的结合（RadioML 系列）。
-6. West, N. E., O'Shea, T. J. *Deep architectures for modulation recognition.* IEEE DySPAN, 2017.
-
-**目标检测网络**
-
-7. Redmon, J., Divvala, S., Girshick, R., Farhadi, A. *You Only Look Once: unified, real-time object detection.* CVPR, 2016.
-8. Redmon, J., Farhadi, A. *YOLOv3: an incremental improvement.* arXiv:1804.02767, 2018.
-9. Lin, T.-Y. et al. *Feature pyramid networks for object detection.* CVPR, 2017.
-10. Tian, Z., Shen, C., Chen, H., He, T. *FCOS: fully convolutional one-stage object detection.* ICCV, 2019. —— 无锚框（anchor-free）思路。
-11. Ge, Z., Liu, S., Wang, F., Li, Z., Sun, J. *YOLOX: exceeding YOLO series in 2021.* arXiv:2107.08430, 2021. —— **Apache-2.0**，本项目推荐接入的精度方案。
-12. Zhao, Y. et al. *DETRs beat YOLOs on real-time object detection (RT-DETR).* CVPR, 2024. —— **Apache-2.0** 的实时 DETR 方案，本项目首选。
-    —— 同段落可对照 Ultralytics **YOLO26**：其 `nms=False` 端到端头直接输出 `(1,300,6)`、无需 NMS，且去掉 DFL 后 CPU 端 ONNX 推理更快；但 YOLO11 / YOLO26 都是 **AGPL-3.0**，只能作内网基线，不得进发行包（见 `training/README.md` §8）。
-13. Carion, N. et al. *End-to-end object detection with transformers.* ECCV, 2020.
-14. Liu, Z. et al. *Swin Transformer: hierarchical vision transformer using shifted windows.* ICCV, 2021.
-15. Zheng, Z. et al. *Distance-IoU loss: faster and better learning for bounding box regression.* AAAI, 2020. —— 回归损失与 IoU 变体。
-16. Lin, T.-Y. et al. *Focal loss for dense object detection.* ICCV, 2017. —— 类别/正负样本不平衡。
-
-**频谱图上的目标检测（更贴近本问题）**
-
-17. Zhou, Z. et al. *Object detection in spectrogram based on deep learning.* 相关期刊/会议工作，用于说明"时频图当图像检测"这一范式的可用性（同类工作众多，接入时建议按具体网络取舍）。
-18. Zhang, Y. et al. *Radio signal detection in spectrograms with deep neural networks.* —— 同类频谱图检测工作。
-
-**推理运行时与部署**
-
-19. ONNX Runtime documentation, Microsoft, 2024. —— 会话配置、线程数、算子集兼容性。
-20. ONNX Specification / Operator Set, Linux Foundation, 2024.
-21. Jacob, B. et al. *Quantization and training of neural networks for efficient integer-arithmetic-only inference.* CVPR, 2018. —— 量化部署基础。
-
-**数据与许可证**
-
-22. GNU Radio Foundation et al. *SigMF: Signal Metadata Format Specification v1.2.0*, 2023.
-23. TorchSig, *MIT License* 数据集生成库。**本项目未使用**，仅作为可选数据来源列出。
-24. DeepSig Inc. *RadioML 2018.01A*, **CC BY-NC-SA 4.0** —— **不可商用、不可随产品分发**，
-    本项目**未使用**，列出仅为合规说明。
-
-**训练与评测方法**
-
-25. Lin, T.-Y. et al. *Microsoft COCO: common objects in context.* ECCV, 2014. —— AP/AR 评测口径的来源。
-26. Padilla, R., Netto, S. L., da Silva, E. A. B. *A survey on performance metrics for object-detection algorithms.* IWSSIP, 2020. —— 检测指标的坑与口径澄清。
-27. Guo, C. et al. *On calibration of modern neural networks.* ICML, 2017. —— "网络置信度不是概率"的经典证据。
-
----
-
-## 6. 设计局限
+## 5. 设计局限
 
 1. **仓库内没有真实精度模型。**
    `training/tiny_detector.py` 是自研最小无锚框检测头，其定位是**契约验收基线**：
    证明"训练 → ONNX 导出 → 推理解码 → 评分"整条链路可跑通，而**不是**一个可用精度的检测器。
    要有精度必须接入第三方检测框架并自行训练——接入通道已经建好
-   （`training/export_contract.py`，见 §7.1 与 `training/README.md` §7），
+   （`training/export_contract.py`，见 §6.1 与 `training/README.md` §9），
    但**权重与训练数据仍需自行准备**；三个第三方框架（YOLOX / RT-DETR / Ultralytics）
    在本机均未安装，其数值路径是用合成 ONNX/torch 伪模型验证的。
 
@@ -400,10 +360,19 @@ GUI 叠加显示 AI 实线框 + 基线灰色虚线框，两者共用同一张 `s
    仓库内所有链路验证都基于本项目生成器（理想信道、白噪声、无多径、无频偏、无 IQ 不平衡、
    无相位噪声）。**没有真实采集数据、没有 SDR 实测**。模型对真实信道的泛化能力**未经验证**。
 
-5. **标签的时间维在稳态记录里恒为整帧宽。**
-   跳频按"一段会话一个实例"定义，`t_start_s=0`、`t_end_s=duration`，于是 `width = 1.0`，
-   网络实际主要学习**频率维定位**。需要同一会话内的多段突发定位，必须**先扩展 `signal_truth`
-   的时间语义再重训**——这是后续工作，不是当前能力。
+5. **标签语义有两种：默认的会话级，以及逐跳可选。**
+   默认 `label_semantics = session_v1`（`build_dataset.py --labels session`）：一个信号一个框，
+   跳频信号按“一段会话一个实例”定义，`t_start_s=0`、`t_end_s=duration`，于是 `width = 1.0`，
+   网络实际主要学习**频率维定位**。需要同一会话内的多段突发定位（跳频逐跳参数），
+   必须换用 `--labels hop`（`per_hop_v1`）：跳频会话的框改由 `evaluation.hop_truth` 生成，
+   **一跳一个框**，其它波形仍给会话框；该语义写进 `dataset.json.contract.label_semantics`
+   与模型清单的 `training.label_semantics`，供推理侧选通路（§7.4）。
+   换成 `per_hop_v1` 后**必须同时解决量化约束**：训练输出网格的步长是 $2^{\text{strides}}$ 像素
+   （`--strides 4`、$S=1024$ 时即 16 px），而一跳在图上往往只有十几像素，
+   比一格还小的标签会在逐格编码（`encode_targets`）时被**静默丢弃**——训练照跑、指标照出，
+   但对不上真值。因此 `train_yolox.py` 在开训前用 `dataset.json.statistics.labels` 的像素尺度做硬守卫：
+   最小标签边小于网格步长就拒绝开训，并给出可用的 `--strides` 或要求提高 `--image-size`；
+   每个样本的框数超过 `--max-boxes` 也拒绝（逐跳数据集默认 32 太小，实测需 128）。详见 §7.2。
 
 6. **单类、单信噪比量纲、无旋转框。**
    当前 `labels` 只有 `emitter`（`class` 恒 0）；框是轴对齐的（`x/y/w/h`），
@@ -435,9 +404,9 @@ GUI 叠加显示 AI 实线框 + 基线灰色虚线框，两者共用同一张 `s
 
 ---
 
-## 7. 可以改进的地方与相关文献
+## 6. 可以改进的地方与相关文献
 
-### 7.1 接入真实精度模型（最高优先级）
+### 6.1 接入真实精度模型（最高优先级）
 
 接入框架已实现，入口是 `training/export_contract.py`，它把"框架产物 → 契约图 + 清单"
 这条胶水固化下来，只做两件事：**补输入预处理、补输出几何转换**，权重一个字节都不动。
@@ -456,7 +425,7 @@ GUI 叠加显示 AI 实线框 + 基线灰色虚线框，两者共用同一张 `s
 2. `--onnx`（主路径）：用框架自己的 trainer / exporter 产出 ONNX，再交给改写器
    烘入输入预处理、做几何转换 + 按置信度 TopK 截断到 `--max-boxes`，并生成模型清单。
 
-**框架选型**（`training/README.md` §8 是权威表格）：
+**框架选型**（`training/README.md` §9.2 的适配器清单是权威表格）：
 
 | 优先级 | 框架 | 许可证 | 理由 |
 | --- | --- | --- | --- |
@@ -471,7 +440,7 @@ Ultralytics 只做 `.div_(255)`（**无** ImageNet 均值方差）、YOLOX 连 `
 （pad 114 + 等比 resize + HWC→CHW，仍是 `0–255` 的 BGR），而 RT-DETR 在
 `rtdetr_paddle` / `rtdetr_pytorch` / `rtdetrv2_pytorch` 三个实现之间口径互不相同，
 因此 RT-DETR 适配器**不给默认值**：缺 `--input-scale` 直接报错并打印分支表。
-各框架的具体取值见 `training/README.md` §7.2，回归用例把它钉在
+各框架的具体取值见 `training/README.md` §9.2，回归用例把它钉在
 `tests/analysis/test_detector_adapters.py`。
 
 契约面要求（框架无关）：opset 不低于 17、batch 等于 1、单输出 `detections`，
@@ -483,11 +452,15 @@ Python 侧始终只喂 `[0,1]` 单通道时频图；最后用 `write_model_manif
 
 文献：[11] YOLOX、[12] RT-DETR、[7–10] YOLO/FCOS 系列、[15] CIoU、[16] Focal Loss。
 
-### 7.2 数据规模与分布
+### 6.2 数据规模与分布
 
 - 参考量级：跑通链路 200–500 条；**要得到有意义的模型建议 2 万–10 万条**，且每种调制样式 /
   跳频样式、每个带内信噪比档位都要有足够样本（`build_dataset.py --count --snr-range --modes`）；
 - **纯噪声场景占 12%**（`--noise-only-ratio`）用于压制虚警，这个比例本身也值得做消融；
+- **提高多样性的低成本手段**：把 TorchSig（MIT）生成的场景经 `build_torchsig.py` 写成
+  `torchsig_bundle_v1`，再用 `ingest_torchsig.py` 转成本项目的 `tf_image_v1` 检测数据集——
+  时频图、STFT 点数、归一化与框式都与本项目推理端同一份代码，因此可以直接混训；
+  bundle 与其生成物只落本地目录、不随产品分发（只允许会话级标签，逐跳标签会直接拒绝）。
 - **领域自适应**：用少量真实采集数据做微调/校准
   —— Ganin, Y. et al. *Domain-adversarial training of neural networks.* JMLR **17**(59):1–35, 2016；
   Sun, B., Saenko, K. *Deep CORAL: correlation alignment for deep domain adaptation.* ECCV Workshops, 2016.
@@ -495,7 +468,7 @@ Python 侧始终只喂 `[0,1]` 单通道时频图；最后用 `write_model_manif
   Chen, T. et al. *A simple framework for contrastive learning of visual representations (SimCLR).* ICML, 2020；
   无线电领域的自监督预训练（如基于时频图掩码重建）可显著降低标注需求。
 
-### 7.3 任务建模的升级
+### 6.3 任务建模的升级
 
 | 现状 | 可改进 | 文献 |
 | --- | --- | --- |
@@ -503,9 +476,10 @@ Python 侧始终只喂 `[0,1]` 单通道时频图；最后用 `write_model_manif
 | 单帧时频图独立判决 | 引入**时序上下文**：多帧/多分辨率金字塔 + 时序注意力；或 3D 卷积沿时间维 | [9] FPN；Wang, X. et al. *Non-local neural networks.* CVPR, 2018；Qiu, Z. et al. *Learning spatio-temporal representation with pseudo-3D residual networks.* ICCV, 2017 |
 | 检测与识别分离 | **端到端联合**：一个网络同时输出频段 + 调制标签（多任务头） | [5] O'Shea 2018；Carion 2020 [13] |
 | 单类 `emitter` | 扩展 `labels` 做**信号类别 / 平台类型**检测 | [11][12] |
+| 单个框 = 一条链路 | **框 → 跳（已落地）**：`ml_detect_hops` 让网络直接出逐跳框，再把框合成轨道、由 `_finalise_hops` 在原始 PSD 上重测驻留/带宽/功率/SNR，输出 `fh_hops_v1`（§7）；训练侧用 `build_dataset.py --labels hop` 出逐跳标签 | [11][12]；见[信号检测_跳频逐跳参数估计](信号检测_跳频逐跳参数估计.md) 与本文 §7 |
 | 单录音、单用户 | **联邦学习**，多站数据不出本地 | McMahan, B. et al. *Communication-efficient learning of deep networks from decentralized data.* AISTATS, 2017 |
 
-### 7.4 物理约束与可解释性
+### 6.4 物理约束与可解释性
 
 - **物理引导损失**：把带宽一致性、时长一致性、功率非负性作为正则项加入训练损失
   —— Raissi, M., Perdikaris, P., Karniadakis, G. E. *Physics-informed neural networks.* J. Comput. Phys. **378**:686–707, 2019；
@@ -514,7 +488,7 @@ Python 侧始终只喂 `[0,1]` 单通道时频图；最后用 `write_model_manif
 - **可解释模型对照**：把能量检测基线永远保留在同一张结果里（已实现），
   任何 AI 判决都能被物理量复核。
 
-### 7.5 部署与性能
+### 6.5 部署与性能
 
 - **量化**：INT8 量化后体积与延迟显著下降（Jacob 2018 [21]）；量化引入的数值漂移必须用
   `verify_onnx.py --reference` 卡住；
@@ -524,10 +498,243 @@ Python 侧始终只喂 `[0,1]` 单通道时频图；最后用 `write_model_manif
   `inference_ms`。当 `context_ms` 占大头时，应优化 STFT（跳数精简、多锥度替代方案、
   或用 FFT 库的多线程），而不是去优化网络。
 
-### 7.6 评测与验收
+### 6.6 评测与验收
 
 - 建立**固定验证集 + 分档指标**（按带内 SNR 分桶、按调制样式分桶、按目标数分桶），
   避免用单一总分掩盖薄弱环节；
 - 指标口径对齐文献 [25][26]（AP/AR 与小目标处理的口径差异是常见踩坑点）；
 - 置信度**必须标定后才谈阈值**（文献 [27]），否则 `score_threshold` 只是经验值；
 - 引入**真实采集数据**做独立验证集，与合成数据结果**分列报告**，不混在一起给结论。
+
+**已落地的验收工具**：`benchmarks/ai_detect_sweep.py` 把上面四条里可自动化的部分做成可复现扫描：
+固定模型与数据集，按标称 SNR 网格 × 多种子生成场景，给出 **per-SNR 召回**、
+**固定虚警率下的检测率**（纯噪声记录固定条数作虚警分母，默认按**每帧**挑工作点并同时报出**每秒**口径，
+`--far-targets` 指定目标虚警率，`--far-basis` 切换口径）、工作点阈值与推理延迟；
+输出契约 `ai_detect_sweep_v1`。它不依赖第三方检测框架（`onnxruntime` + 本项目生成器即可）。
+每次运行还会把**候选框一致性自检**写进报告的 `candidate_selfcheck`
+（`shipped` / `replayed` / `mismatch_records`：评测侧重放候选框的数量是否与推理侧一致、
+有多少条记录对不上），用于发现"评测代码与部署代码悄悄漂移"——这是扫出来的数字能不能被信的
+前提（本仓库实测为 `mismatch_records: 0`）。
+注意：它只回答"这个模型在这批合成场景上的指标"，**不能替代实采验证**（第四条）。
+
+---
+
+## 7. 逐跳参数估计通路（`ml_detect_hops`）
+
+> 本节描述 2026-09-13 落地的第二条 AI 通路。它与 §1–§7 的会话级 `ml_detect` **并列**：
+> 共用 `spectral_context`（同一份 STFT）、同一套清单校验、同一个原则
+> “网络只回答‘一跳在时频图的哪一块’，辐射量仍由物理测量给出”；
+> 差别只在**标签语义**（一跳一个框）与**后处理**（绕开会话合并，改走逐跳测量）。
+> 输出契约 `fh_hops_v1` 与 `hop_track_v1` 完全相同，因此 GUI「跳频参数」页、
+> HTML 报告与逐跳评分器（`evaluation.hop_truth` + `evaluate_detections(contract=...)`）
+> 一行代码都不用改即可同时渲染两条通路的结果。
+
+### 7.1 为什么“只训练”不够
+
+把 `ml_detect` 的清单换成一个逐跳模型并不能得到逐跳参数，必须同时补上四步：
+
+| # | 步骤 | 落地位置 | 缺了会怎样 |
+| --- | --- | --- | --- |
+| 1 | **逐跳标签**：跳频会话改用 `evaluation.hop_truth` 出“一跳一个框”，非跳频波形仍给会话框 | `training/build_dataset.py --labels hop` | 框的宽度恒为整帧（`width = 1.0`），网络只能学频维定位 |
+| 2 | **语义声明**：数据集与模型清单都写清标签粒度 | `dataset.json.contract.label_semantics`、清单 `training.label_semantics` | 下游无法判断该用哪条通路，会话级模型会被当成逐跳模型用 |
+| 3 | **逐跳后处理**：框 → 轨道 → 物理量重测 → 会话归并（**必须绕开会话合并**） | `ml/detector.py::ml_detect_hops` | `_merge_sessions` 会把同一发射机的多跳并成一条，8 跳报成 1 跳 |
+| 4 | **逐跳评分**：真值、指标、报告按“跳”而不是“条链路”计算 | `evaluation.hop_truth`、`evaluate_detections(contract="fh_hops_v1")` | 拿会话级真值评逐跳结果，精确率虚高（真值 1 条、检出 N 条） |
+
+四步缺一都会得到“能跑、但数字对不上”的结果，这也是这条通路必须做成**独立 action**
+（`ml_detect_hops` / CLI `ml-detect-hops`）而不是 `ml_detect` 一个开关的原因。
+
+### 7.2 标签语义与量化约束
+
+标签语义由 `build_dataset.py --labels {session,hop}` 选择，默认 `session`（向后兼容，
+旧数据集没有该字段时同样按 `session_v1` 处理）：
+
+| 语义 | 框的定义 | 适合 |
+| --- | --- | --- |
+| `session_v1` | 一个信号一个框；跳频信号的时间维恒为 `[0, duration]` | 会话级检测 `ml_detect` |
+| `per_hop_v1` | 跳频会话里**每一跳一个框**（`hop_truth`），非跳频信号仍按会话出框 | 逐跳估计 `ml_detect_hops` |
+
+逐跳标签比会话标签**小一两个数量级**（典型是“几毫秒 × 一跳带宽”），因此量化约束是
+这条路线的核心工程风险。训练输出网格的步长是
+
+$$\text{cell} = \frac{S}{S / 2^{\text{strides}}} = 2^{\text{strides}}\ \text{像素}$$
+
+即 `--strides 4`、$S=1024$ 时步长 16 px；而 `encode_targets` **每个真值框只写进框心所在的那一格，
+同格多框时只留面积最大的一个**——比一格还小的标签会被成片丢弃。`train_yolox.py::_grid_guard`
+因此在开训前用 `dataset.json.statistics.labels` 的像素尺度硬拦：
+
+- 最小标签边 $<\text{cell}$ → 直接报错，按 $\lfloor\log_2(\text{最小标签像素})\rfloor$ 给出
+  可用的 `--strides`，或（当最小标签不足 1 px 时）要求提高 `--image-size` 后重建数据集；
+- 单样本最多标签数 $>$ `--max-boxes` → 报错并提示逐跳数据集建议 `≥ 128`
+  （默认 32 对跳频场景不够）。
+
+实测（2026-09-13，`--min-bandwidth-ratio` 见下）：$S=1024$ 时一跳高度约 $9.8$ px，
+`--strides 2`（cell = 4 px）通过、`--strides 4`（cell = 16 px）被拒。
+另一个易踩的点是**单跳带宽相对于总带宽**：数据集里跳频总带宽取
+`--min/max-bandwidth-ratio × 采样率`（默认 0.02～0.12），跳频点数量在 $2\sim 8$ 之间随机，
+单跳带宽 `hop_bandwidth = 总带宽 / (跳频点数量 + 1)`；默认比例会让最窄的一跳只有 2 px 左右——
+实测需要 `--min-bandwidth-ratio 0.06` 才能得到 9.8 px 的标签，否则守卫即使
+`--strides 2` 也会拒绝。
+
+### 7.3 推理：从框到跳
+
+`ml_detect_hops(samples, sample_rate, config=None, model=None, runner=None,
+threads=None, with_sessions=True, with_traditional=True)` 的链路：
+
+```mermaid
+flowchart TD
+    A["IQ + 清单"] --> B["语义门禁<br/>清单 training.label_semantics 必须是 per_hop_v1"]
+    B --> C["_resolve_settings<br/>上下文键 + ML 键 + HOP_KEYS，未知键报错"]
+    C --> D["spectral_context<br/>同一份 STFT，nfft 与清单一致"]
+    D --> E["detection_image + runner.run<br/>与 ml_detect 完全相同的前半段"]
+    E --> F["parse_model_output + boxes_to_bands<br/>NMS、置信度门槛、频段反解"]
+    F --> G["_boxes_to_tracks<br/>频带→频点区间；帧中心落在框内→帧区间"]
+    G --> H["_finalise_hops<br/>原始 PSD 上重测驻留、功率、带宽"]
+    H --> I["_refine_hop_bands<br/>细网格复算单跳带宽与质心"]
+    I --> J["max_hops 截断 + 排序 + _attach_model_scores<br/>写 model_confidence / model_label"]
+    J --> K["_group_hop_sessions<br/>与 hop_track_v1 同一份会话归并"]
+    K --> L["输出 fh_hops_v1<br/>加 model / image / raw_boxes / timing"]
+    F --> M["traditional<br/>同配置再跑一次 hop_track_v1"]
+    F --> N["baseline<br/>会话级能量检测"]
+    M --> L
+    N --> L
+```
+
+三个关键点：
+
+1. **模型只提供几何量**。`_boxes_to_tracks` 把每个候选框转成 `_finalise_hops` 需要的
+   `runs`（频点区间，由 `band_bins` 反解）与 `first_frame` / `last_frame`
+   （帧中心落在框内，至少保留一帧）；**驻留时间、功率、单跳带宽、带内信噪比**
+   随后都由 `_finalise_hops` / `_refine_hop_bands` 在**原始 PSD** 上重新测量，
+   与 `hop_track_v1` 逐字段同源。因此 AI 逐跳与传统逐跳的物理量**可以直接并排比大小**。
+2. **不经过会话合并**。`_merge_sessions`（`ml_detect` 的最后一步）会把同一发射机的多跳
+   并成一个实例，那是会话级契约该有的行为；逐跳结果改走 `_group_hop_sessions`。
+3. **模型分数单独成列**。逐跳明细在 `fh_hops_v1` 的固定字段之外**多两个键**：
+   `model_confidence`（网络给出的“这一跳存在吗”，由 `_attach_model_scores` 按
+   “帧重叠最多→频带中心最近”把跳标回候选框）与 `model_label`；
+   传统通路没有这两个键，界面与报告按“不适用”显示（报告里连列都不出现）。
+   **禁止**把它与 `confidence`（由带内 SNR 换算的量测置信度）混为一谈。
+
+### 7.4 清单语义门禁
+
+`ml_detect_hops` 只接受 `label_semantics = per_hop_v1` 的清单，否则在**推理之前**直接报错：
+
+```text
+模型清单的标签语义是 session_v1（一段传输一个框），不能用于逐跳估计（本通路要求 per_hop_v1）；
+请用 training/build_dataset.py --labels hop 重建数据集并重训，或改用 ml-detect（会话级检测）
+```
+
+门禁的理由与 §7.1 第 3 行一致：会话级模型在逐跳后处理下会给出“一跳 = 整段传输”的
+**看似合理但完全错**的数字，宁可拒绝也不静默降级。清单字段由
+`write_model_manifest(..., label_semantics=...)` 写入，`ml-manifest` 命令行用
+`--label-semantics {session_v1,per_hop_v1}` 指定，`read_model_manifest` 只接受这两个取值
+（缺字段按 `session_v1`）。
+
+### 7.5 配置、输出与调用入口
+
+**配置项**（`summary.config` 回显；除 `nfft` 外全部为逐跳键，未知键直接报错）：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `nfft` | 清单值 | 与产出 PSD 的 STFT 网格强一致，传别的值会让带宽/驻留换算整体错位 |
+| `threshold_db` | 6.0 | 逐帧检测门限（相对本底），用于驻留时间的门限穿越重测 |
+| `score_threshold` | 0.25 | 网络置信度门槛 |
+| `iou_threshold` | 0.5 | NMS 阈值（**归一化图像空间与物理 (f,t) 空间的 IoU 等价**——映射是仿射的，因此不需要再做一次物理坐标 NMS） |
+| `smooth_frames` | 4 | 显示用功率谱的时间平滑帧数（测量仍在未平滑帧功率上做） |
+| `min_bandwidth_hz` | 3 个频点 | 最小单跳带宽 |
+| `min_dwell_s` | 4 帧 | 最小驻留（可分辨性下限与默认值推导见[信号检测_跳频逐跳参数估计](信号检测_跳频逐跳参数估计.md) §3.9、§5.2） |
+| `merge_bins` / `max_gap_frames` / `max_gap_bins` | 按 `nfft` 推导 / 1 / `merge_bins` | 频域闭运算半径与丢帧粘合门限 |
+| `max_hops` | 256 | 最大跳数；同时用于候选解码上限（`max(64, min(512, max_hops))`），避免“一跳一个框”的模型在解码阶段被截断 |
+
+**输出**：`summary` 与 `detect_hops` 的 `fh_hops_v1` **键集逐位对齐**
+（`contract` / `algorithm` / `snr_definition` / `frequency_reference` / 全部 STFT 描述量 /
+`resolvable` / `reason` / `transition_frames` / `config` / `hops` / `sessions`），
+只在上面追加：
+
+| 字段 | 内容 |
+| --- | --- |
+| `algorithm` | `"ml_detect_hops:<模型 id>"` |
+| `model` / `image` / `raw_boxes` / `timing` | 与 `ml_detect` 同名同义（`raw_boxes` 含候选数） |
+| `baseline` | 会话级能量检测（`with_sessions=False` 时缺失） |
+| `traditional` | **同配置的传统逐跳基线**（`with_traditional=False` 时缺失） |
+
+`hops[i]` 在 `fh_hops_v1` 固定字段之上追加 `model_confidence` / `model_label`。
+`arrays` 是 `detect_hops` 数组的超集，追加 `spectrogram_raw_db`（未平滑）、
+`model_boxes` / `model_scores` / `model_labels`（NMS 后候选框）与 `image_size`。
+`transition_frames` 在 AI 通路的语义是**被多于一个跳覆盖的帧数**（等价于传统通路的
+“多游程帧”，即跳变帧的计数），保证两条通路的读数可比。
+
+**调用入口**：CLI `signal-analysis [--workspace 目录] ml-detect-hops <asset_id> <清单.json>`
+（`--workspace` 是**全局**选项，必须在子命令之前；清单是**位置参数**），
+GUI 在「跳频参数」页的 AI 行（「AI 估计逐跳参数」，可勾选「附带传统逐跳基线」）。
+服务层在 `summary["hops"]` 之外附加 `truth` / `metrics` / `baseline_metrics` / `traditional_metrics`
+四个口径——**AI 逐跳、传统逐跳、会话级**三套指标互不混用，报告里并排给出。
+
+### 7.6 实测与边界
+
+2026-09-13 的小规模真实训练（`--count 24 --labels hop` → `--limit 16 --epochs 1`，
+56326 参数的 `tiny` 检测头，`--strides 2 --max-boxes 128`）：
+
+- `verify_onnx.py`：10/10 通过（含“标签语义：`per_hop_v1`”与逐跳评分分支）；
+- 真实资产（10 跳的 FH 图传录音）：AI 逐跳 `matched 3 / missed 7 / false_alarm 0`（F1 0.46），
+  同资产的**传统逐跳** `10/10`（F1 1.0）、会话基线 `1/1`（F1 1.0）；
+- HTML 报告三列并排表头 `['指标','AI 逐跳口径','传统逐跳口径','会话口径（能量检测基线）']`，
+  逐跳明细末列「模型置信度」只在 AI 通路出现。
+
+**诚实性声明**：16 个样本、1 个 epoch **只证明通路打通**，不构成任何精度结论；
+要得到可用模型需要去掉 `--limit`、把 `--count` 提上去（§6.2 的量级）并训练到收敛。
+边界条件同样适用于本条通路：训练数据全部是合成数据（§5 第 4 条）、
+标签为单类轴对齐框（§5 第 6 条）、网络置信度未标定（§5 第 9 条）；
+此外逐跳通路还继承了 `hop_track_v1` 的可分辨性下限（驻留 ≥ 4 帧，
+见[信号检测_跳频逐跳参数估计](信号检测_跳频逐跳参数估计.md) §3.9）——
+`resolvable=false` 与 `reason` 字段在 AI 通路里同样如实输出。
+
+---
+
+## 8. 当前相关参考文献
+
+**时频表示与信号图像化**
+
+1. Boashash, B. (ed.) *Time-Frequency Signal Analysis and Processing: A Comprehensive Reference.* 2nd ed., Academic Press, 2016.
+2. Cohen, L. *Time-Frequency Analysis.* Prentice Hall, 1995.
+3. Welch, P. D. *The use of fast Fourier transform for the estimation of power spectra.* IEEE Trans. Audio Electroacoust. **15**(2):70–73, 1967.
+4. O'Shea, T. J., Corgan, J., Clancy, T. C. *Convolutional radio modulation recognition networks.* EANN, 2016. —— 把 IQ/时频表示直接交给 CNN 的开创性工作。
+5. O'Shea, T. J., Roy, T., Clancy, T. C. *Over-the-air deep learning based radio signal classification.* IEEE J. Sel. Topics Signal Process. **12**(1):168–179, 2018. —— 空口实测数据与深度模型的结合（RadioML 系列）。
+6. West, N. E., O'Shea, T. J. *Deep architectures for modulation recognition.* IEEE DySPAN, 2017.
+
+**目标检测网络**
+
+7. Redmon, J., Divvala, S., Girshick, R., Farhadi, A. *You Only Look Once: unified, real-time object detection.* CVPR, 2016.
+8. Redmon, J., Farhadi, A. *YOLOv3: an incremental improvement.* arXiv:1804.02767, 2018.
+9. Lin, T.-Y. et al. *Feature pyramid networks for object detection.* CVPR, 2017.
+10. Tian, Z., Shen, C., Chen, H., He, T. *FCOS: fully convolutional one-stage object detection.* ICCV, 2019. —— 无锚框（anchor-free）思路。
+11. Ge, Z., Liu, S., Wang, F., Li, Z., Sun, J. *YOLOX: exceeding YOLO series in 2021.* arXiv:2107.08430, 2021. —— **Apache-2.0**，本项目推荐接入的精度方案。
+12. Zhao, Y. et al. *DETRs beat YOLOs on real-time object detection (RT-DETR).* CVPR, 2024. —— **Apache-2.0** 的实时 DETR 方案，本项目首选。
+    —— 同段落可对照 Ultralytics **YOLO26**：其 `nms=False` 端到端头直接输出 `(1,300,6)`、无需 NMS，且去掉 DFL 后 CPU 端 ONNX 推理更快；但 YOLO11 / YOLO26 都是 **AGPL-3.0**，只能作内网基线，不得进发行包（见 `training/README.md` §10）。
+13. Carion, N. et al. *End-to-end object detection with transformers.* ECCV, 2020.
+14. Liu, Z. et al. *Swin Transformer: hierarchical vision transformer using shifted windows.* ICCV, 2021.
+15. Zheng, Z. et al. *Distance-IoU loss: faster and better learning for bounding box regression.* AAAI, 2020. —— 回归损失与 IoU 变体。
+16. Lin, T.-Y. et al. *Focal loss for dense object detection.* ICCV, 2017. —— 类别/正负样本不平衡。
+
+**频谱图上的目标检测（更贴近本问题）**
+
+17. Zhou, Z. et al. *Object detection in spectrogram based on deep learning.* 相关期刊/会议工作，用于说明"时频图当图像检测"这一范式的可用性（同类工作众多，接入时建议按具体网络取舍）。
+18. Zhang, Y. et al. *Radio signal detection in spectrograms with deep neural networks.* —— 同类频谱图检测工作。
+
+**推理运行时与部署**
+
+19. ONNX Runtime documentation, Microsoft, 2024. —— 会话配置、线程数、算子集兼容性。
+20. ONNX Specification / Operator Set, Linux Foundation, 2024.
+21. Jacob, B. et al. *Quantization and training of neural networks for efficient integer-arithmetic-only inference.* CVPR, 2018. —— 量化部署基础。
+
+**数据与许可证**
+
+22. GNU Radio Foundation et al. *SigMF: Signal Metadata Format Specification v1.2.0*, 2023.
+23. TorchSig, *MIT License* 数据集生成库。**本项目已把它作为可选数据源接入**：`training/build_torchsig.py` 生成 `torchsig_bundle_v1`，再由 `training/ingest_torchsig.py` / `training/build_iq_dataset.py` 消费；生成物只落本地，不随产品分发（见 §6.2、`training/README.md` §8）。
+24. DeepSig Inc. *RadioML 2018.01A*, **CC BY-NC-SA 4.0** —— **不可商用、不可随产品分发**，
+    本项目**未使用**，列出仅为合规说明。
+
+**训练与评测方法**
+
+25. Lin, T.-Y. et al. *Microsoft COCO: common objects in context.* ECCV, 2014. —— AP/AR 评测口径的来源。
+26. Padilla, R., Netto, S. L., da Silva, E. A. B. *A survey on performance metrics for object-detection algorithms.* IWSSIP, 2020. —— 检测指标的坑与口径澄清。
+27. Guo, C. et al. *On calibration of modern neural networks.* ICML, 2017. —— "网络置信度不是概率"的经典证据。

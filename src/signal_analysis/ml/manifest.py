@@ -59,6 +59,14 @@ MAX_MANIFEST_BYTES = 64 * 1024
 ALLOWED_IMAGE_SIZES = (64, 128, 256, 512, 1024, 2048)
 MIN_RUNTIME_VERSION = "1.17"
 
+#: 模型的标签语义，决定推理端该用哪条通路解码：
+#: ``session_v1`` = 一段传输一个框（→ :func:`ml_detect`）；
+#: ``per_hop_v1`` = ``fh*`` 信号一跳一个框（→ :func:`ml_detect_hops`）。
+#: 旧清单没有该字段，按 ``session_v1`` 处理。
+LABEL_SEMANTICS = ("session_v1", "per_hop_v1")
+DEFAULT_LABEL_SEMANTICS = "session_v1"
+LABEL_SEMANTICS_FIELD = "label_semantics"
+
 
 class ManifestError(ValueError):
     """清单缺失、格式不符或模型文件校验失败。"""
@@ -134,6 +142,22 @@ def _require_labels(manifest):
     return cleaned
 
 
+def _require_label_semantics(manifest):
+    """训练标签语义；缺省为会话级（兼容历史清单）。
+
+    训练方的 ``training`` 段是自由字典，这里只关心 ``label_semantics``
+    一个键：它必须与模型实际训练时的标签粒度一致，否则推理端会用错的
+    解码通路（把一个会话拆成 N 跳，或把 N 跳并成一个会话）。
+    """
+    training = manifest.get("training")
+    value = DEFAULT_LABEL_SEMANTICS
+    if isinstance(training, dict) and training.get(LABEL_SEMANTICS_FIELD) is not None:
+        value = training[LABEL_SEMANTICS_FIELD]
+    if value not in LABEL_SEMANTICS:
+        raise ManifestError(f"标签语义应为 {LABEL_SEMANTICS} 之一，实际为 {value!r}")
+    return value
+
+
 def read_model_manifest(path):
     """校验清单并返回 ``(manifest, 模型文件绝对路径)``。"""
     path = Path(path)
@@ -159,6 +183,7 @@ def read_model_manifest(path):
     version = _require_text(manifest, "version", limit=40)
     digest = _require_digest(manifest)
     labels = _require_labels(manifest)
+    label_semantics = _require_label_semantics(manifest)
     input_contract = _require_input(manifest)
     output_contract = _require_output(manifest, labels)
     relative = Path(_require_text(manifest, "library"))
@@ -187,6 +212,7 @@ def read_model_manifest(path):
         "input": input_contract,
         "output": output_contract,
         "labels": labels,
+        "label_semantics": label_semantics,
         "training": manifest.get("training") if isinstance(manifest.get("training"), dict) else {},
         "notes": manifest.get("notes") if isinstance(manifest.get("notes"), str) else "",
         "manifest_path": str(path),
@@ -197,8 +223,11 @@ def read_model_manifest(path):
 def write_model_manifest(output, model, *, identifier, version,
                          image_size=DEFAULT_IMAGE_SIZE, opset=0, labels=None,
                          training=None, notes="", spectrogram_nfft=DEFAULT_NFFT,
-                         dynamic_range_db=DEFAULT_DYNAMIC_RANGE_DB, extra=None):
+                         dynamic_range_db=DEFAULT_DYNAMIC_RANGE_DB, extra=None,
+                         label_semantics=DEFAULT_LABEL_SEMANTICS):
     """为已有 ``.onnx`` 文件生成清单（训练脚本与命令行共用）。"""
+    if label_semantics not in LABEL_SEMANTICS:
+        raise ManifestError(f"标签语义应为 {LABEL_SEMANTICS} 之一，实际为 {label_semantics!r}")
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     model = Path(model).resolve(strict=True)
@@ -228,6 +257,9 @@ def write_model_manifest(output, model, *, identifier, version,
         "generated": {"python": platform.python_version(), "platform": platform.platform(),
                       "machine": platform.machine(), "bits": struct.calcsize("P") * 8},
     }
+    # 标签语义写进 training 段（自由字典，不需要改 schema 版本）：推理端据此选择
+    # 解码通路，写在模型旁边就不可能和权重“对不上”。
+    manifest["training"][LABEL_SEMANTICS_FIELD] = label_semantics
     if extra:
         manifest.update(extra)
     temporary = output.with_suffix(output.suffix + ".tmp")

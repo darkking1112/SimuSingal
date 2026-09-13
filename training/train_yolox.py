@@ -23,6 +23,16 @@
         --output training/runs/tiny --epochs 10
     .venv/bin/python training/verify_onnx.py --manifest training/runs/tiny/detector.json
 
+逐跳模型（推理端用 ``ml-detect-hops``）只是换了标签粒度与评测口径：数据集用
+``--labels hop`` 构建，训练时把网格步长降到 2、框数上限提到 128 以上，其余不变。
+训练脚本会按数据集的 ``label_semantics`` 自动选评测口径（``hop_truth`` +
+``fh_hops_v1``），并把同一取值写进模型清单，让推理端能选对解码通路::
+
+    .venv/bin/python training/build_dataset.py --labels hop --modes fh_rc \\
+        --output training/data/hops --count 500
+    .venv/bin/python training/train_yolox.py --data training/data/hops \\
+        --output training/runs/hops --strides 2 --max-boxes 128 --epochs 10
+
 注意：导出的 ``.onnx`` 与模型清单必须位于同一目录（清单里保存的是相对路径）。
 """
 
@@ -30,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -42,8 +53,18 @@ if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from signal_analysis.core_api import generate_iq  # noqa: E402
-from signal_analysis.evaluation import evaluate_detections, signal_truth  # noqa: E402
-from signal_analysis.ml import ml_detect, write_model_manifest  # noqa: E402
+from signal_analysis.evaluation import (  # noqa: E402
+    HOP_CONTRACT,
+    evaluate_detections,
+    hop_truth,
+    signal_truth,
+)
+from signal_analysis.ml import (  # noqa: E402
+    DEFAULT_LABEL_SEMANTICS,
+    ml_detect,
+    ml_detect_hops,
+    write_model_manifest,
+)
 
 
 def _arch_choices():
@@ -68,9 +89,11 @@ def _parse_args(argv=None):
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--max-boxes", type=int, default=32,
-                        help="单帧输出框数上限，需 ≤ 推理端 max_detections，默认 32")
+                        help="单帧输出框数上限，需 ≤ 推理端 max_detections，默认 32"
+                             "（逐跳数据集建议 ≥ 128）")
     parser.add_argument("--width", type=int, default=32, help="主干基础通道数")
-    parser.add_argument("--strides", type=int, default=4, help="下采样次数（4 → 步长 16 网格）")
+    parser.add_argument("--strides", type=int, default=4,
+                        help="下采样次数（4 → 步长 16 网格）；逐跳标签请用 2")
     parser.add_argument("--limit", type=int, default=0, help="仅用前 N 个训练样本（0 = 全部）")
     parser.add_argument("--val-samples", type=int, default=40,
                         help="端到端验证样本数（0 = 跳过验证）")
@@ -180,13 +203,69 @@ def _pooled(metrics):
     }
 
 
+def _label_semantics(card):
+    """数据集的标签粒度（缺字段按会话级，与 ``detectors/dataset.py`` 同一规则）。"""
+    from detectors.dataset import label_semantics
+
+    return label_semantics(card)
+
+
+def _grid_guard(card, args, grid):
+    """量化守卫：网格比最小标签还粗时，标签会被逐格编码静默丢弃。
+
+    每个真值框只写到“框心所在的那一格”，同一格出现多框时只保留面积最大的
+    一个（见 :func:`tiny_detector.encode_targets`）。逐跳标签的典型尺寸是
+    “几毫秒 × 一跳带宽”，在 1024 像素图上只有十几像素；一旦网格步长
+    （``image_size / 2**strides``，默认 ``--strides 4`` 即 16 像素）超过它，
+    一跳一张的标签就会成片消失——训练照常跑完、指标看起来也正常，但对不
+    上真值。所以这里直接拦下来，而不是让用户事后分析“为什么召回这么低”。
+
+    返回守卫用到的几何量，供调用方打印。
+    """
+    statistics = (card.get("statistics") or {}).get("labels") or {}
+    smallest = [float(value) for value in (statistics.get("min_width_px"),
+                                           statistics.get("min_height_px"))
+                if isinstance(value, (int, float)) and value]
+    cell = args.image_size / float(grid)
+    if smallest and min(smallest) < cell:
+        tiny = min(smallest)
+        # 网格步长是 2**strides，所以可用的最大下采样次数是 log2(最小标签)
+        needed = int(math.floor(math.log2(tiny))) if tiny >= 1.0 else 0
+        if needed >= 1:
+            hint = (f"请减小下采样次数（--strides {needed}），"
+                    f"或提高 --image-size（当前 {args.image_size}）后重建数据集")
+        else:
+            hint = (f"该图像尺寸下无法表示这个标签（即使 --strides 1 也有 2 像素步长），"
+                    f"请提高 --image-size（当前 {args.image_size}）后重建数据集")
+        raise SystemExit(
+            f"标签最小边 {tiny:g} 像素，小于网格步长 {cell:g} 像素"
+            f"（{args.image_size} / {grid}，--strides {args.strides}）：比一格还小的"
+            f"标签会在逐格编码时被丢弃，训练结果无法与真值对齐。{hint}")
+    per_sample = (statistics.get("boxes_per_sample") or {}).get("max")
+    if isinstance(per_sample, int) and per_sample > args.max_boxes:
+        raise SystemExit(
+            f"单样本最多 {per_sample} 个标签，超过 --max-boxes {args.max_boxes}："
+            "多出来的框无法被模型输出表示，请提高 --max-boxes（逐跳数据集建议 ≥ 128）")
+    return {"cell_px": round(cell, 3),
+            "min_label_px": min(smallest) if smallest else None,
+            "max_boxes_per_sample": per_sample}
+
+
 def _validate(model, torch, card, records, args):
-    """用项目自带的评测口径做端到端验证：重新生成波形 → ml_detect → evaluate_detections。"""
+    """用项目自带的评测口径做端到端验证：重新生成波形 → 解码 → evaluate_detections。
+
+    逐跳数据集走 :func:`ml_detect_hops` + :func:`hop_truth`（``fh_hops_v1``
+    口径，天然跳对跳），会话级数据集走 :func:`ml_detect` + :func:`signal_truth`；
+    两条路都用同一个评测器，所以训练日志里的数字与运行期报出的数字同口径。
+    """
     contract = card["contract"]
+    semantics = contract.get("label_semantics", DEFAULT_LABEL_SEMANTICS)
     manifest = {
         "id": args.model_id,
         "version": args.version,
         "labels": list(contract["labels"]),
+        # 清单必须声明标签粒度：逐跳模型在推理端要能通过 ml-detect-hops 的语义门禁
+        "label_semantics": semantics,
         "input": {
             "name": "images",
             "image_size": int(contract["image_size"]),
@@ -197,6 +276,7 @@ def _validate(model, torch, card, records, args):
         },
     }
     runner = TorchRunner(model, torch, manifest)
+    per_hop = semantics == "per_hop_v1"
     model.eval()
     per_scene = []
     val_records = [record for record in records if record["split"] == "val"][:args.val_samples]
@@ -204,10 +284,19 @@ def _validate(model, torch, card, records, args):
         scene = record["scene"]
         samples, generation = generate_iq(scene["rate_hz"], scene["duration_s"], scene["signals"],
                                           noise=scene["noise"], seed=scene["seed"])
-        summary, _ = ml_detect(samples, scene["rate_hz"], runner=runner, with_baseline=False)
-        per_scene.append(evaluate_detections(signal_truth(generation), summary["detections"]))
+        if per_hop:
+            summary, _ = ml_detect_hops(samples, scene["rate_hz"], runner=runner,
+                                        with_sessions=False, with_traditional=False)
+            detections = summary["hops"]
+            metrics = evaluate_detections(hop_truth(generation), detections,
+                                          contract=HOP_CONTRACT)
+        else:
+            summary, _ = ml_detect(samples, scene["rate_hz"], runner=runner, with_baseline=False)
+            detections = summary["detections"]
+            metrics = evaluate_detections(signal_truth(generation), detections)
+        per_scene.append(metrics)
         # 结果必须是 JSON 安全的（与运行期契约一致）
-        json.dumps(summary["detections"], allow_nan=False, ensure_ascii=False)
+        json.dumps(detections, allow_nan=False, ensure_ascii=False)
     return _pooled(per_scene), per_scene
 
 
@@ -258,6 +347,7 @@ def _export(model, torch, args, card, metrics, onnx_path, manifest_path):
         identifier=args.model_id, version=args.version,
         image_size=int(contract["image_size"]), opset=args.opset,
         labels=list(contract["labels"]),
+        label_semantics=contract.get("label_semantics", DEFAULT_LABEL_SEMANTICS),
         training={"framework": f"torch {torch.__version__}", "arch": args.arch,
                   "license": args.license, "dataset": str(args.data),
                   "epochs": args.epochs, "batch": args.batch, "lr": args.lr,
@@ -322,6 +412,10 @@ def main(argv=None):
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+    # 标签粒度与网格步长必须能"表示得下"标签：逐跳数据集这一步会拦住默认的 16 像素网格
+    semantics = _label_semantics(card)
+    grid = tiny.grid_size(args.image_size, args.strides)
+    guard = _grid_guard(card, args, grid)
     train_records = [record for record in records if record["split"] == "train"]
     if args.limit:
         train_records = train_records[:args.limit]
@@ -331,10 +425,11 @@ def main(argv=None):
     output.mkdir(parents=True, exist_ok=True)
     model = tiny.TinyDetector(max_boxes=args.max_boxes, classes=len(contract["labels"]),
                               width=args.width, strides=args.strides)
-    grid = tiny.grid_size(args.image_size, args.strides)
     print(f"数据集 {data_root}：{card['sample_count']} 个样本，"
           f"训练用 {len(train_records)} 个；输入 {args.image_size}×{args.image_size}，"
-          f"网格 {grid}×{grid}")
+          f"网格 {grid}×{grid}（步长 {guard['cell_px']:g} 像素）")
+    print(f"标签语义 {semantics}：最小标签 {guard['min_label_px']} 像素，"
+          f"单样本最多 {guard['max_boxes_per_sample']} 个框")
     print(f"模型：tiny（{tiny.count_parameters(model)} 参数，最多 {args.max_boxes} 框/帧）")
 
     loader = _make_loader(torch, train_records, data_root, args.image_size,
@@ -349,7 +444,8 @@ def main(argv=None):
             {"pooled": metrics, "scenes": per_scene, "loss": history},
             ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
         print(f"  召回 {metrics['recall']} 精确率 {metrics['precision']} F1 {metrics['f1']} "
-              f"（真值 {metrics['true']} 检出 {metrics['detected']} 虚警 {metrics['false_alarm']}）")
+              f"（{semantics} 口径：真值 {metrics['true']} 检出 {metrics['detected']} "
+              f"虚警 {metrics['false_alarm']}）")
 
     onnx_path = Path(args.onnx) if args.onnx else output / "detector.onnx"
     manifest_path = Path(args.manifest) if args.manifest else output / "detector.json"
