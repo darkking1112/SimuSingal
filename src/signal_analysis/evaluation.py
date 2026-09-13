@@ -4,7 +4,7 @@ Pure NumPy with no GUI, storage or workspace imports, so the CLI, the GUI
 comparison page, the offline benchmarks and the optional training scripts
 all score results with exactly the same code. This module also owns the
 **frozen detection result contract** used by the traditional detector
-(:func:`signal_analysis._numeric.detect_signals`) and by the optional ONNX
+(:func:`signal_analysis._numeric_energy.detect_signals`) and by the optional ONNX
 detector in :mod:`signal_analysis.ml`.
 
 Contract (``detect_result_v1``), written into every ``detect`` run::
@@ -37,7 +37,9 @@ truth are directly comparable.
 import numpy as np
 
 from .core_api import occupied_interval
-from ._numeric import _fh_hop_boundaries
+from ._numeric_iqgen import (
+    _fh_hop_boundaries,
+)
 
 CONTRACT_VERSION = "detect_result_v1"
 HOP_CONTRACT = "fh_hops_v1"

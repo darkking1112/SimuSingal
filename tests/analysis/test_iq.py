@@ -379,7 +379,7 @@ def test_manifest_rejects_wrong_contract_and_front_end(tmp_path):
     rewrite(lambda item: item.update(runtime="tensorrt"))
     with pytest.raises(IQModelError, match="推理运行时"):
         read_iq_manifest(path)
-    rewrite(lambda item: item.update(library="/tmp/absolute.onnx"))
+    rewrite(lambda item: item.update(library=str((tmp_path / "absolute.onnx").resolve())))
     with pytest.raises(IQModelError, match="相对路径"):
         read_iq_manifest(path)
 

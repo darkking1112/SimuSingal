@@ -9,6 +9,8 @@ import sys
 import tempfile
 from zipfile import ZipFile
 
+from check_binary import validate_core_members
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -25,10 +27,11 @@ def main():
             parser.error("wheel 与所选项目不匹配")
         if any(name.startswith(package + "/") for name in names for package in config["exclude"]):
             parser.error("wheel 包含另一项目代码")
-        if args.project == "analysis" and ("signal_analysis/_numeric.py" in names or not any(
-            name.startswith("signal_analysis/_numeric.") and name.endswith((".pyd", ".so")) for name in names
-        )):
-            parser.error("请先构建包含编译核心且不附核心 .py 的 wheel")
+        if args.project == "analysis":
+            try:
+                validate_core_members(names)
+            except RuntimeError as exc:
+                parser.error(f"请先构建全部核心均已编译且不附核心源码的 wheel：{exc}")
     with tempfile.TemporaryDirectory(prefix="simusignal-release-") as folder:
         folder = Path(folder)
         stage = folder / "stage"

@@ -446,7 +446,7 @@ def test_manifest_rejects_bad_inputs(tmp_path):
     with pytest.raises(ModelError, match="契约"):
         read_amc_manifest(path)
     payload["contract"] = AMC_ONNX_CONTRACT
-    payload["library"] = "/tmp/absolute.onnx"
+    payload["library"] = str((tmp_path / "absolute.onnx").resolve())
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ModelError, match="相对路径"):
         read_amc_manifest(path)

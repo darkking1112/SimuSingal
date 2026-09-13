@@ -5,7 +5,7 @@
 * **输入不同**：A09 通路把频带内的 34 维确定性特征交给线性／ONNX 判别器
   （``amc_feature_vector_v1``）；本分支把**原始复基带采样点**直接交给网络
   （``iq_waveform_v1``，``(1, 2, N)``），由网络自行学习调制特征。
-* **前段完全相同**：两条通路都走 amc 的 mix → 65 抽头低通 → 按
+* **前段完全相同**：两条通路都走 ``_numeric_preprocess`` 的混频 → 65 抽头低通 → 按
   ``SAMPLES_PER_BAND = 8.0`` 抽取，因此"分析率"与"每符号点数"这两个最容易
   分叉的量逐位一致。清单若声明了不同的前段参数会被直接拒绝
   （见 :func:`_require_front_end`），而不是静默换一种预处理。
@@ -41,17 +41,23 @@ from pathlib import Path
 import numpy as np
 
 from common.storage import file_digest
-from .amc import (
-    AMC_CLASSES,
-    CLASS_LABELS,
+from .._numeric_common import (
+    _rounded,
+)
+
+from .._numeric_preprocess import (
     LOWPASS_TAPS,
-    LOW_SNR_WARNING_DB,
     SAMPLES_PER_BAND,
     _inband_snr,
     _mix_and_decimate,
-    _rounded,
-    _softmax,
     _validate,
+)
+
+from .amc import (
+    AMC_CLASSES,
+    CLASS_LABELS,
+    LOW_SNR_WARNING_DB,
+    _softmax,
 )
 
 #: 输入张量契约（``(1, 2, N)`` float32 复基带窗口）

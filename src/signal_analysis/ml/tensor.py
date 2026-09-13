@@ -18,7 +18,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from .._numeric import _SNR_FLOOR_DB, detect_signals
+from .._numeric_common import (
+    _SNR_FLOOR_DB,
+)
+
+from .._numeric_energy import (
+    detect_signals,
+)
 from .manifest import DEFAULT_IMAGE_SIZE
 
 IMAGE_SIZE = DEFAULT_IMAGE_SIZE

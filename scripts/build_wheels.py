@@ -27,6 +27,9 @@ def main():
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         shutil.copyfile(root / "apps" / config["app_dir"] / "pyproject.toml", stage / "pyproject.toml")
         shutil.copyfile(root / "setup.py", stage / "setup.py")
+        (stage / "packaging").mkdir()
+        shutil.copyfile(root / "packaging/numeric_core.json", stage / "packaging/numeric_core.json")
+        shutil.copyfile(root / "MANIFEST.in", stage / "MANIFEST.in")
         shutil.copyfile(root / "LICENSE", stage / "LICENSE")
         env = os.environ.copy()
         env["SIMUSIGNAL_COMPILE_CORE"] = "1" if args.compile_core else "0"

@@ -196,7 +196,7 @@ def test_manifest_rejects_escaping_and_missing_library(tmp_path):
     path, _ = manifest_file(tmp_path, {"library": "missing.onnx"})
     with pytest.raises(ManifestError, match="模型文件不可读"):
         read_model_manifest(path)
-    absolute, _ = manifest_file(tmp_path, {"library": "/etc/hostname"})
+    absolute, _ = manifest_file(tmp_path, {"library": str((tmp_path / "absolute.onnx").resolve())})
     with pytest.raises(ManifestError, match="相对路径"):
         read_model_manifest(absolute)
 

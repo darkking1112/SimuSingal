@@ -1,0 +1,10 @@
+[
+  "signal_analysis._numeric",
+  "signal_analysis._numeric_common",
+  "signal_analysis._numeric_analysis",
+  "signal_analysis._numeric_iqgen",
+  "signal_analysis._numeric_preprocess",
+  "signal_analysis._numeric_modulation",
+  "signal_analysis._numeric_energy",
+  "signal_analysis._numeric_hops"
+]

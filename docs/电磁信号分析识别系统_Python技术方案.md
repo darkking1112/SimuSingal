@@ -127,7 +127,7 @@ Qt、NumPy 内存映射及 ONNX Runtime 的能力可参考官方说明；上述�
 
 #### 信号生成原理与算法
 
-生成入口为 `generate_iq(sample_rate, duration, signals, noise, seed)`，算法标识 `iq_generator_v1`，全部以 NumPy 实现（位于编译核心 `_numeric` 模块，随机性来自 `numpy.random.default_rng`）。总体流程：
+生成入口为 `generate_iq(sample_rate, duration, signals, noise, seed)`，算法标识 `iq_generator_v1`，全部以 NumPy 实现（位于编译核心 `_numeric_iqgen` 模块，`_numeric` 保留兼容导出，随机性来自 `numpy.random.default_rng`）。总体流程：
 
 1. 校验并解析参数：采样点数 `N = round(fs × T)`，限制 `1 ≤ N ≤ 16,000,000`，信号数最多 16；每个信号先经 `plan_signal` 完成参数校验与自动推导（GUI 参数对话框复用同一规则集）。
 2. 用种子初始化父随机流，为每个信号派生独立子流，按调制样式合成复基带波形。
@@ -266,7 +266,7 @@ OFDM 有效符号时长由子载波间隔决定，含循环前缀的完整符号
 
 ##### 当前驻留规律、符号填充与参数来源
 
-依据 `src/signal_analysis/_numeric.py` 的 `_fh_hop_boundaries`、`_fh_video_link` 和 `_hop_points`，设采样点数为 N、采样率为 f_s，实际记录时长为 T，目标驻留节奏为 R_h：
+依据 `src/signal_analysis/_numeric_iqgen.py` 的 `_fh_hop_boundaries`、`_fh_video_link` 和 `_hop_points`，设采样点数为 N、采样率为 f_s，实际记录时长为 T，目标驻留节奏为 R_h：
 
 $$
 T=\frac{N}{f_s},\qquad

@@ -18,16 +18,22 @@ import time
 
 import numpy as np
 
-from .._numeric import (
+from .._numeric_common import (
     _SNR_FLOOR_DB,
+    _occupied_span,
+    validate_samples,
+)
+
+from .._numeric_energy import (
+    _merge_sessions,
+)
+
+from .._numeric_hops import (
     _finalise_hops,
     _group_hop_sessions,
     _hop_config,
-    _merge_sessions,
-    _occupied_span,
     _refine_hop_bands,
     _smooth_psd,
-    validate_samples,
 )
 from .decode import (
     DEFAULT_IOU_THRESHOLD,
@@ -71,7 +77,7 @@ CONTEXT_KEYS = ("nfft", "threshold_db", "band_threshold_db", "min_bandwidth_hz",
 ML_KEYS = ("score_threshold", "iou_threshold", "dynamic_range_db", "image_size",
            "threads", "image_contract")
 # 逐跳解码特有的配置项。取值范围不在本模块重复定义，而是交给
-# ``_numeric._hop_config`` —— 与 ``detect-hops`` 命令行完全同一套校验，
+# ``_numeric_hops._hop_config`` —— 与 ``detect-hops`` 命令行完全同一套校验，
 # 因此“AI 逐跳”与“传统逐跳”的参数含义与边界完全相同。
 HOP_KEYS = ("max_hops", "min_dwell_s", "smooth_frames", "merge_bins",
             "min_bandwidth_hz", "max_gap_frames", "max_gap_bins")
@@ -390,7 +396,7 @@ def _boxes_to_tracks(candidates, frequency, frame_time, resolution):
     ``first_frame``/``last_frame``（帧区间）。驻留时间、功率、单跳占用带宽、
     带内信噪比随后都由 :func:`_finalise_hops` 与 :func:`_refine_hop_bands` 在
     **原始 PSD** 上重新测量，因此 AI 逐跳与传统逐跳的这些物理量同一口径，
-    可以直接并排比较，而不需要动 ``_numeric`` 一个字符。
+    可以直接并排比较，复用数值模块的物理量测并保持传统判决行为不变。
 
     帧区间用帧中心落在框内来取（与 :func:`_refine_hop_bands` 同一约定），
     至少保留一帧——窄于一帧的框仍应产生一次测量机会，是否成立交给
