@@ -31,10 +31,10 @@ PLAY_WAVE_POINTS = 2000
 
 
 def _run_task(request, cancel=None):
-    # 16M 样本的生成与导出可能明显超过默认 30 s 子进程超时；
+    # 16M 样本的生成、导出与演示（同一点数上限）可能明显超过默认 30 s 子进程超时；
     # 数据盘点/清理要遍历整棵工作区目录树，同样放宽。
     action = request.get("action")
-    timeout = 600.0 if action == "generate" else (
+    timeout = 600.0 if action in ("generate", "demo") else (
         300.0 if action in ("storage_report", "storage_cleanup") else 30.0)
     return run_job(request, timeout=timeout, cancel=cancel)
 
@@ -545,15 +545,12 @@ class MainWindow(DesktopWindow):
         save = QtWidgets.QPushButton("保存备注")
         save.clicked.connect(self.save_label)
         layout.addWidget(save)
-        layout.addWidget(QtWidgets.QLabel("导入 / 演示采样率"))
+        layout.addWidget(QtWidgets.QLabel("导入采样率"))
         rate_row, self.sample_rate = _freq_spin(1, 1e9, 48000, 2)
         layout.addWidget(rate_row)
         self.import_button = QtWidgets.QPushButton("导入 IQ / SigMF")
         self.import_button.clicked.connect(self.import_file)
         layout.addWidget(self.import_button)
-        self.demo_button = QtWidgets.QPushButton("生成数学双音演示")
-        self.demo_button.clicked.connect(lambda: self.start_job("demo", sample_rate=self.sample_rate.value()))
-        layout.addWidget(self.demo_button)
         workspace_label = QtWidgets.QLabel(f"工作目录\n{self.workspace.root}")
         workspace_label.setWordWrap(True)
         layout.addWidget(workspace_label)
@@ -716,10 +713,13 @@ class MainWindow(DesktopWindow):
         intro = QtWidgets.QLabel("生成用于测试检测、参数估计与调制识别算法的 IQ 基带信号。"
                                  "IQ 为复基带记录，不设置载频：\"频点\"指基带频率偏移；"
                                  "频率值以 Hz / kHz / MHz 显示（单位在输入框外）。"
-                                 "可一次包含多种信号并独立设置参数，自动按目标带宽推导调制参数。")
+                                 "可一次包含多种信号并独立设置参数，自动按目标带宽推导调制参数。"
+                                 "另有“数学双音演示”：不建模通信链路，按下方的采样率与持续时间"
+                                 "生成一对可复现的复基带双音，供快速试跑分析流程。")
         intro.setWordWrap(True)
         layout.addWidget(intro)
         layout.addWidget(self._build_global_row())
+        layout.addWidget(self._build_demo_row())
         layout.addWidget(self._build_noise_group())
         layout.addWidget(self._build_signal_table(), 1)
         layout.addWidget(self._build_export_row())
@@ -752,6 +752,21 @@ class MainWindow(DesktopWindow):
         row.addStretch()
         self.gen_rate.valueChanged.connect(self.update_gen_count)
         self.gen_duration.valueChanged.connect(self.update_gen_count)
+        return group
+
+
+    def _build_demo_row(self):
+        group = QtWidgets.QGroupBox("数学双音演示")
+        row = QtWidgets.QHBoxLayout(group)
+        hint = QtWidgets.QLabel("不建模通信链路：按上方采样率 × 持续时间生成一对可复现的复基带双音"
+                                "（含少量噪声），不使用信号列表与背景噪声设置。")
+        hint.setWordWrap(True)
+        row.addWidget(hint, 1)
+        self.demo_button = QtWidgets.QPushButton("生成数学双音演示")
+        self.demo_button.setToolTip("点数 = 上方采样率 × 持续时间，与“预计 N 个复采样”一致；"
+                                    "生成独立资产并在左侧资产列表选中，可到“数据分析”页分析")
+        self.demo_button.clicked.connect(self.generate_demo_clicked)
+        row.addWidget(self.demo_button)
         return group
 
 
@@ -969,6 +984,17 @@ class MainWindow(DesktopWindow):
         self.start_job("generate", sample_rate=rate, duration=duration,
                        seed=int(self.gen_seed.value()), signals=self.iq_signals,
                        noise=noise, name=self.gen_name.text().strip() or None, export=export)
+
+
+    def generate_demo_clicked(self):
+        """数学双音演示：点数跟随本页“采样率 × 持续时间”，与页内预计点数一致。"""
+        rate = self.gen_rate.value()
+        count = int(round(rate * self.gen_duration.value()))
+        if not 1 <= count <= MAX_SAMPLES:
+            self.status.setText(f"演示采样点数 {count:,} 超出 1～{MAX_SAMPLES:,} 范围，"
+                                "请调整采样率或持续时间")
+            return
+        self.start_job("demo", sample_rate=rate, count=count)
 
 
     def show_generation_result(self, result):

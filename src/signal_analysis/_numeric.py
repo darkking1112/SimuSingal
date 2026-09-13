@@ -603,7 +603,7 @@ def validate_rate(sample_rate):
 def make_demo(sample_rate=48000.0, count=8192, seed=7):
     rate = validate_rate(sample_rate)
     if isinstance(count, bool) or int(count) != count or not 1 <= count <= MAX_SAMPLES:
-        raise ValueError("演示采样点数必须为 1～1,000,000 的整数")
+        raise ValueError(f"演示采样点数必须为 1～{MAX_SAMPLES:,} 的整数")
     t = np.arange(int(count)) / rate
     rng = np.random.default_rng(seed)
     # A reproducible pair of mathematical tones, without a communication model.

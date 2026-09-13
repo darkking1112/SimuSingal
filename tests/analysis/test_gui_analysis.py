@@ -60,9 +60,15 @@ def test_analysis_gui_workflow(tmp_path, monkeypatch):
     try:
         assert window.tabs.count() == 8
         assert not hasattr(window, "sim_button")
+        # 演示入口属于“IQ 信号生成”页，不在主页面（数据分析页与侧栏同一父级）。
+        assert window.tabs.widget(1).isAncestorOf(window.demo_button)
+        assert not window.tabs.widget(0).isAncestorOf(window.demo_button)
         window.demo_button.click()
         wait_job(app, window)
         assert window.assets.count() == 1
+        # 演示点数跟随生成页“采样率 × 持续时间”，不再固定 8192。
+        assert window.selected_asset()["sample_count"] == int(round(
+            window.gen_rate.value() * window.gen_duration.value()))
         window.analyze_button.click()
         wait_job(app, window)
         assert window.last_result["kind"] == "analysis"
@@ -78,6 +84,12 @@ def test_analysis_gui_workflow(tmp_path, monkeypatch):
         window.export_current()
         import json
         assert json.loads(output.read_text(encoding="utf-8"))["kind"] == "analysis"
+        # 演示点数超出 1～16,000,000 时只提示，不启动作业
+        window.gen_rate.setValue(1e9)
+        window.gen_duration.setValue(10.0)
+        window.demo_button.click()
+        assert window.active_job is None
+        assert "超出" in window.status.text()
     finally:
         window.close()
         app.processEvents()
