@@ -527,7 +527,7 @@ def test_cli_rejects_unknown_option():
 def test_gui_hops_tab_renders_result(tmp_path):
     pytest.importorskip("PySide6")
     pytest.importorskip("pyqtgraph")
-    from PySide6 import QtWidgets
+    from PySide6 import QtCore, QtWidgets
 
     from signal_analysis.gui import MainWindow
     from signal_analysis.tasks import run_job
@@ -569,6 +569,30 @@ def test_gui_hops_tab_renders_result(tmp_path):
         assert "逐跳真值" in text and "会话 1" in text
         assert window.hops_tf_image.image is not None
         assert len(window._hops_items) == len(window.last_result["hops"])
+        # 时频图不得转置：列驱动横轴（频率 Hz）、行驱动纵轴（时间 s）。若把矩阵转置
+        # 后交给 row-major 的 ImageItem，横坐标会变成秒级的"负频率"。
+        with np.load(workspace / window.last_result["plots_path"], allow_pickle=False) as arrays:
+            matrix = arrays["spectrogram_db"]
+            frequency = arrays["frequency"]
+            frame_time = arrays["frame_time"]
+        assert window.hops_tf_image.image.shape == matrix.shape
+        row, col = np.unravel_index(int(np.argmax(matrix)), matrix.shape)
+        cell = window.hops_tf_image.mapToScene(QtCore.QPointF(col + 0.5, row + 0.5))
+        point = window.hops_tf.getPlotItem().getViewBox().mapSceneToView(cell)
+        assert point.x() == pytest.approx(float(frequency[col]),
+                                          abs=abs(float(frequency[1] - frequency[0])) / 2)
+        assert point.y() == pytest.approx(float(frame_time[row]), abs=1e-9)
+        # 复数 IQ 的双边谱都可能有信号，「自动」保留双边；切到「仅正频率」时
+        # 平均功率谱、时频图与逐跳框共用同一非负频率范围
+        assert window.hops_freq_view.currentText() == "自动"
+        assert window.hops_tf_image.image.shape[1] == matrix.shape[1]
+        window.hops_freq_view.setCurrentText("仅正频率")
+        assert window.hops_spectrum.viewRange()[0] == pytest.approx((0.0, RATE / 2))
+        assert window.hops_tf.viewRange()[0] == pytest.approx((0.0, RATE / 2))
+        assert window.hops_tf_image.image.shape[1] == matrix.shape[1] // 2
+        assert "仅正频率" in window.hops_tf.getPlotItem().titleLabel.text
+        window.hops_freq_view.setCurrentText("双边")
+        assert window.hops_tf_image.image.shape == matrix.shape
         header = [window.hops_table.horizontalHeaderItem(index).text() for index in range(10)]
         assert header[:4] == ["跳号", "会话", "中心频率", "单跳带宽"]
         assert window.hops_table.item(0, 6).text().endswith("ms")

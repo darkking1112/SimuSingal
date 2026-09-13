@@ -94,6 +94,26 @@ def _fmt_metric(value, spec):
     return "--" if value is None else format(float(value), spec)
 
 
+def _mirrored_spectrum(values):
+    """实数记录的 PSD 严格关于 0 Hz 镜像，可据此判断负半轴是否只是重复。
+
+    fftshift 之后索引 0 是奈奎斯特频点、索引 n/2 是直流，两者各自配对；
+    其余频点成对镜像（``values[n/2 + d] == values[n/2 - d]``），因此只比较
+    这两段即可，不需要再读一遍原始样本。频点为奇数或过少时无法判断，按
+    双边处理。
+    """
+    data = np.asarray(values, dtype=np.float64).ravel()
+    if data.size < 8 or data.size % 2:
+        return False
+    half = data.size // 2
+    low = data[1:half]
+    high = data[half + 1:][::-1]
+    if low.size == 0 or low.size != high.size:
+        return False
+    # 浮点 FFT 的 k 与 N-k 走不同蝶形，镜像会有 ~1e-15 dB 量级的差异
+    return bool(np.allclose(low, high, rtol=0.0, atol=1e-6))
+
+
 def _comparison_line(left_label, left, right_label, right):
     """One-line side-by-side detection metrics (AI vs traditional baseline)."""
     fields = (("匹配", "matched", "g"), ("漏警", "missed", "g"), ("虚警", "false_alarm", "g"),
@@ -1091,6 +1111,16 @@ class MainWindow(DesktopWindow):
         self.detect_merge.addItems(["自动", "0", "1", "2", "4", "8", "16"])
         self.detect_merge.setToolTip("形态学闭运算半径（频点），用于把同一目标被衰落切开的频段合并")
         bar.addWidget(self.detect_merge)
+        bar.addWidget(QtWidgets.QLabel("频率显示"))
+        self.detect_freq_view = QtWidgets.QComboBox()
+        self.detect_freq_view.addItems(["自动", "双边", "仅正频率"])
+        self.detect_freq_view.setToolTip(
+            "横轴频率范围：自动 = 频谱关于 0 Hz 镜像（实数记录）时只显示非负频率，"
+            "复数 IQ 保留双边；仅正频率适合只用正半轴的复基带信号。"
+            "平均功率谱密度、时频图与检测框始终共用同一频率范围")
+        self.detect_freq_view.currentIndexChanged.connect(
+            lambda *_: self._apply_detect_display_mode())
+        bar.addWidget(self.detect_freq_view)
         self.detect_button = QtWidgets.QPushButton("检测所选数据")
         self.detect_button.setObjectName("primary")
         self.detect_button.clicked.connect(self.detect_selected)
@@ -1229,6 +1259,16 @@ class MainWindow(DesktopWindow):
         self.hops_sessions.setChecked(True)
         self.hops_sessions.setToolTip("勾选时在同一次任务里跑一遍会话级能量检测，给出两种粒度的指标对照")
         bar.addWidget(self.hops_sessions)
+        bar.addWidget(QtWidgets.QLabel("频率显示"))
+        self.hops_freq_view = QtWidgets.QComboBox()
+        self.hops_freq_view.addItems(["自动", "双边", "仅正频率"])
+        self.hops_freq_view.setToolTip(
+            "横轴频率范围：自动 = 频谱关于 0 Hz 镜像（实数记录）时只显示非负频率，"
+            "复数 IQ 保留双边；仅正频率适合只用正半轴的复基带信号。"
+            "平均功率谱密度、时频图与逐跳框始终共用同一频率范围")
+        self.hops_freq_view.currentIndexChanged.connect(
+            lambda *_: self._apply_hops_display_mode())
+        bar.addWidget(self.hops_freq_view)
         self.hops_button = QtWidgets.QPushButton("估计逐跳参数")
         self.hops_button.setObjectName("primary")
         self.hops_button.clicked.connect(self.hops_selected)
@@ -1851,27 +1891,44 @@ class MainWindow(DesktopWindow):
         self.start_job("detect", asset_id=asset["id"], config=config)
 
 
+    def _frequency_mask(self, choice, frequencies, spectrum_db):
+        """按“频率显示”选择给出频率轴索引掩码；``slice(None)`` 表示双边。
+
+        「自动」按频谱是否关于 0 Hz 镜像判断：实数记录的正负半轴互为镜像，
+        只看正半轴即可；复数 IQ 的双边谱都可能有信号，保持双边。检测页与
+        跳频页共用这一判据，避免再读一遍原始样本来测 ``imag == 0``。
+        """
+        if choice == "仅正频率" or (choice == "自动" and _mirrored_spectrum(spectrum_db)):
+            return frequencies >= 0
+        return slice(None)
+
     def _render_detect(self, result, arrays):
         summary = result["summary"]
         detections = summary["detections"]
         f = arrays["frequency"]
         t = arrays["frame_time"]
-        matrix = arrays["spectrogram_db"]
+        df = float(summary["freq_resolution_hz"])
+        dt = float(summary["hop_samples"]) / float(summary["sample_rate_hz"])
+        mask = self._frequency_mask(self.detect_freq_view.currentText(), f,
+                                    arrays["spectrum_db"])
+        positive_only = isinstance(mask, np.ndarray)
+        fv = f[mask]
+        matrix = arrays["spectrogram_db"][:, mask]
         boxes = arrays["detection_boxes"].reshape(-1, 4)
         baseline_boxes = (arrays["baseline_detection_boxes"].reshape(-1, 4)
                           if "baseline_detection_boxes" in arrays else [])
         is_ml = bool(summary.get("model"))
         threshold_db = float(arrays["threshold_db"].ravel()[0])
         noise_db = float(arrays["noise_floor_db"].ravel()[0])
-        df = float(summary["freq_resolution_hz"])
-        dt = float(summary["hop_samples"]) / float(summary["sample_rate_hz"])
         high = float(matrix.max()) if matrix.size else -120.0
         if arrays["spectrum_db"].size:
-            high = max(high, float(arrays["spectrum_db"].max()))
+            high = max(high, float(arrays["spectrum_db"][mask].max()))
         # 平均功率谱密度：检测依据，与本底/门限一起显示；中位数 PSD 作对照
         self.detect_spectrum.clear()
-        self.detect_spectrum.plot(f, arrays["spectrum_median_db"], pen="#9fb6cd", name="中位数 PSD（对照）")
-        self.detect_spectrum.plot(f, arrays["spectrum_db"], pen="#2365b3", name="平均 PSD（检测依据）")
+        self.detect_spectrum.plot(fv, arrays["spectrum_median_db"][mask],
+                                  pen="#9fb6cd", name="中位数 PSD（对照）")
+        self.detect_spectrum.plot(fv, arrays["spectrum_db"][mask],
+                                  pen="#2365b3", name="平均 PSD（检测依据）")
         self.detect_spectrum.addItem(pg.InfiniteLine(
             pos=threshold_db, angle=0, movable=False, pen=pg.mkPen("#e2564a", width=2)))
         self.detect_spectrum.addItem(pg.InfiniteLine(
@@ -1881,11 +1938,13 @@ class MainWindow(DesktopWindow):
             self.detect_spectrum.addItem(pg.LinearRegionItem(
                 values=(item["f_low_hz"], item["f_high_hz"]), movable=False,
                 brush=pg.mkBrush(35, 101, 179, 45), pen=pg.mkPen("#2365b3")))
-        # 时频图叠加检测框（横轴频率、纵轴时间，与图像坐标系一致）
+        # 时频图叠加检测框（横轴频率、纵轴时间）：ImageItem 为 row-major，
+        # 数组第一轴落在纵向，因此这里必须给「行=时间、列=频率」的原始矩阵；
+        # 传转置矩阵会把时频图横过来，看起来像凭空多出负频率。
         levels = [high - 80.0, high]
-        self.detect_tf_image.setImage(matrix.T, levels=levels, autoLevels=False)
-        self.detect_tf_image.setRect(QtCore.QRectF(f[0] - df / 2, t[0] - dt / 2,
-                                                   df * len(f), dt * len(t)))
+        self.detect_tf_image.setImage(matrix, levels=levels, autoLevels=False)
+        self.detect_tf_image.setRect(QtCore.QRectF(fv[0] - df / 2, t[0] - dt / 2,
+                                                   df * len(fv), dt * len(t)))
         view_box = self.detect_tf.getPlotItem().getViewBox()
         for item in self._detect_items:
             item.setParentItem(None)
@@ -1905,15 +1964,19 @@ class MainWindow(DesktopWindow):
             rectangle.setPen(pg.mkPen("#7d8fa1", width=1, style=QtCore.Qt.PenStyle.DashLine))
             rectangle.setParentItem(view_box)
             self._detect_items.append(rectangle)
-        span = float(f[-1] - f[0]) / 2.0 + df
-        self.detect_spectrum.setXRange(float(f[0]) - df / 2, float(f[-1]) + df / 2, padding=0.0)
+        low = 0.0 if positive_only else -float(summary["sample_rate_hz"]) / 2.0
+        high_edge = float(summary["sample_rate_hz"]) / 2.0
+        side = "仅正频率" if positive_only else "双边"
+        self.detect_spectrum.setXRange(low, high_edge, padding=0.0)
         self.detect_spectrum.setYRange(max(noise_db - 5.0, high - 80.0), high + 3.0, padding=0.0)
-        self.detect_tf.setXRange(float(f[0]) - df / 2, float(f[-1]) + df / 2, padding=0.0)
+        self.detect_tf.setXRange(low, high_edge, padding=0.0)
         self.detect_tf.setYRange(float(t[0]) - dt / 2, float(t[-1]) + dt / 2, padding=0.0)
-        self.detect_tf.setTitle(f"时频图与检测框 · 动态范围 80 dB · ±{_fmt_hz(span)}"
+        self.detect_tf.setTitle(f"时频图与检测框 · {side} {_fmt_hz(low)}～{_fmt_hz(high_edge)}"
+                                f" · 动态范围 80 dB"
                                 + (" · 红框 AI 检出，灰虚线传统基线" if baseline_boxes else ""))
         self.detect_spectrum.setTitle(
-            f"平均功率谱密度与检测门限 · 本底 {noise_db:.1f} dB/Hz · 门限 {threshold_db:.1f} dB/Hz"
+            f"平均功率谱密度与检测门限 · {side} {_fmt_hz(low)}～{_fmt_hz(high_edge)}"
+            f" · 本底 {noise_db:.1f} dB/Hz · 门限 {threshold_db:.1f} dB/Hz"
             f" · 带宽门限 {summary['config']['band_threshold_db']:.1f} dB")
         self.detect_table.setRowCount(len(detections))
         for row, item in enumerate(detections):
@@ -2009,22 +2072,28 @@ class MainWindow(DesktopWindow):
         sessions = result["sessions"]
         f = arrays["frequency"]
         t = arrays["frame_time"]
-        matrix = arrays["spectrogram_db"]
+        df = float(summary["freq_resolution_hz"])
+        dt = float(summary["frame_interval_s"])
+        mask = self._frequency_mask(self.hops_freq_view.currentText(), f,
+                                    arrays["spectrum_db"])
+        positive_only = isinstance(mask, np.ndarray)
+        fv = f[mask]
+        matrix = arrays["spectrogram_db"][:, mask]
         boxes = arrays["hop_boxes"].reshape(-1, 4)
         hop_ids = arrays["hop_id"].ravel().astype(int)
         hop_sessions = arrays["hop_session_id"].ravel().astype(int)
-        df = float(summary["freq_resolution_hz"])
-        dt = float(summary["frame_interval_s"])
         threshold_db = float(arrays["threshold_db"].ravel()[0])
         noise_db = float(arrays["noise_floor_db"].ravel()[0])
         high = float(matrix.max()) if matrix.size else -120.0
         if arrays["spectrum_db"].size:
-            high = max(high, float(arrays["spectrum_db"].max()))
+            high = max(high, float(arrays["spectrum_db"][mask].max()))
         colours = ["#2365b3", "#e2564a", "#2f8f5b", "#b3732a", "#7a53a8", "#3f9fb5"]
         # 平均功率谱密度：与会话级检测同一张图，逐跳频带按会话着色区分
         self.hops_spectrum.clear()
-        self.hops_spectrum.plot(f, arrays["spectrum_median_db"], pen="#9fb6cd", name="中位数 PSD（对照）")
-        self.hops_spectrum.plot(f, arrays["spectrum_db"], pen="#2365b3", name="平均 PSD（检测依据）")
+        self.hops_spectrum.plot(fv, arrays["spectrum_median_db"][mask],
+                                pen="#9fb6cd", name="中位数 PSD（对照）")
+        self.hops_spectrum.plot(fv, arrays["spectrum_db"][mask],
+                                pen="#2365b3", name="平均 PSD（检测依据）")
         self.hops_spectrum.addItem(pg.InfiniteLine(
             pos=threshold_db, angle=0, movable=False, pen=pg.mkPen("#e2564a", width=2)))
         self.hops_spectrum.addItem(pg.InfiniteLine(
@@ -2035,11 +2104,13 @@ class MainWindow(DesktopWindow):
             self.hops_spectrum.addItem(pg.LinearRegionItem(
                 values=(item["f_low_hz"], item["f_high_hz"]), movable=False,
                 brush=pg.mkBrush(colour), pen=pg.mkPen(colour)))
-        # 时频图叠加逐跳框：同一会话同色，框内时间范围就是驻留时间
+        # 时频图叠加逐跳框：同一会话同色，框内时间范围就是驻留时间。
+        # 与会话级检测同口径：row-major 的 ImageItem 纵向吃数组第一轴，
+        # 所以必须给「行=时间、列=频率」的原始矩阵，转置会让图横过来。
         levels = [high - 80.0, high]
-        self.hops_tf_image.setImage(matrix.T, levels=levels, autoLevels=False)
-        self.hops_tf_image.setRect(QtCore.QRectF(f[0] - df / 2, t[0] - dt / 2,
-                                                 df * len(f), dt * len(t)))
+        self.hops_tf_image.setImage(matrix, levels=levels, autoLevels=False)
+        self.hops_tf_image.setRect(QtCore.QRectF(fv[0] - df / 2, t[0] - dt / 2,
+                                                 df * len(fv), dt * len(t)))
         view_box = self.hops_tf.getPlotItem().getViewBox()
         for item in self._hops_items:
             item.setParentItem(None)
@@ -2053,14 +2124,19 @@ class MainWindow(DesktopWindow):
             rectangle.setPen(pg.mkPen(colour, width=2))
             rectangle.setParentItem(view_box)
             self._hops_items.append(rectangle)
-        self.hops_spectrum.setXRange(float(f[0]) - df / 2, float(f[-1]) + df / 2, padding=0.0)
+        low = 0.0 if positive_only else -float(summary["sample_rate_hz"]) / 2.0
+        high_edge = float(summary["sample_rate_hz"]) / 2.0
+        side = "仅正频率" if positive_only else "双边"
+        self.hops_spectrum.setXRange(low, high_edge, padding=0.0)
         self.hops_spectrum.setYRange(max(noise_db - 5.0, high - 80.0), high + 3.0, padding=0.0)
-        self.hops_tf.setXRange(float(f[0]) - df / 2, float(f[-1]) + df / 2, padding=0.0)
+        self.hops_tf.setXRange(low, high_edge, padding=0.0)
         self.hops_tf.setYRange(float(t[0]) - dt / 2, float(t[-1]) + dt / 2, padding=0.0)
         self.hops_spectrum.setTitle(
-            f"平均功率谱密度与逐跳频带 · 本底 {noise_db:.1f} dB/Hz · 逐帧门限 {threshold_db:.1f} dB/Hz"
+            f"平均功率谱密度与逐跳频带 · {side} {_fmt_hz(low)}～{_fmt_hz(high_edge)}"
+            f" · 本底 {noise_db:.1f} dB/Hz · 逐帧门限 {threshold_db:.1f} dB/Hz"
             f" · 频点 {df:g} Hz")
-        self.hops_tf.setTitle(f"时频图与逐跳框 · 动态范围 80 dB · 帧间隔 {dt * 1e3:.3f} ms"
+        self.hops_tf.setTitle(f"时频图与逐跳框 · {side} {_fmt_hz(low)}～{_fmt_hz(high_edge)}"
+                              f" · 动态范围 80 dB · 帧间隔 {dt * 1e3:.3f} ms"
                               f" · 同色为同一会话")
         self.hops_table.setRowCount(len(hops))
         for row, item in enumerate(hops):
@@ -2341,6 +2417,20 @@ class MainWindow(DesktopWindow):
             return
         with np.load(self.workspace.root / result["plots_path"], allow_pickle=False) as arrays:
             self._render_analysis(result, arrays)
+
+    def _rerender_tab(self, index, render):
+        """按最近一次结果重画某个标签页（切换频率显示等显示选项时用）。"""
+        result = self.tab_results.get(index)
+        if not result:
+            return
+        with np.load(self.workspace.root / result["plots_path"], allow_pickle=False) as arrays:
+            render(result, arrays)
+
+    def _apply_detect_display_mode(self):
+        self._rerender_tab(2, self._render_detect)
+
+    def _apply_hops_display_mode(self):
+        self._rerender_tab(5, self._render_hops)
 
     def _on_analyze_mode(self):
         playing_mode = self.analyze_mode.currentText() == "实时播放"

@@ -9,8 +9,8 @@ import pytest
 pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 
-from PySide6 import QtWidgets
-from signal_analysis.gui import MainWindow, SignalParamsDialog
+from PySide6 import QtCore, QtWidgets
+from signal_analysis.gui import MainWindow, SignalParamsDialog, _mirrored_spectrum
 
 
 def wait_job(app, window):
@@ -241,6 +241,38 @@ def test_detection_tab_workflow(tmp_path):
         assert len(window._detect_items) == 1
         assert window.detect_tf_image.image.ndim == 2
         assert window.detect_spectrum.listDataItems()
+        # 时频图必须按「行 = 时间、列 = 频率」绘制：数组亮斑的坐标要与检测中心
+        # 频率/时刻一致。若把矩阵转置后交给 row-major 的 ImageItem，时频图会横过来，
+        # 亮斑的横坐标会变成时间（负半轴凭空出现能量），这里的断言会立即失败。
+        with np.load(tmp_path / result["plots_path"], allow_pickle=False) as arrays:
+            matrix = arrays["spectrogram_db"]
+            frequency = arrays["frequency"]
+            frame_time = arrays["frame_time"]
+        assert window.detect_tf_image.image.shape == matrix.shape
+        row, col = np.unravel_index(int(np.argmax(matrix)), matrix.shape)
+        cell = window.detect_tf_image.mapToScene(QtCore.QPointF(col + 0.5, row + 0.5))
+        point = window.detect_tf.getPlotItem().getViewBox().mapSceneToView(cell)
+        step_hz = abs(float(frequency[1] - frequency[0]))
+        step_s = float(result["summary"]["hop_samples"]) / float(
+            result["summary"]["sample_rate_hz"])
+        assert point.x() == pytest.approx(float(frequency[col]), abs=step_hz / 2)
+        assert point.y() == pytest.approx(float(frame_time[row]), abs=step_s / 2)
+        assert frequency[col] == pytest.approx(
+            result["summary"]["detections"][0]["center_hz"], abs=3 * step_hz)
+        # 复数 IQ 的双边谱都可能有信号，「自动」保留双边；切到「仅正频率」时
+        # 平均功率谱、时频图与检测框共用同一非负频率范围
+        assert window.detect_freq_view.currentText() == "自动"
+        assert window.detect_spectrum.viewRange()[0] == pytest.approx((-500_000.0, 500_000.0))
+        window.detect_freq_view.setCurrentText("仅正频率")
+        assert window.detect_spectrum.viewRange()[0] == pytest.approx((0.0, 500_000.0))
+        assert window.detect_tf.viewRange()[0] == pytest.approx((0.0, 500_000.0))
+        assert window.detect_tf_image.image.shape[1] == matrix.shape[1] // 2
+        assert "仅正频率" in window.detect_tf.getPlotItem().titleLabel.text
+        window.detect_freq_view.setCurrentText("双边")
+        assert window.detect_tf_image.image.shape == matrix.shape
+        assert window.detect_spectrum.viewRange()[0] == pytest.approx((-500_000.0, 500_000.0))
+        window.detect_freq_view.setCurrentText("自动")
+        assert window.detect_tf_image.image.shape == matrix.shape
         assert result["metrics"]["matched"] == 1
         assert 0 < result["metrics"]["center_mae_hz"] < 2000.0
         text = window.detect_summary.toPlainText()
@@ -257,6 +289,56 @@ def test_detection_tab_workflow(tmp_path):
         config = window.last_result["summary"]["config"]
         assert window.last_result["summary"]["nfft"] == 1024
         assert config["merge_bins"] == 8 and config["max_detections"] == 4
+    finally:
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.gui
+def test_detect_page_frequency_display_for_real_record(tmp_path):
+    """实数记录的「自动」只显示非负频率；契约里没有实/复标记，判据只能是 PSD 镜像。
+
+    实数记录的负半轴只是正半轴的复共轭，画出来是重复的信息；复数 IQ 的双边谱
+    都可能有信号，必须保留。这里同时锁定时频图不再被转置绘制。
+    """
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    rate = 200_000.0
+    length = int(rate * 0.04)
+    time_axis = np.arange(length) / rate
+    rng = np.random.default_rng(11)
+    samples = (np.cos(2 * np.pi * 15_000.0 * time_axis)
+               + 0.02 * rng.standard_normal(length)).astype(np.float32)
+    # 镜像判据本身：0 Hz 与奈奎斯特频点自配对，逐点比较必须排除它们
+    assert _mirrored_spectrum([0.0, 1.0, 2.0, 3.0, 9.0, 3.0, 2.0, 1.0]) is True
+    assert _mirrored_spectrum([0.0, 1.0, 2.0, 3.0, 9.0, 4.0, 5.0, 6.0]) is False
+    assert _mirrored_spectrum(np.zeros(7)) is False
+    window = MainWindow(tmp_path)
+    window.show()
+    try:
+        window.workspace.add_samples(samples, rate, "实采记录", "imported:iq16")
+        window.refresh_assets()
+        window.assets.setCurrentItem(window.assets.item(0))
+        window.tabs.setCurrentIndex(2)
+        window.detect_nfft.setCurrentText("256")
+        window.detect_button.click()
+        wait_job(app, window)
+        result = window.last_result
+        assert result["kind"] == "detect"
+        with np.load(tmp_path / result["plots_path"], allow_pickle=False) as arrays:
+            bins = arrays["frequency"].size
+            matrix = arrays["spectrogram_db"]
+            assert _mirrored_spectrum(arrays["spectrum_db"]) is True
+        # 自动 → 折叠到非负频率，平均功率谱、时频图与检测框共用同一范围
+        assert window.detect_freq_view.currentText() == "自动"
+        assert window.detect_spectrum.viewRange()[0] == pytest.approx((0.0, rate / 2))
+        assert window.detect_tf.viewRange()[0] == pytest.approx((0.0, rate / 2))
+        assert window.detect_tf_image.image.shape == (matrix.shape[0], bins // 2)
+        assert "仅正频率" in window.detect_tf.getPlotItem().titleLabel.text
+        # 手动切到双边时负半轴依然可看（保留既有行为）
+        window.detect_freq_view.setCurrentText("双边")
+        assert window.detect_spectrum.viewRange()[0] == pytest.approx((-rate / 2, rate / 2))
+        assert window.detect_tf_image.image.shape == matrix.shape
+        assert "双边" in window.detect_tf.getPlotItem().titleLabel.text
     finally:
         window.close()
         app.processEvents()
