@@ -450,7 +450,6 @@ class SignalParamsDialog(QtWidgets.QDialog):
 
 
 class MainWindow(DesktopWindow):
-    page_title = "数据分析"
     run_task = staticmethod(_run_task)
 
     def __init__(self, workspace):
@@ -458,12 +457,16 @@ class MainWindow(DesktopWindow):
         super().__init__(Workspace(workspace), "电磁信号分析 · SignalAnalysis",
                          "离线数据 · 通用统计与时频展示 · IQ 信号生成 · 信号检测与调制识别 · "
                          "算法对比与离线报告 · 原生插件")
-        self.tabs.insertTab(1, self.build_generator(), "IQ 信号生成")
-        self.tabs.insertTab(2, self.build_detect(), "信号检测")
-        self.tabs.insertTab(3, self.build_amc(), "调制识别")
-        self.tabs.insertTab(4, self.build_compare(), "算法对比")
-        self.tabs.insertTab(5, self.build_hops(), "跳频参数")
-        self.tabs.insertTab(6, self.build_data_management(), "数据管理")
+        # 标签页由本项目统一注册与排序；公共外壳 DesktopWindow 不添加任何页面。
+        # 顺序即索引：display_result() 与各页切换按钮都按下面的位置取值。
+        self.tabs.addTab(self.build_generator(), "IQ 信号生成")
+        self.tabs.addTab(self.build_analysis(), "数据分析")
+        self.tabs.addTab(self.build_detect(), "信号检测")
+        self.tabs.addTab(self.build_amc(), "调制识别")
+        self.tabs.addTab(self.build_hops(), "跳频参数")
+        self.tabs.addTab(self.build_data_management(), "数据管理")
+        self.tabs.addTab(self.build_compare(), "算法对比")
+        self.tabs.addTab(self.build_history(), "运行记录")
         self.last_result = None
         self._play_data = None
         self._play_rate = 1.0
@@ -478,10 +481,32 @@ class MainWindow(DesktopWindow):
         self.play_timer = QtCore.QTimer(self)
         self.play_timer.setInterval(33)
         self.play_timer.timeout.connect(self._on_playback_tick)
+        self.refresh_history()
         self.refresh_assets()
 
-    def build_page(self):
-        return self.build_analysis()
+    def build_history(self):
+        box = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(box)
+        layout.addWidget(QtWidgets.QLabel("最近 100 次成功运行 · 双击查看或回放"))
+        self.history = QtWidgets.QListWidget()
+        self.history.itemDoubleClicked.connect(self.open_history)
+        layout.addWidget(self.history)
+        return box
+
+    def refresh_history(self):
+        self.history.clear()
+        for result in self.workspace.list_runs():
+            item = QtWidgets.QListWidgetItem(
+                f"{result['created_at'][:19]}  ·  {result['kind']}  ·  {result['id'][:8]}")
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, result["id"])
+            self.history.addItem(item)
+
+    def open_history(self, item):
+        try:
+            self.display_result(self.workspace.get_run(item.data(QtCore.Qt.ItemDataRole.UserRole)))
+            self.status.setText("已读取历史结果")
+        except (ValueError, OSError) as exc:
+            self.status.setText(f"无法读取历史结果：{exc}")
 
     def job_buttons(self):
         return (self.demo_button, self.import_button, self.analyze_button, self.native_button,
@@ -499,6 +524,7 @@ class MainWindow(DesktopWindow):
         return super().result_status(result)
 
     def result_ready(self, result):
+        self.refresh_history()
         self.refresh_assets()
         if result.get("kind") == "storage_report":
             self._render_data_management(result)

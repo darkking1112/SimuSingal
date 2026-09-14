@@ -6,20 +6,46 @@ from .storage import Workspace
 from .tasks import run_job
 
 class MainWindow(DesktopWindow):
-    page_title = "事件仿真"
     run_task = staticmethod(run_job)
 
     def __init__(self, workspace):
         self.events = []
-        super().__init__(Workspace(workspace), "通信仿真实验 · CommunicationSim", "通用队列模型 · 场景参数 · 事件回放")
+        super().__init__(Workspace(workspace), "通信仿真实验 · CommunicationSim",
+                         "通用队列模型 · 场景参数 · 事件回放")
+        # 标签页由本项目统一注册；公共外壳 DesktopWindow 不添加任何页面。
+        self.tabs.addTab(self.build_simulation(), "事件仿真")
+        self.tabs.addTab(self.build_history(), "运行记录")
+        self.refresh_history()
 
-    def build_page(self):
-        return self.build_simulation()
+    def build_history(self):
+        box = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(box)
+        layout.addWidget(QtWidgets.QLabel("最近 100 次成功运行 · 双击查看或回放"))
+        self.history = QtWidgets.QListWidget()
+        self.history.itemDoubleClicked.connect(self.open_history)
+        layout.addWidget(self.history)
+        return box
+
+    def refresh_history(self):
+        self.history.clear()
+        for result in self.workspace.list_runs():
+            item = QtWidgets.QListWidgetItem(
+                f"{result['created_at'][:19]}  ·  {result['kind']}  ·  {result['id'][:8]}")
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, result["id"])
+            self.history.addItem(item)
+
+    def open_history(self, item):
+        try:
+            self.display_result(self.workspace.get_run(item.data(QtCore.Qt.ItemDataRole.UserRole)))
+            self.status.setText("已读取历史结果")
+        except (ValueError, OSError) as exc:
+            self.status.setText(f"无法读取历史结果：{exc}")
 
     def job_buttons(self):
         return (self.sim_button,)
 
     def result_ready(self, result):
+        self.refresh_history()
         self.display_result(result)
 
     def build_simulation(self):
