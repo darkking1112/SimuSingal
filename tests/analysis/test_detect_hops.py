@@ -537,11 +537,11 @@ def test_gui_hops_tab_renders_result(tmp_path):
     window = MainWindow(workspace)
     window.show()
     try:
-        assert window.tabs.count() == 8
+        assert window.tabs.count() == 9
         labels = [window.tabs.tabText(index) for index in range(window.tabs.count())]
         # 页序由 signal_analysis.gui.MainWindow.__init__ 的页面注册表决定，此处钉住以免误改
         assert labels == ["IQ 信号生成", "数据分析", "信号检测", "调制识别", "跳频参数",
-                          "数据管理", "算法对比", "运行记录"]
+                          "模型训练", "数据管理", "算法对比", "运行记录"]
         assert window.hops_button.text() == "估计逐跳参数"
         assert window.hops_nfft.currentText() == "512"
         assert window.hops_sessions.isChecked()

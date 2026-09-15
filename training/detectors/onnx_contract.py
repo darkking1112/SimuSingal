@@ -252,6 +252,18 @@ def append_contract_head(model, *, layout="pixel_xyxy", image_size=0, max_boxes=
 
     if not graph.output:
         raise SystemExit("ONNX 图没有输出，无法追加契约头")
+    # Native exporters may already use our public output name. Rename that
+    # intermediate before adding a node which produces the final detections.
+    if graph.output[0].name == output_name:
+        internal_name = _namer(graph)("native_output")
+        for node in graph.node:
+            for values in (node.input, node.output):
+                for index, value in enumerate(values):
+                    if value == output_name:
+                        values[index] = internal_name
+        for value in (*graph.output, *graph.value_info):
+            if value.name == output_name:
+                value.name = internal_name
     native_output = graph.output[0].name
     # 必须在摘掉旧输出之前判断列序，否则形状推断拿不到结果
     flip, anchors = _resolve_transpose(model, columns, transpose)
@@ -364,6 +376,27 @@ def rewrite_model(model, *, layout="pixel_xyxy", image_size=0, max_boxes=DEFAULT
                                mean=mean, std=std)[0]
     model = append_contract_head(model, layout=layout, image_size=image_size,
                                  max_boxes=max_boxes, transpose=transpose)
+    # The public input name is part of the manifest contract. The original native
+    # tensor can already be called images; move that internal value out of the way.
+    public = model.graph.input[0].name
+    if public != "images":
+        names = {"images": _namer(model.graph)("native_images"), public: "images"}
+
+        def rename(graph):
+            for value in (*graph.input, *graph.output, *graph.value_info, *graph.initializer):
+                value.name = names.get(value.name, value.name)
+            for node in graph.node:
+                for values in (node.input, node.output):
+                    for index, value in enumerate(values):
+                        values[index] = names.get(value, value)
+                for attribute in node.attribute:
+                    if attribute.type == o.AttributeProto.GRAPH:
+                        rename(attribute.g)
+                    elif attribute.type == o.AttributeProto.GRAPHS:
+                        for child in attribute.graphs:
+                            rename(child)
+
+        rename(model.graph)
     model = _bump_opset(model)
     o.checker.check_model(model)
     return infer_shapes(model)

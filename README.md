@@ -2,6 +2,9 @@
 
 本仓库按方案总览实现 **两个独立应用、一个共用基础库**。
 
+「模型训练」页面支持时频图检测框标注、RT-DETR/YOLO26s 检测训练及 CNN/TCN IQ 分类训练。
+操作和环境配置见 [模型训练工作台](docs/模型训练工作台.md)。
+
 | 项目 | 业务包 | 桌面入口 | 默认数据目录 |
 | --- | --- | --- | --- |
 | 电磁信号分析 | `src/signal_analysis` | `apps/analysis_desktop/main.py` | `workspace_data/analysis` |
@@ -17,7 +20,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 # 核心依赖 + gui + dev 
 python -m pip install -e '.[gui,dev]' 
-# 所有torch 体积很大，仅在需要训练时装
+# 完整训练环境（含固定版本 TorchSig 数据生成及 ONNX 验收）
 python -m pip install -e '.[gui,dev,ml,train]'
 python -m signal_analysis gui
 python -m communication_sim gui

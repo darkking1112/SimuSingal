@@ -3,8 +3,8 @@
 为什么这个测试能在没有 torchsig 的机器上跑
 ------------------------------------------
 
-TorchSig 要求 ≥1 TB 磁盘 + 多核 + Ubuntu ≥22.04，不可能塞进 CI。因此接入被拆成
-两半：``training/build_torchsig.py``（唯一 import torchsig 的地方，**不测**）与
+生成和导入被拆成
+两半：``training/build_torchsig.py``（真实生成见 test_torchsig_real.py）与
 ``training/ingest_torchsig.py``（纯 NumPy，本文件覆盖）。测试里用项目自己的
 :func:`generate_iq` 造 IQ、用 ``torchsig_bundle.py`` 写 bundle，全程不碰 torchsig，
 并且显式断言 ``torchsig`` 从未进入 ``sys.modules``。

@@ -15,11 +15,12 @@ dev = ["pytest>=8,<10", "Cython>=3,<4", "build>=1,<2", "pyinstaller>=6,<7"]
 # AI 检测：ONNX Runtime 推理。不安装时 ml-detect 会给出安装提示，传统检测路径不受影响
 ml = ["onnxruntime>=1.17,<2"]
 # 模型训练：仅 training/ 目录下的脚本使用，不随发布包分发
-train = ["torch>=2.2,<3", "torchvision>=0.17,<1", "onnx>=1.16,<2"]
+train = ["torch>=2.2,<3", "torchvision>=0.17,<1", "onnx>=1.16,<2",
+         "onnxruntime>=1.17,<2", "torchsig==2.2.0"]
 # TorchSig 数据源：只服务 training/build_torchsig.py（生成 torchsig_bundle）。
 # 读端 training/ingest_torchsig.py 只需要 NumPy；本仓库测试不依赖该 extra。
-# 依赖重（会拉入 torch），前置条件：Ubuntu ≥ 22.04 / ≥ 4 核 / ≥ 1 TB 可用磁盘 / Python ≥ 3.10
-torchsig = ["torch>=2.2,<3", "torchvision>=0.17,<1", "torchsig>=2.2,<3"]
+# 与 train 固定相同版本；磁盘需求随数据量变化，小规模验证不要求 TB 级空间。
+torchsig = ["torch>=2.2,<3", "torchvision>=0.17,<1", "torchsig==2.2.0"]
 
 [project.scripts]
 signal-analysis = "signal_analysis.cli:main"
@@ -36,5 +37,6 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = ["gui: requires PySide6 and an offscreen Qt platform",
+           "torchsig: real TorchSig generation in an installed training environment",
            "native: builds a local C shared library",
            "ml: needs onnxruntime (the [ml] extra) and an exported ONNX model"]

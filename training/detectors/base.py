@@ -304,7 +304,8 @@ class DetectorAdapter(abc.ABC):
             opset=opset, labels=list(contract["labels"]), training=training,
             notes="；".join(note_lines),
             spectrogram_nfft=int(contract["spectrogram_nfft"]),
-            dynamic_range_db=float(contract["dynamic_range_db"]))
+            dynamic_range_db=float(contract["dynamic_range_db"]),
+            label_semantics=contract.get("label_semantics", "session_v1"))
 
 
 def _graph_opset(graph):

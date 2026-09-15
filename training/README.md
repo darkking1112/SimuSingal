@@ -1,5 +1,16 @@
 # training/ — AI 检测与调制识别模型的训练、导出与验收
 
+桌面「模型训练」已提供数据标注和外部训练入口，使用方法见
+[模型训练工作台](../docs/模型训练工作台.md)。`desktop_worker.py` 编排任务，
+`rtdetr_desktop.py` 调用 lyuwenyu v2，`desktop_evaluate.py` 做独立数值对账和标注框评估。
+这些入口不随 wheel 分发。工作台原生 ONNX 使用 RGB `[0,1]` 输入，适配时显式指定
+`input_scale=1`；不要套用下面通用适配器表中的历史缩放默认值。
+
+`pip install -e '.[train]'` 现在包含 TorchSig **2.2.0** 和 ONNX Runtime，安装后可直接
+在训练页生成 TorchSig 数据。`.[torchsig]` 保留为只安装数据源的入口。真实小样本生成、
+同种子重现、检测数据转换、显式映射到 IQ 分类数据集均有集成测试：
+`pytest tests/analysis/test_torchsig_real.py -q`。资源需求随生成规模变化，不设 TB 级磁盘门槛。
+
 本目录是 **AI 信号检测（P3）与调制识别（P4：A09 六类特征通路 + 原始 IQ 通路）的训练侧**，
 只包含脚本与文档，**不打包进 wheel**
 （`pyproject.toml` 里 `[tool.setuptools.packages.find] where = ["src"]`），因此：

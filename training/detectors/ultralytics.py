@@ -78,7 +78,7 @@ class UltralyticsAdapter(DetectorAdapter):
         model = YOLO(str(weights))
         path = Path(output) / "native.onnx"
         exported = model.export(format="onnx", imgsz=int(image_size), opset=int(opset),
-                                nms=False, half=False, dynamic=False)
+                                nms=False, half=False, dynamic=False, simplify=False)
         exported = Path(exported)
         if exported != path:
             path.write_bytes(exported.read_bytes())

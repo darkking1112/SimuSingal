@@ -156,7 +156,9 @@ def _dataset_metrics(directory, manifest_path, classes, threads):
         labels = np.asarray(store["labels"]).astype(str)
         splits = np.asarray(store["split"]).astype(str)
         snrs = np.asarray(store["snr_db"], dtype=np.float64)
-    rows = np.flatnonzero(splits != "train")
+    if not set(splits).issubset({"train", "val", "test"}):
+        raise SystemExit("数据划分只允许 train / val / test")
+    rows = np.flatnonzero(splits == "val")
     if not rows.size:
         raise SystemExit("数据集没有验证划分，无法给出独立指标")
 

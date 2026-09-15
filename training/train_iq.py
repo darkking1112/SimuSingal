@@ -57,6 +57,8 @@ def _parse_args(argv=None):
     parser.add_argument("--data", required=True, help="数据集目录（build_iq_dataset.py 的输出）")
     parser.add_argument("--arch", choices=("cnn", "tcn"), default="cnn", help="网络结构")
     parser.add_argument("--epochs", type=int, default=30, help="训练轮数")
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--events", action="store_true", help="输出 GUI 结构化进度")
     parser.add_argument("--batch-size", type=int, default=64, help="批大小")
     parser.add_argument("--learning-rate", type=float, default=1e-3, help="学习率")
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="权重衰减")
@@ -136,8 +138,10 @@ def load_dataset(directory):
 
 
 def _split(waveforms, labels, splits, snrs):
+    if not set(splits).issubset({"train", "val", "test"}):
+        raise SystemExit("数据划分只允许 train / val / test")
     train_mask = splits == "train"
-    val_mask = ~train_mask
+    val_mask = splits == "val"
     if not train_mask.any():
         raise SystemExit("数据集没有训练划分")
     if not val_mask.any():
@@ -224,7 +228,9 @@ def main(argv=None):
         train_x, train_y, val_x, val_y, classes=classes, arch=args.arch, channels=channels,
         kernel=args.kernel or None, dropout=args.dropout, epochs=args.epochs,
         batch_size=args.batch_size, learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay, patience=args.patience, seed=args.seed)
+        weight_decay=args.weight_decay, patience=args.patience, seed=args.seed,
+        device=args.device, progress=(lambda item: print(
+            "TRAIN_EVENT " + json.dumps(item, allow_nan=False), flush=True)) if args.events else None)
     print(f"\n训练完成：最佳验证准确率 {outcome['best_accuracy']:.4f}"
           f"（第 {outcome['best_epoch']} 轮，共跑 {outcome['epochs_run']} 轮）")
 
@@ -269,6 +275,7 @@ def main(argv=None):
         "channels": list(channels) if channels else None,
         "kernel": args.kernel or None,
         "seed": args.seed,
+        "device": args.device,
         "best_epoch": outcome["best_epoch"],
         "best_validation_accuracy": outcome["best_accuracy"],
         "validation": validation,
@@ -288,6 +295,10 @@ def main(argv=None):
     if manifest["classes"] != classes:
         raise SystemExit("清单里的类别顺序与训练时不一致，请删除清单后重跑")
     print(f"  清单类别：{manifest['classes']}（标签集合 {manifest['class_set']}）")
+    (onnx_dir / "metrics.json").write_text(json.dumps(
+        {"validation": validation, "history": outcome["history"],
+         "note": "验证集标签评分；独立于资产 generation 真值评分"},
+        ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
 
     # 用推理端入口再评一次：确认"训练用的模型"和"清单指向的模型"是同一个
     from signal_analysis.ml.iq import iq_scores

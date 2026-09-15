@@ -4,17 +4,16 @@
 这是全仓库**唯一** import ``torchsig`` 的地方
 --------------------------------------------
 
-TorchSig 的官方前置条件是 Ubuntu ≥ 22.04、≥ 4 核、≥ 1 TB 可用磁盘、Python ≥ 3.10
-——开发机和 CI 基本都不满足。所以本项目把"用 TorchSig 造数据"和"把数据接进项目"
-彻底分开：
+TorchSig 已包含在项目的 ``.[train]`` 依赖中，也可单独安装 ``.[torchsig]``。
+生成规模决定资源用量，小样本验证不需要 TB 级磁盘。项目仍把生成和导入分开：
 
 * 本脚本：唯一依赖 torchsig 的地方，负责生成 IQ 与信号实例元数据，写出
   ``torchsig_bundle_v1``（格式定义见 ``training/torchsig_bundle.py``）；
 * ``training/ingest_torchsig.py``：只依赖 NumPy，把 bundle 转成本项目的
   ``tf_image_v1`` 数据集，**没有 torchsig 也能跑，并被单元测试覆盖**。
 
-因此测试永远不会因为"没装 torchsig"而失败；torchsig 缺失时本脚本直接报错退出并
-给出安装命令与磁盘要求，而不是悄悄生成一个空数据集。
+导入端测试不依赖 TorchSig；真实生成集成测试在安装后执行。缺失时给出安装提示，
+不会悄悄生成空数据集。
 
 为什么要覆盖 TorchSig 的默认元数据
 ----------------------------------
@@ -91,9 +90,8 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 
 from torchsig_bundle import component, record, write_bundle  # noqa: E402
 
-#: TorchSig 的官方前置条件：缺 torchsig 时报错信息里要说清"为什么不推荐随手装"
-PREREQUISITES = ("Ubuntu ≥ 22.04（或等价 Linux）", "≥ 4 核 CPU", "≥ 1 TB 可用磁盘",
-                 "Python ≥ 3.10")
+#: 本项目真实生成的验证平台；磁盘需求由 count × num_iq_samples 决定。
+PREREQUISITES = ("Linux", "Python ≥ 3.10", "磁盘空间按生成规模准备")
 
 #: 从 ``SignalMetadataObject`` 上平移过来的字段（bundle 里同名同义）
 COMPONENT_ATTRS = ("center_freq", "bandwidth", "lower_freq", "upper_freq",
@@ -113,8 +111,9 @@ def _import_torchsig():
         requirements = "、".join(PREREQUISITES)
         raise SystemExit(
             "生成 TorchSig 数据需要 torchsig，请先安装：\n"
-            "  .venv/bin/python -m pip install torchsig\n"
-            f"注意 TorchSig 的官方要求是 {requirements}，CI 与多数开发机不具备；\n"
+            "  .venv/bin/python -m pip install -e '.[train]'\n"
+            "或只安装数据源：pip install torchsig==2.2.0\n"
+            f"本项目验证环境：{requirements}。\n"
             "本仓库的测试不依赖它——读端 training/ingest_torchsig.py 只需要 "
             "NumPy，可在没有 torchsig 的环境里把已生成的 bundle 转成数据集。") from exc
     return torchsig

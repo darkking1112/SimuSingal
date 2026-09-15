@@ -530,6 +530,7 @@ class MainWindow(DesktopWindow):
             "信号检测": self.build_detect,
             "调制识别": self.build_amc,
             "跳频参数": self.build_hops,
+            "模型训练": self.build_training,
             "数据管理": self.build_data_management,
             "算法对比": self.build_compare,
             "运行记录": self.build_history,
@@ -553,6 +554,17 @@ class MainWindow(DesktopWindow):
         self.play_timer.timeout.connect(self._on_playback_tick)
         self.refresh_history()
         self.refresh_assets()
+
+    def build_training(self):
+        from .training_gui import TrainingPage
+        self.training_page = TrainingPage(self)
+        return self.training_page
+
+    def closeEvent(self, event):
+        if not self.training_page.shutdown():
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _page_index(self, title):
         """按页面名取标签下标；下标只由 __init__ 的页面注册表决定。"""

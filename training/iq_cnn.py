@@ -174,7 +174,8 @@ class SoftmaxClassifier(nn.Module):
 
 def train_classifier(train_x, train_y, val_x, val_y, *, classes, arch="cnn", channels=None,
                      kernel=None, dropout=0.1, epochs=30, batch_size=64, learning_rate=1e-3,
-                     weight_decay=1e-4, patience=8, seed=0, verbose=True):
+                     weight_decay=1e-4, patience=8, seed=0, verbose=True,
+                     device="cpu", progress=None):
     """确定性训练循环（AdamW + 交叉熵 + 按验证准确率早停）。
 
     返回 ``{model, arch, best_accuracy, best_epoch, epochs_run, history}``。
@@ -192,7 +193,7 @@ def train_classifier(train_x, train_y, val_x, val_y, *, classes, arch="cnn", cha
         raise ValueError("训练集与验证集都不能为空")
 
     torch.manual_seed(seed)
-    model = build_model(arch, len(classes), channels=channels, kernel=kernel, dropout=dropout)
+    model = build_model(arch, len(classes), channels=channels, kernel=kernel, dropout=dropout).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(int(epochs), 1))
     loss_function = nn.CrossEntropyLoss()
@@ -210,17 +211,23 @@ def train_classifier(train_x, train_y, val_x, val_y, *, classes, arch="cnn", cha
         for start in range(0, order.numel(), int(batch_size)):
             index = order[start:start + int(batch_size)]
             optimizer.zero_grad()
-            loss = loss_function(model(inputs[index]), targets[index])
+            loss = loss_function(model(inputs[index].to(device)), targets[index].to(device))
             loss.backward()
             optimizer.step()
             total_loss += float(loss.detach()) * int(index.numel())
         scheduler.step()
         model.eval()
         with torch.no_grad():
-            accuracy = float((model(val_inputs).argmax(dim=1) == val_targets)
-                             .to(torch.float64).mean())
+            correct = 0
+            for start in range(0, len(val_inputs), int(batch_size)):
+                stop = start + int(batch_size)
+                correct += int((model(val_inputs[start:stop].to(device)).argmax(dim=1)
+                                == val_targets[start:stop].to(device)).sum())
+            accuracy = correct / len(val_inputs)
         history.append({"epoch": epoch, "loss": total_loss / order.numel(),
                         "validation_accuracy": accuracy})
+        if progress is not None:
+            progress(dict(history[-1]))
         if accuracy > best_accuracy:
             best_accuracy, best_epoch, stale = accuracy, epoch, 0
             best_state = {key: value.clone() for key, value in model.state_dict().items()}
@@ -233,6 +240,7 @@ def train_classifier(train_x, train_y, val_x, val_y, *, classes, arch="cnn", cha
                   f"  验证准确率 {accuracy:.4f}（最佳 {best_accuracy:.4f} @ {best_epoch}）",
                   flush=True)
     model.load_state_dict(best_state)
+    model.cpu()
     model.eval()
     return {"model": model, "arch": arch, "best_accuracy": best_accuracy,
             "best_epoch": best_epoch, "epochs_run": len(history), "history": history}

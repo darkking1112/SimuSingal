@@ -223,6 +223,7 @@ __marimo__/
 
 # Generated training datasets (reproducible from scripts and a seed)
 training/data/
+training/runs/
 
 # 独立演示脚本的输出图像（greedy_dp.py）
 ridge_comparison.png
