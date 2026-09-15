@@ -731,7 +731,7 @@ def test_gui_renders_iq_result_without_fake_feature_columns(tmp_path, tiny_model
     window = MainWindow(workspace)
     try:
         window.display_result(run)
-        assert window.tabs.currentIndex() == 3
+        assert window.tabs.currentIndex() == window._page_index("调制识别")
         headers = [window.amc_table.horizontalHeaderItem(column).text()
                    for column in range(window.amc_table.columnCount())]
         assert headers == ["输入口径", "取值"]

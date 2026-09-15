@@ -539,8 +539,9 @@ def test_gui_hops_tab_renders_result(tmp_path):
     try:
         assert window.tabs.count() == 8
         labels = [window.tabs.tabText(index) for index in range(window.tabs.count())]
-        assert labels == ["数据分析", "IQ 信号生成", "信号检测", "调制识别", "算法对比",
-                          "跳频参数", "数据管理", "运行记录"]
+        # 页序由 signal_analysis.gui.MainWindow.__init__ 的页面注册表决定，此处钉住以免误改
+        assert labels == ["IQ 信号生成", "数据分析", "信号检测", "调制识别", "跳频参数",
+                          "数据管理", "算法对比", "运行记录"]
         assert window.hops_button.text() == "估计逐跳参数"
         assert window.hops_nfft.currentText() == "512"
         assert window.hops_sessions.isChecked()
@@ -561,7 +562,7 @@ def test_gui_hops_tab_renders_result(tmp_path):
         assert window.active_job is None, window.status.text()
         assert "失败" not in window.status.text(), window.status.text()
         assert window.last_result["kind"] == "detect_hops"
-        assert window.tabs.currentIndex() == 5
+        assert window.tabs.currentIndex() == window._page_index("跳频参数")
         assert window.hops_table.rowCount() == len(window.last_result["hops"])
         assert window.hops_session_table.rowCount() == len(window.last_result["sessions"])
         text = window.hops_summary.toPlainText()

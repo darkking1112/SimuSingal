@@ -347,8 +347,9 @@ def test_gui_amc_tab_renders_result(tmp_path):
     try:
         assert window.tabs.count() == 8
         labels = [window.tabs.tabText(index) for index in range(window.tabs.count())]
-        assert labels == ["数据分析", "IQ 信号生成", "信号检测", "调制识别", "算法对比",
-                          "跳频参数", "数据管理", "运行记录"]
+        # 页序由 signal_analysis.gui.MainWindow.__init__ 的页面注册表决定，此处钉住以免误改
+        assert labels == ["IQ 信号生成", "数据分析", "信号检测", "调制识别", "跳频参数",
+                          "数据管理", "算法对比", "运行记录"]
         assert window.amc_button.text() and window.amc_from_detect.text()
         assert "内置" in window.amc_model_status.text()  # 内置模型随包分发时应给出可用的提示
         # 无检测结果时，“取用检测结果频带”给出明确提示而不是静默无动作
@@ -363,7 +364,7 @@ def test_gui_amc_tab_renders_result(tmp_path):
                           "asset_id": asset["id"],
                           "config": {"offset_hz": 40_000.0, "bandwidth_hz": 30_000.0}})
         window.display_result(result)
-        assert window.tabs.currentIndex() == 3
+        assert window.tabs.currentIndex() == window._page_index("调制识别")
         summary = window.amc_summary.toPlainText()
         assert "QPSK" in summary and "amc-linear-default" in summary
         assert "命中" in summary  # 生成数据带真值：命中/未命中必须显示
@@ -371,9 +372,9 @@ def test_gui_amc_tab_renders_result(tmp_path):
         assert window.amc_table.rowCount() == len(AMC_FEATURES)
         assert window.amc_table.item(0, 0).text() == AMC_FEATURES[0]
         # “算法对比”页同步记录识别结果与真值命中（不切页，避免打断当前视图）
-        assert window.tabs.currentIndex() == 3
+        assert window.tabs.currentIndex() == window._page_index("调制识别")
         window.compare_from_detect()
-        assert window.tabs.currentIndex() == 4
+        assert window.tabs.currentIndex() == window._page_index("算法对比")
         table = window.compare_table
         assert table.rowCount() == 8  # 6 项预测字段 + 真值类别/命中两条
         object_column = {table.item(row, 1).text() for row in range(table.rowCount())}

@@ -60,9 +60,11 @@ def test_analysis_gui_workflow(tmp_path, monkeypatch):
     try:
         assert window.tabs.count() == 8
         assert not hasattr(window, "sim_button")
-        # 演示入口属于“IQ 信号生成”页，不在主页面（数据分析页与侧栏同一父级）。
-        assert window.tabs.widget(1).isAncestorOf(window.demo_button)
-        assert not window.tabs.widget(0).isAncestorOf(window.demo_button)
+        # 演示入口属于“IQ 信号生成”页，不在数据分析页（与侧栅同一父级）。
+        generator = window._page_index("IQ 信号生成")
+        analysis = window._page_index("数据分析")
+        assert window.tabs.widget(generator).isAncestorOf(window.demo_button)
+        assert not window.tabs.widget(analysis).isAncestorOf(window.demo_button)
         window.demo_button.click()
         wait_job(app, window)
         assert window.assets.count() == 1
@@ -106,7 +108,7 @@ def test_compare_page_pairs_ai_with_baseline(tmp_path):
             return {"true": 2, "matched": matched, "missed": 2 - matched, "false_alarm": 0,
                     "precision": precision, "recall": matched / 2, "f1": precision,
                     "center_mae_hz": 500.0, "bandwidth_mape": 0.02, "snr_mae_db": snr_mae}
-        window.tab_results[2] = {
+        window.tab_results["信号检测"] = {
             "kind": "ml_detect", "asset_id": "a1", "asset_name": "合成数据",
             "algorithm": "onnx_yolox_v1", "contract": "detect_result_v1",
             "model": {"id": "dut", "version": "1.0.0"},
@@ -114,7 +116,7 @@ def test_compare_page_pairs_ai_with_baseline(tmp_path):
                         "model": {"id": "dut", "version": "1.0.0"}},
             "metrics": metrics(2, 1.0, 0.4), "baseline_metrics": metrics(1, 0.5, 0.9)}
         window.compare_from_detect()
-        assert window.tabs.currentIndex() == 4
+        assert window.tabs.currentIndex() == window._page_index("算法对比")
         table = window.compare_table
         assert table.rowCount() == 20  # 10 项指标 × 两条路径
         assert [table.horizontalHeaderItem(i).text() for i in range(4)] == ["环节", "对象", "指标", "取值"]
@@ -124,7 +126,7 @@ def test_compare_page_pairs_ai_with_baseline(tmp_path):
         text = window.compare_summary.toPlainText()
         assert "并排对比" in text and "传统基线" in text
         # 没有识别结果时不编造内容，只提示需要先跑一次
-        window.tab_results.pop(3, None)
+        window.tab_results.pop("调制识别", None)
         window._render_compare()
         assert "调制识别" not in window.compare_summary.toPlainText()
     finally:
@@ -555,8 +557,8 @@ def test_data_management_tab_scan_and_cleanup_gating(tmp_path):
     window = MainWindow(tmp_path)
     window.show()
     try:
-        assert window.tabs.tabText(6) == "数据管理"
-        window.tabs.setCurrentIndex(6)
+        assert window.tabs.tabText(window._page_index("数据管理")) == "数据管理"
+        window.tabs.setCurrentIndex(window._page_index("数据管理"))
         assert not window.storage_cleanup_button.isEnabled()
         window.storage_scan_button.click()
         wait_job(app, window)
@@ -611,6 +613,78 @@ def test_data_management_scan_and_export_never_write_runs(tmp_path, monkeypatch)
         window._storage_report = None
         window.export_storage_report()
         assert "请先扫描" in window.status.text()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.gui
+def test_asset_selection_reports_file_in_status_bar(tmp_path):
+    """选中数据资产时状态栏第二行给出文件名/位置/大小/格式；文件缺失时明示而不是报错。"""
+    from signal_analysis.maintenance import format_bytes
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(tmp_path)
+    window.show()
+    try:
+        assert not window.status_detail.isVisible()  # 未选数据时不占位
+        window.demo_button.click()
+        wait_job(app, window)
+        window.assets.setCurrentRow(0)
+        window.asset_changed()
+        asset = window.selected_asset()
+        path = tmp_path / asset["path"]
+        text = window.status_detail.text()
+        assert text.startswith(f"文件名 {asset['name']}")
+        assert f"位置 {path}" in text
+        assert f"大小 {format_bytes(path.stat().st_size)}" in text
+        assert f"{asset['sample_count']:,} 复采样" in text
+        assert f"{asset['sample_rate']:g} Hz" in text
+        assert "complex64" in text
+        assert "内置生成 tones_v1" in text  # 内置生成的数据没有外部源文件
+        assert window.status_detail.isVisible()
+        # 完整文本保留在 text()/tooltip，界面只显示省略后的字符串
+        assert window.status_detail.toolTip() == text
+        # 任务状态写在第一行，不会覆盖资产信息（两者是分开的控件）
+        window.status.setText("任务运行中……")
+        assert window.status_detail.text() == text
+        # 文件被外部删除时提示“文件缺失”，而不是抛异常或静默空白
+        path.unlink()
+        window.asset_changed()
+        assert "文件缺失" in window.status_detail.text()
+        # 清空选择后第二行隐藏，回到不占位状态
+        window.assets.setCurrentRow(-1)
+        window.asset_changed()
+        assert window.status_detail.text() == ""
+        assert not window.status_detail.isVisible()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.gui
+def test_asset_status_reports_imported_source_format(tmp_path, monkeypatch):
+    """导入的资产要把原始来源格式一并写进状态栏（source 记录的是原始绝对路径）。"""
+    from signal_analysis.dataio import write_samples
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(tmp_path)
+    window.show()
+    try:
+        samples = np.exp(2j * np.pi * 0.01 * np.arange(4096)).astype(np.complex64)
+        source = write_samples(tmp_path / "reference", samples, "npy", sample_rate=250_000)
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
+                            lambda *args: (str(source), ""))
+        window.import_file()
+        wait_job(app, window)
+        window.assets.setCurrentRow(0)
+        window.asset_changed()
+        asset = window.selected_asset()
+        assert asset["source"] == str(source)
+        text = window.status_detail.text()
+        assert f"位置 {tmp_path / asset['path']}" in text
+        assert "complex64" in text and "导入 NPY" in text
+        assert asset["name"] in text
     finally:
         window.close()
         app.processEvents()
