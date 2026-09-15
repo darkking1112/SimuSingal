@@ -98,6 +98,70 @@ def _fmt_metric(value, spec):
     return "--" if value is None else format(float(value), spec)
 
 
+# 导入时 assets.source 记录的是原始绝对路径，这里按后缀还原可读的格式名。
+_SOURCE_FORMAT_TEXT = {".npy": "NPY", ".csv": "CSV（无表头 I,Q）",
+                       ".bin": "交织 IQ 二进制", ".raw": "交织 IQ 二进制",
+                       ".iq": "交织 IQ 二进制",
+                       ".sigmf-meta": "SigMF 双文件", ".sigmf-data": "SigMF 双文件"}
+_STORAGE_FORMAT_TEXT = "工作区 NPY（complex64 复基带 IQ）"
+# 导出物后缀到导出格式名的还原，键与 dataio.write_samples 的 fmt 一一对应。
+_EXPORT_FORMAT_TEXT = {".sigmf-meta": "SigMF 双文件", ".sigmf-data": "SigMF 双文件",
+                       ".npy": "NPY", ".csv": "CSV（无表头 I,Q）",
+                       ".bin": "交织 IQ 二进制"}
+
+
+def _asset_format(asset):
+    """资产本体格式与原始来源：内置生成的数据没有外部源文件，导入的带原路径后缀。"""
+    source = str(asset.get("source") or "")
+    if source.startswith("generated:"):
+        return f"{_STORAGE_FORMAT_TEXT} ← 内置生成 {source.split(':', 1)[1]}"
+    suffix = Path(source).suffix.lower()
+    origin = _SOURCE_FORMAT_TEXT.get(suffix) or (f"{suffix.lstrip('.')} 文件" if suffix else "未知来源")
+    return f"{_STORAGE_FORMAT_TEXT} ← 导入 {origin}"
+
+
+def _iq_binary_kind(size, sample_count):
+    """反推交织 IQ 的量化类型：int16 每复采样 4 B、float32 为 8 B。"""
+    if sample_count and size == 4 * sample_count:
+        return "int16"
+    if sample_count and size == 8 * sample_count:
+        return "float32"
+    return "类型未知"
+
+
+def _asset_exports(exports_root, asset):
+    """资产在 ``exports/`` 下的导出物，已格式化为“格式（exports/文件名）”。
+
+    导出物按 ``<asset_id>.<ext>`` 命名，所以按前缀匹配即可，不递归、不依赖内存
+    状态（重启后仍能显示）。SigMF 是一对文件，按一次导出计，只报元数据那一个，
+    免得同一份导出在状态栏里出现两条。目录不存在或读不动时返回空列表，不影响
+    状态栏其余字段。
+    """
+    prefix = f"{asset['id']}."
+    try:
+        entries = [entry for entry in Path(exports_root).iterdir()
+                   if entry.is_file() and entry.name.startswith(prefix)]
+    except OSError:
+        return []
+    names = {entry.name for entry in entries}
+    sample_count = int(asset["sample_count"])
+    found = []
+    for entry in sorted(entries, key=lambda item: item.name):
+        suffix = entry.suffix.lower()
+        if suffix == ".sigmf-data":
+            paired = entry.name.removesuffix(".sigmf-data") + ".sigmf-meta"
+            if paired in names:
+                continue  # 与同名元数据成对，按一次导出计
+        label = _EXPORT_FORMAT_TEXT.get(suffix) or f"{suffix.lstrip('.') or '无后缀'} 文件"
+        if suffix == ".bin":
+            try:
+                label += f" · {_iq_binary_kind(entry.stat().st_size, sample_count)}"
+            except OSError:
+                label += " · 类型未知"
+        found.append(f"{label}（exports/{entry.name}）")
+    return found
+
+
 def _mirrored_spectrum(values):
     """实数记录的 PSD 严格关于 0 Hz 镜像，可据此判断负半轴是否只是重复。
 
@@ -457,16 +521,22 @@ class MainWindow(DesktopWindow):
         super().__init__(Workspace(workspace), "电磁信号分析 · SignalAnalysis",
                          "离线数据 · 通用统计与时频展示 · IQ 信号生成 · 信号检测与调制识别 · "
                          "算法对比与离线报告 · 原生插件")
-        # 标签页由本项目统一注册与排序；公共外壳 DesktopWindow 不添加任何页面。
-        # 顺序即索引：display_result() 与各页切换按钮都按下面的位置取值。
-        self.tabs.addTab(self.build_generator(), "IQ 信号生成")
-        self.tabs.addTab(self.build_analysis(), "数据分析")
-        self.tabs.addTab(self.build_detect(), "信号检测")
-        self.tabs.addTab(self.build_amc(), "调制识别")
-        self.tabs.addTab(self.build_hops(), "跳频参数")
-        self.tabs.addTab(self.build_data_management(), "数据管理")
-        self.tabs.addTab(self.build_compare(), "算法对比")
-        self.tabs.addTab(self.build_history(), "运行记录")
+        # 页面注册表：顺序即界面顺序，也是全项目唯一决定标签下标的地方。
+        # 其余代码一律用 _page_index("页面名") 取下标、用页面名作 tab_results 的键，
+        # 这样调整页序不会出现“静默跳到错误页面”或“读到别的页面的结果”。
+        pages = {
+            "IQ 信号生成": self.build_generator,
+            "数据分析": self.build_analysis,
+            "信号检测": self.build_detect,
+            "调制识别": self.build_amc,
+            "跳频参数": self.build_hops,
+            "数据管理": self.build_data_management,
+            "算法对比": self.build_compare,
+            "运行记录": self.build_history,
+        }
+        self.page_index = {title: index for index, title in enumerate(pages)}
+        for title, builder in pages.items():
+            self.tabs.addTab(builder(), title)
         self.last_result = None
         self._play_data = None
         self._play_rate = 1.0
@@ -483,6 +553,10 @@ class MainWindow(DesktopWindow):
         self.play_timer.timeout.connect(self._on_playback_tick)
         self.refresh_history()
         self.refresh_assets()
+
+    def _page_index(self, title):
+        """按页面名取标签下标；下标只由 __init__ 的页面注册表决定。"""
+        return self.page_index[title]
 
     def build_history(self):
         box = QtWidgets.QWidget()
@@ -1082,9 +1156,31 @@ class MainWindow(DesktopWindow):
         if asset:
             self.asset_info.setText(f"{asset['sample_count']:,} 个复采样\n{asset['sample_rate']:g} Hz")
             self.label.setText(asset["label"])
+            self.set_status_detail(self._asset_status_text(asset))
         else:
             self.asset_info.setText("尚未选择数据")
             self.label.clear()
+            self.set_status_detail("")
+
+    def _asset_status_text(self, asset):
+        """状态栏摘要：文件名 / 相对位置 / 大小 / 资产（工作区存储格式）/ 导出。
+
+        路径一律相对工作目录，不重复写出工作目录本身；文件缺失时明确提示而不是
+        抛异常。资产与导出分开写：前者是工作区里的 NPY 本体，后者是 ``exports/``
+        下本次实际生成的副本（没有就写“无”）。
+        """
+        path = self.workspace.root / asset["path"]
+        try:
+            size = format_bytes(path.stat().st_size)
+        except OSError:
+            size = "文件缺失"
+        rate = float(asset["sample_rate"])
+        duration = _fmt_span(asset["sample_count"] / rate) if rate else "--"
+        exports = _asset_exports(self.workspace.root / "exports", asset)
+        return (f"文件名 {asset['name']}  ·  位置 {asset['path']}  ·  "
+                f"大小 {size}（{asset['sample_count']:,} 复采样 @ {rate:g} Hz · {duration}）  ·  "
+                f"资产：{_asset_format(asset)}  ·  "
+                f"导出：{'、'.join(exports) if exports else '无'}")
 
     def save_label(self):
         asset = self.selected_asset()
@@ -1547,9 +1643,9 @@ class MainWindow(DesktopWindow):
 
     def _render_compare(self, switch=False):
         """把最近一次检测（AI/传统）、逐跳与调制识别结果整理成并排表格。"""
-        detect = self.tab_results.get(2)
-        amc = self.tab_results.get(3)
-        hops = self.tab_results.get(5)
+        detect = self.tab_results.get("信号检测")
+        amc = self.tab_results.get("调制识别")
+        hops = self.tab_results.get("跳频参数")
         rows = []
         lines = []
         if detect:
@@ -1636,7 +1732,7 @@ class MainWindow(DesktopWindow):
             lines = ["还没有可对比的结果：请先在“信号检测”或“调制识别”标签页运行一次。"]
         self.compare_summary.setPlainText("\n".join(lines))
         if switch:
-            self.tabs.setCurrentIndex(4)
+            self.tabs.setCurrentIndex(self._page_index("算法对比"))
             self.status.setText(f"算法对比已刷新（{len(rows)} 行指标）")
 
 
@@ -1674,7 +1770,7 @@ class MainWindow(DesktopWindow):
 
     def use_detected_band(self):
         """把检测结果里最强目标的中心频率与带宽填进识别输入框（可手动再改）。"""
-        result = self.tab_results.get(2) or {}
+        result = self.tab_results.get("信号检测") or {}
         detections = (result.get("summary") or {}).get("detections") or []
         if not detections:
             self.status.setText("还没有检测结果：请先在“信号检测”标签页运行一次检测")
@@ -2643,7 +2739,7 @@ class MainWindow(DesktopWindow):
         self._render_storage_chart(report)
         self._fill_storage_tables(report)
         self._fill_cleanup_table(report)
-        self.tabs.setCurrentIndex(6)
+        self.tabs.setCurrentIndex(self._page_index("数据管理"))
 
     def preview_storage_cleanup(self):
         self.scan_storage(preview=True)
@@ -2757,36 +2853,37 @@ class MainWindow(DesktopWindow):
         return "".join(parts)
 
     def display_result(self, result):
+        """按结果类型写回对应页面并切过去；页面名与下标一律经由页面注册表解析。"""
         self.last_result = result
         if result["kind"] == "analysis":
-            self.tab_results[0] = result
+            self.tab_results["数据分析"] = result
             with np.load(self.workspace.root / result["plots_path"], allow_pickle=False) as arrays:
                 self._render_analysis(result, arrays)
-            self.tabs.setCurrentIndex(0)
+            self.tabs.setCurrentIndex(self._page_index("数据分析"))
         elif result["kind"] in ("detect", "ml_detect"):
-            self.tab_results[2] = result
+            self.tab_results["信号检测"] = result
             with np.load(self.workspace.root / result["plots_path"], allow_pickle=False) as arrays:
                 self._render_detect(result, arrays)
             self._render_compare()
-            self.tabs.setCurrentIndex(2)
+            self.tabs.setCurrentIndex(self._page_index("信号检测"))
         elif result["kind"] in ("detect_hops", "ml_detect_hops"):
-            self.tab_results[5] = result
+            self.tab_results["跳频参数"] = result
             with np.load(self.workspace.root / result["plots_path"], allow_pickle=False) as arrays:
                 self._render_hops(result, arrays)
             self._render_compare()
-            self.tabs.setCurrentIndex(5)
+            self.tabs.setCurrentIndex(self._page_index("跳频参数"))
         elif result["kind"] == "amc_classify":
-            self.tab_results[3] = result
+            self.tab_results["调制识别"] = result
             self._render_amc(result)
             self._render_compare()
-            self.tabs.setCurrentIndex(3)
+            self.tabs.setCurrentIndex(self._page_index("调制识别"))
         elif result["kind"] == "amc_iq_classify":
-            self.tab_results[3] = result
+            self.tab_results["调制识别"] = result
             self._render_amc_iq(result)
             self._render_compare()
-            self.tabs.setCurrentIndex(3)
+            self.tabs.setCurrentIndex(self._page_index("调制识别"))
         elif result["kind"] == "native":
-            self.tab_results[0] = result
+            self.tab_results["数据分析"] = result
             self.wave.clear()
             self.spectrum.clear()
             self.tf_image.clear()
@@ -2795,7 +2892,7 @@ class MainWindow(DesktopWindow):
             self.tf_stack.setCurrentWidget(self.time_frequency)
             self.summary.setPlainText(f"原生复制完成：{result['plugin']['id']}\n"
                                       f"输出资产：{result['derived_asset_id']}\n请选择输出资产进行分析。")
-            self.tabs.setCurrentIndex(0)
+            self.tabs.setCurrentIndex(self._page_index("数据分析"))
 
     def _effective_classification(self, summary):
         choice = self.class_combo.currentText()
@@ -2948,19 +3045,19 @@ class MainWindow(DesktopWindow):
         with np.load(self.workspace.root / result["plots_path"], allow_pickle=False) as arrays:
             self._render_analysis(result, arrays)
 
-    def _rerender_tab(self, index, render):
+    def _rerender_tab(self, title, render):
         """按最近一次结果重画某个标签页（切换频率显示等显示选项时用）。"""
-        result = self.tab_results.get(index)
+        result = self.tab_results.get(title)
         if not result:
             return
         with np.load(self.workspace.root / result["plots_path"], allow_pickle=False) as arrays:
             render(result, arrays)
 
     def _apply_detect_display_mode(self):
-        self._rerender_tab(2, self._render_detect)
+        self._rerender_tab("信号检测", self._render_detect)
 
     def _apply_hops_display_mode(self):
-        self._rerender_tab(5, self._render_hops)
+        self._rerender_tab("跳频参数", self._render_hops)
 
     def _on_analyze_mode(self):
         playing_mode = self.analyze_mode.currentText() == "实时播放"

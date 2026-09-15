@@ -620,7 +620,7 @@ def test_data_management_scan_and_export_never_write_runs(tmp_path, monkeypatch)
 
 @pytest.mark.gui
 def test_asset_selection_reports_file_in_status_bar(tmp_path):
-    """选中数据资产时状态栏第二行给出文件名/位置/大小/格式；文件缺失时明示而不是报错。"""
+    """选中数据资产时状态栏第二行给出文件名/位置/大小/资产/导出；文件缺失时明示而不报错。"""
     from signal_analysis.maintenance import format_bytes
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -636,12 +636,15 @@ def test_asset_selection_reports_file_in_status_bar(tmp_path):
         path = tmp_path / asset["path"]
         text = window.status_detail.text()
         assert text.startswith(f"文件名 {asset['name']}")
-        assert f"位置 {path}" in text
+        assert f"位置 {asset['path']}" in text  # 相对工作目录，不重复写工作目录本身
+        assert str(tmp_path) not in text
         assert f"大小 {format_bytes(path.stat().st_size)}" in text
         assert f"{asset['sample_count']:,} 复采样" in text
         assert f"{asset['sample_rate']:g} Hz" in text
-        assert "complex64" in text
+        assert "资产：" in text and "complex64" in text
         assert "内置生成 tones_v1" in text  # 内置生成的数据没有外部源文件
+        # 演示动作不导出（不读导出格式下拉框），所以导出字段如实写“无”
+        assert "导出：无" in text
         assert window.status_detail.isVisible()
         # 完整文本保留在 text()/tooltip，界面只显示省略后的字符串
         assert window.status_detail.toolTip() == text
@@ -682,9 +685,99 @@ def test_asset_status_reports_imported_source_format(tmp_path, monkeypatch):
         asset = window.selected_asset()
         assert asset["source"] == str(source)
         text = window.status_detail.text()
-        assert f"位置 {tmp_path / asset['path']}" in text
+        assert f"位置 {asset['path']}" in text
         assert "complex64" in text and "导入 NPY" in text
         assert asset["name"] in text
     finally:
         window.close()
         app.processEvents()
+
+
+def _export_label(text):
+    """从状态栏第二行取出“导出：”字段（到行尾）。"""
+    return text.split("导出：", 1)[1]
+
+
+@pytest.mark.gui
+def test_asset_status_reports_export_files(tmp_path, monkeypatch):
+    """导出字段从 exports/ 下按 <asset_id>.* 现扫现算：SigMF 成对文件只计一条，
+
+    没有导出物写“无”，且重启后（无内存状态）依然能显示。
+    """
+    from signal_analysis.dataio import write_samples
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(tmp_path)
+    window.show()
+    try:
+        # 先造一个没有导出物的资产
+        samples = np.exp(2j * np.pi * 0.01 * np.arange(4096)).astype(np.complex64)
+        source = write_samples(tmp_path / "reference", samples, "npy", sample_rate=250_000)
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
+                            lambda *args: (str(source), ""))
+        window.import_file()
+        wait_job(app, window)
+        imported = window.selected_asset()
+        assert _export_label(window.status_detail.text()) == "无"
+
+        # SigMF 双文件是按“一次导出”计的：只报元数据那条，不重复报 .sigmf-data
+        window.gen_export_format.setCurrentIndex(window.gen_export_format.findData("sigmf"))
+        window.gen_duration.setValue(.01)
+        window.generate_iq_clicked()
+        wait_job(app, window)
+        generated = window.selected_asset()
+        assert generated["id"] != imported["id"]
+        exports = _export_label(window.status_detail.text())
+        assert exports.count("SigMF 双文件") == 1
+        assert f"exports/{generated['id']}.sigmf-meta" in exports
+        assert ".sigmf-data" not in exports
+
+        # 换回没有导出物的那个资产，字段要跟着变（不是缓存的一次性快照）
+        for row in range(window.assets.count()):
+            item = window.assets.item(row)
+            if item.data(QtCore.Qt.ItemDataRole.UserRole)["id"] == imported["id"]:
+                window.assets.setCurrentItem(item)
+                break
+        assert _export_label(window.status_detail.text()) == "无"
+
+        # int16 交织二进制无法从后缀判断量化类型，按字节数反推
+        window.gen_export_format.setCurrentIndex(window.gen_export_format.findData("iq16"))
+        window.generate_iq_clicked()
+        wait_job(app, window)
+        exports = _export_label(window.status_detail.text())
+        assert "交织 IQ 二进制 · int16" in exports
+        assert "exports/" in exports and ".bin" in exports
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_asset_exports_helper_reads_disk_state(tmp_path):
+    """_asset_exports 只看磁盘：目录缺失、无匹配、成对 SigMF、无宿主名字段都安全。"""
+    from signal_analysis.gui import _asset_exports, _iq_binary_kind
+
+    root = tmp_path / "exports"
+    asset = {"id": "a" * 32, "sample_count": 100}
+    assert _asset_exports(root, asset) == []  # 目录还不存在
+    root.mkdir()
+    assert _asset_exports(root, asset) == []  # 空目录
+    # 别人资产的导出物不能被串到本资产名下
+    (root / f"{'b' * 32}.csv").write_bytes(b"0,0\n")
+    assert _asset_exports(root, asset) == []
+    # SigMF 成对：只报元数据；只有数据文件（半成品）时如实报出来
+    (root / f"{asset['id']}.sigmf-meta").write_text("{}")
+    (root / f"{asset['id']}.sigmf-data").write_bytes(b"\0" * 800)
+    assert _asset_exports(root, asset) == [f"SigMF 双文件（exports/{asset['id']}.sigmf-meta）"]
+    (root / f"{asset['id']}.sigmf-meta").unlink()
+    assert _asset_exports(root, asset) == [f"SigMF 双文件（exports/{asset['id']}.sigmf-data）"]
+    # 未知后缀不隐藏，照原样列出来（多个导出物按文件名排序，.dat 在 .sigmf-data 之前）
+    (root / f"{asset['id']}.dat").write_bytes(b"\0")
+    assert _asset_exports(root, asset) == [
+        f"dat 文件（exports/{asset['id']}.dat）",
+        f"SigMF 双文件（exports/{asset['id']}.sigmf-data）",
+    ]
+    # 每复采样 4 B = int16、8 B = float32，对不上就说“类型未知”
+    assert _iq_binary_kind(400, 100) == "int16"
+    assert _iq_binary_kind(800, 100) == "float32"
+    assert _iq_binary_kind(123, 100) == "类型未知"
+    assert _iq_binary_kind(800, 0) == "类型未知"  # 零采样不猜

@@ -25,6 +25,40 @@ class JobRunner(QtCore.QRunnable):
             self.signals.failed.emit(str(exc))
 
 
+class ElidedLabel(QtWidgets.QLabel):
+    """单行标签：过长时按中间省略，完整文本保留在 tooltip 与 ``text()``。
+
+    ``QLabel`` 默认按 sizeHint 要求父窗口变宽，长绝对路径会把窗口顶大；把水平
+    策略设为 ``Ignored`` 后改由布局分配宽度，超宽部分用 ``QFontMetrics.elidedText``
+    截断，既不改动 ``text()`` 语义（仍是完整文本），也不会撑大窗口。
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._full = ""
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                           QtWidgets.QSizePolicy.Policy.Preferred)
+        self.setText(text)
+
+    def setText(self, text):
+        """记录完整文本并按当前宽度重绘（真正写入控件的只是省略后的文本）。"""
+        self._full = text or ""
+        self.setToolTip(self._full)
+        self._elide()
+
+    def text(self):
+        return self._full
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self):
+        metrics = self.fontMetrics()
+        super().setText(metrics.elidedText(self._full, QtCore.Qt.TextElideMode.ElideMiddle,
+                                           max(0, self.width())))
+
+
 class DesktopWindow(QtWidgets.QMainWindow):
     def __init__(self, workspace, title, subtitle):
         super().__init__()
@@ -46,6 +80,8 @@ class DesktopWindow(QtWidgets.QMainWindow):
             QPushButton#primary {background:#2365b3;color:white;}
             QTabBar::tab {padding:11px 24px;} QTabBar::tab:selected {background:white;color:#2365b3;}
             QLabel#title {font-size:25px;font-weight:600;color:#183c65;}
+            QLabel#detail {background:white;border:1px solid #d8e1ec;border-radius:5px;
+                padding:6px 10px;color:#4a5b6e;}
         """)
         central = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(central)
@@ -62,6 +98,10 @@ class DesktopWindow(QtWidgets.QMainWindow):
         splitter.addWidget(self.tabs)
         splitter.setSizes([290, 1100])
         layout.addWidget(splitter, 1)
+        self.status_detail = ElidedLabel()
+        self.status_detail.setObjectName("detail")
+        self.status_detail.setVisible(False)
+        layout.addWidget(self.status_detail)
         bottom = QtWidgets.QHBoxLayout()
         self.status = QtWidgets.QLabel("就绪")
         bottom.addWidget(self.status, 1)
@@ -76,6 +116,12 @@ class DesktopWindow(QtWidgets.QMainWindow):
         bottom.addWidget(self.cancel_button)
         layout.addLayout(bottom)
         self.setCentralWidget(central)
+
+
+    def set_status_detail(self, text):
+        """写入或清空状态栏第二行；文案含义由各项目决定，空文本即隐藏该行。"""
+        self.status_detail.setText(text or "")
+        self.status_detail.setVisible(bool(self.status_detail.text()))
 
 
     def start_job(self, action, **kwargs):

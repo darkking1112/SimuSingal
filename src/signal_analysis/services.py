@@ -12,9 +12,10 @@ from .storage import Workspace
 
 
 def _generated_name(signals):
+    """按调制样式拼自动名；没有信号行时是“仅噪声”，别留下悬空的分隔符。"""
     styles = sorted({MODE_NAMES.get(str(signal.get("mode", "")), str(signal.get("mode", "")))
                      for signal in signals})
-    return f"IQ 生成 · {' + '.join(styles)}"
+    return f"IQ 生成 · {' + '.join(styles)}" if styles else "IQ 生成 · 仅噪声"
 
 
 def _attach_truth(payload, workspace, asset_id, summary):
