@@ -46,9 +46,13 @@ def execute(config, output):
                         "--output", str(output / "bundle"), "--count", str(config["count"]),
                         "--seed", str(config["seed"])], check=True)
         event(stage="转换时频图与检测框")
+        # TorchSig 上游偶有 ~1 Hz 带宽的实例（1024px 下不足 1 像素），撞上最小框规则时
+        # 整条记录被拒绝；GUI 由用户驱动、无法"修正 bundle 元数据"，因此显式跳过并
+        # 计数——拒绝统计会打印到日志并写入数据卡片的 ingest.rejected，不是静默丢弃。
         subprocess.run([sys.executable, "-u", str(ROOT / "training/ingest_torchsig.py"),
                         "--bundle", str(output / "bundle"), "--output", str(output / "data"),
-                        "--image-size", str(config["image_size"])], check=True)
+                        "--image-size", str(config["image_size"]), "--skip-rejected"],
+                       check=True)
         return
     if task == "iq":
         from signal_analysis.training_jobs import iq_plan
