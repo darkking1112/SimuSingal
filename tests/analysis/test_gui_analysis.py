@@ -358,6 +358,89 @@ def test_detect_page_frequency_display_for_real_record(tmp_path):
         app.processEvents()
 
 
+def _ml_render_result(tmp_path, baseline_boxes):
+    """构造最小 ``ml_detect`` 结果与 plots.npz，只覆盖渲染路径所需字段。"""
+    rate = 1_000_000.0
+    nfft = 64
+    frames = 8
+    frequency = np.linspace(-rate / 2, rate / 2, nfft, endpoint=False)
+    frame_time = np.linspace(0.0, 0.01, frames)
+    spectrogram = np.full((frames, nfft), -100.0, dtype=np.float64)
+    spectrogram[:, nfft // 2 - 2: nfft // 2 + 2] = -60.0
+    arrays = {
+        "frequency": frequency, "frame_time": frame_time,
+        "spectrogram_db": spectrogram,
+        "spectrum_db": spectrogram.mean(axis=0),
+        "spectrum_median_db": spectrogram.mean(axis=0),
+        "threshold_db": np.array([-97.0]), "noise_floor_db": np.array([-100.0]),
+        "detection_boxes": np.asarray([[0.0, 100_000.0, 0.001, 0.009],
+                                       [-200_000.0, -100_000.0, 0.001, 0.009]]),
+        "baseline_detection_boxes": np.asarray(baseline_boxes, dtype=np.float64).reshape(-1, 4),
+    }
+    relative = "runs/fake-ml/plots.npz"
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(target, **arrays)
+    detection = {"method": "ml", "centroid_hz": 50_000.0, "bandwidth_hz": 100_000.0,
+                 "t_start_s": 0.001, "t_end_s": 0.009, "power_dbfs": -10.0,
+                 "snr_db": 20.0, "session_id": None, "hopping": False, "sub_bands": 1,
+                 "bin_count": 4, "label": "emitter", "model": "fake@1.0"}
+    detections = [dict(detection, id=1, center_hz=50_000.0,
+                       f_low_hz=0.0, f_high_hz=100_000.0, confidence=0.5,
+                       occupied_f_low_hz=10_000.0, occupied_f_high_hz=90_000.0),
+                  dict(detection, id=2, center_hz=-150_000.0,
+                       f_low_hz=-200_000.0, f_high_hz=-100_000.0, confidence=0.4,
+                       occupied_f_low_hz=-190_000.0, occupied_f_high_hz=-110_000.0)]
+    summary = {
+        "algorithm": "ml_detect:fake@1.0", "contract": "detect_result_v1",
+        "snr_definition": "inband_snr_v1", "frequency_reference": "baseband_offset",
+        "sample_count": 10_000, "sample_rate_hz": rate, "duration_s": 0.01, "nfft": nfft,
+        "hop_samples": 64, "frame_count": frames, "freq_resolution_hz": rate / nfft,
+        "noise_floor_dbfs_per_hz": -100.0, "threshold_dbfs_per_hz": -97.0,
+        "config": {"nfft": nfft, "threshold_db": 3.0, "band_threshold_db": 1.5,
+                   "min_bandwidth_hz": 100.0, "min_duration_s": 0.0,
+                   "max_detections": 32, "merge_bins": 2, "score_threshold": 0.05,
+                   "iou_threshold": 0.5, "image_size": 64, "dynamic_range_db": 60.0},
+        "model": {"id": "fake", "version": "1.0", "sha256": "0" * 64,
+                  "manifest_path": "model.json", "library": "detector.onnx",
+                  "labels": ["emitter"], "training": {}, "runtime_version": "test"},
+        "image": {"layout": "time_frequency_grayscale_v1", "size": 64,
+                  "db_floor": -80.0, "db_ceiling": -20.0},
+        "raw_boxes": {"output_shape": [1, 8, 6], "rows": 8, "candidates": 2,
+                      "score_threshold": 0.05},
+        "timing": {"context_ms": 1.0, "inference_ms": 1.0, "total_ms": 2.0},
+        "detections": detections,
+    }
+    return {"kind": "ml_detect", "asset_id": "a" * 32, "asset_name": "渲染回归",
+            "plots_path": relative, "summary": summary}
+
+
+@pytest.mark.gui
+@pytest.mark.parametrize("baseline", [[], [[-200_000.0, -100_000.0, 0.001, 0.009]]])
+def test_ml_detection_render_fills_table(tmp_path, baseline):
+    """AI 检测渲染必须填充明细表格与摘要。
+
+    ``baseline_boxes`` 曾是 numpy 数组却用 ``if baseline_boxes`` 判空——布尔上下文
+    直接 ValueError：图上的框画完后渲染中断，表格与摘要整块空白（用户可见症状）。
+    """
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(tmp_path)
+    try:
+        window.display_result(_ml_render_result(tmp_path, baseline))
+        app.processEvents()
+        assert window.detect_table.rowCount() == 2
+        assert window.detect_table.item(0, 1).text() != ""
+        assert window.detect_table.item(1, 6).text().endswith("dB")
+        assert "检出目标 2 个" in window.detect_summary.toPlainText()
+        title = window.detect_tf.getPlotItem().titleLabel.text
+        assert "时频图与检测框" in title
+        if baseline:
+            assert "灰虚线传统基线" in title
+    finally:
+        window.close()
+        app.processEvents()
+
+
 @pytest.mark.gui
 def test_constellation_and_playback(tmp_path):
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])

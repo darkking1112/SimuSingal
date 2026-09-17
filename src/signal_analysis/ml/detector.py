@@ -3,8 +3,9 @@
 与传统能量检测的分工（这是两者能逐项对比的前提）：
 
 * **判决**（有没有目标、目标在哪个时频块）来自网络；
-* **辐射量**（``power_dbfs``、``snr_db``）由 :func:`detect_signals` 的同一份
-  STFT 在同一口径（``inband_snr_v1``）下测量；
+* **辐射量与频带几何**（``power_dbfs``、``snr_db``、``bandwidth_hz`` 等）
+  由 :func:`detect_signals` 的同一份 STFT 在同一口径（``inband_snr_v1``、
+  低门限测带宽）下测量，与能量路径同公式；
 * **结果契约**与传统路径完全一致，因此 :mod:`signal_analysis.evaluation`
   的匹配与误差统计无需改动就能同时评估两条路径。
 
@@ -20,7 +21,9 @@ import numpy as np
 
 from .._numeric_common import (
     _SNR_FLOOR_DB,
+    _binary_close,
     _occupied_span,
+    _true_runs,
     validate_samples,
 )
 
@@ -170,21 +173,49 @@ def _model_info(runner, manifest):
 
 
 def _merge_item(candidate, arrays, energy_summary):
-    """候选框 → 会话合并所需条目（功率、质心、时间区间、占用区间）。"""
+    """候选框 → 会话合并所需条目（功率、质心、时间区间、占用区间）。
+
+    网络只负责定位：在框内用与能量路径相同的"低门限测带宽"公式
+    （噪声底 + ``band_threshold_db``，闭运算合并后取包含谱峰的游程）
+    得到实测频带，随后功率 / 带内信噪比 / 质心 / 占用带都在这条实测带上
+    重测（:func:`measure_band`、:func:`_occupied_span` 与能量路径同一实现），
+    因此 ``bandwidth_hz`` 等物理量与能量路径同口径（见算法文档 §4.6）。
+
+    ``f_low_hz`` / ``f_high_hz`` 输出为实测频带界（与能量路径字段同义）；
+    网络的原始框仍保留在候选与 ``arrays["model_boxes"]`` 中供追溯。
+    """
     band = candidate["band"]
-    measured = measure_band(arrays, energy_summary, band,
-                            threshold_db=energy_summary["config"]["threshold_db"])
     frequency = np.asarray(arrays["frequency"], dtype=np.float64)
     resolution = float(energy_summary["freq_resolution_hz"])
+    settings = energy_summary["config"]
     bins = band_bins(frequency, band["f_low_hz"], band["f_high_hz"], resolution)
-    average_linear = 10.0 ** (np.asarray(arrays["spectrum_db"], dtype=np.float64) / 10.0)
     first, last = int(bins[0]), int(bins[-1])
-    occupancy_low, occupancy_high = _occupied_span(average_linear, first, last)
+    average_db = np.asarray(arrays["spectrum_db"], dtype=np.float64)[first:last + 1]
+    noise_floor_db = float(np.asarray(arrays["noise_floor_db"]).reshape(-1)[0])
+    edge = _binary_close(average_db > noise_floor_db + settings["band_threshold_db"],
+                         settings["merge_bins"])
+    runs = _true_runs(edge)
+    if runs:
+        peak = int(np.argmax(average_db))
+        span = next((run for run in runs if run[0] <= peak <= run[1]), runs[0])
+        measured_first, measured_last = first + span[0], first + span[1]
+    else:
+        measured_first, measured_last = first, last
+    measured_band = {
+        "f_low_hz": float(frequency[measured_first] - resolution / 2.0),
+        "f_high_hz": float(frequency[measured_last] + resolution / 2.0),
+        "t_start_s": band["t_start_s"],
+        "t_end_s": band["t_end_s"],
+    }
+    measured = measure_band(arrays, energy_summary, measured_band,
+                            threshold_db=settings["threshold_db"])
+    average_linear = 10.0 ** (np.asarray(arrays["spectrum_db"], dtype=np.float64) / 10.0)
+    occupancy_low, occupancy_high = _occupied_span(average_linear, measured_first, measured_last)
     return {
-        "center_hz": 0.5 * (band["f_low_hz"] + band["f_high_hz"]),
+        "center_hz": 0.5 * (measured_band["f_low_hz"] + measured_band["f_high_hz"]),
         "centroid_hz": measured["centroid_hz"],
-        "f_low_hz": band["f_low_hz"],
-        "f_high_hz": band["f_high_hz"],
+        "f_low_hz": measured_band["f_low_hz"],
+        "f_high_hz": measured_band["f_high_hz"],
         "power_linear": measured["power_linear"],
         "intervals": measured["intervals"],
         "active_seconds": measured["active_seconds"],
@@ -226,6 +257,8 @@ def _finalise(groups, items, noise_floor_db, model_name, labels):
     boxes = []
     for index, item in enumerate(groups, start=1):
         source = sources[index - 1]
+        # 频带几何已在 _merge_item 中重测为能量路径同款实测带，带宽即其宽度；
+        # 网络的原始框只用于候选筛选，不进入物理量输出
         bandwidth = item["f_high_hz"] - item["f_low_hz"]
         noise_band = max(noise_linear * bandwidth, 1e-30)
         signal_power = max(item["power_linear"] - noise_band, 1e-30)

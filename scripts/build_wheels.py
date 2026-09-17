@@ -19,7 +19,7 @@ def main():
     if args.compile_core and args.project != "analysis":
         parser.error("当前仅分析项目的数值核心实现 Cython 编译，仿真模型仍为 Python")
     root = Path(__file__).resolve().parents[1]
-    config = json.loads((root / "packaging/projects.json").read_text())[args.project]
+    config = json.loads((root / "packaging/projects.json").read_text(encoding="utf-8"))[args.project]
     with tempfile.TemporaryDirectory(prefix=f"{args.project}-build-") as directory:
         stage = Path(directory)
         for package in ("common", config["package"]):

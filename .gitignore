@@ -227,3 +227,6 @@ training/runs/
 
 # 独立演示脚本的输出图像（greedy_dp.py）
 ridge_comparison.png
+
+# 下载/训练产生的模型权重（Ultralytics 首次运行会把 yolo26s.pt 下载到仓库根）
+*.pt

@@ -371,6 +371,15 @@ def test_gui_amc_tab_renders_result(tmp_path):
         assert "待确认" in summary  # 验收门限的待确认项必须显示给用户
         assert window.amc_table.rowCount() == len(AMC_FEATURES)
         assert window.amc_table.item(0, 0).text() == AMC_FEATURES[0]
+        # 柱状图：类别轴固定、禁用鼠标缩放/平移（类别名不应因缩放被移出视野）
+        assert window.amc_bars is not None
+        assert list(window.amc_plot.getViewBox().state["mouseEnabled"]) == [False, False]
+        xmin, xmax = window.amc_plot.viewRange()[0]
+        assert xmin == pytest.approx(-0.5)
+        assert xmax == pytest.approx(len(result["summary"]["classes"]) - 0.5)
+        tick_levels = getattr(window.amc_plot.getAxis("bottom"), "_tickLevels", None)
+        if tick_levels is not None:  # 私有属性仅在可用时核对；版本变化不应阻断测试
+            assert "FM" in "".join(str(text) for _, text in tick_levels[0])
         # “算法对比”页同步记录识别结果与真值命中（不切页，避免打断当前视图）
         assert window.tabs.currentIndex() == window._page_index("调制识别")
         window.compare_from_detect()

@@ -26,7 +26,8 @@ def execute(config, output):
         except importlib.metadata.PackageNotFoundError:
             pass
     (output / "environment.json").write_text(json.dumps(
-        {"python": sys.executable, "version": sys.version, "packages": packages}, indent=2))
+        {"python": sys.executable, "version": sys.version, "packages": packages}, indent=2),
+        encoding="utf-8")
     task = config.get("task", "iq")
     if task == "asset":
         append_asset(config["data"], config["workspace"], config["asset_id"])
@@ -89,8 +90,11 @@ def execute(config, output):
         event(stage="导出 YOLO 数据集")
         export_yolo(data, records, card, native)
         # Native model uses RGB (replicated grayscale), matching our 3-channel adapter.
+        # data.yaml 由 labels.py 以 UTF-8 写出（含中文注释），读写都必须显式指定 UTF-8
         yaml_path = native / "data.yaml"
-        yaml_path.write_text(yaml_path.read_text().replace("channels: 1", "channels: 3"))
+        yaml_path.write_text(
+            yaml_path.read_text(encoding="utf-8").replace("channels: 1", "channels: 3"),
+            encoding="utf-8")
         model = YOLO(config["weights"] or "yolo26s.pt")
 
         def progress(trainer):
@@ -125,12 +129,12 @@ def execute(config, output):
         export_coco(data, records, card, native)
         # COCO writer uses 1-based category ids; upstream remap=False requires 0-based ids.
         for path in (native / "annotations").glob("*.json"):
-            payload = json.loads(path.read_text())
+            payload = json.loads(path.read_text(encoding="utf-8"))
             for category in payload["categories"]:
                 category["id"] -= 1
             for annotation in payload["annotations"]:
                 annotation["category_id"] -= 1
-            path.write_text(json.dumps(payload))
+            path.write_text(json.dumps(payload), encoding="utf-8")
         event(stage="RT-DETRv2 训练与原生导出")
         subprocess.run([sys.executable, "-u", str(ROOT / "training/rtdetr_desktop.py"),
                         "--config", str(output / "experiment.json")], check=True)
@@ -144,7 +148,7 @@ def execute(config, output):
     from desktop_evaluate import verify_native, evaluate
     event(stage="原生与契约模型数值对账")
     parity = verify_native(model_dir / "native.onnx", model_dir / "detector.onnx", size)
-    (output / "native_parity.json").write_text(json.dumps(parity, indent=2))
+    (output / "native_parity.json").write_text(json.dumps(parity, indent=2), encoding="utf-8")
     event(stage="按人工/数据集标签评估")
     evaluate(data, model_dir / "detector.onnx", model_dir / "metrics.json")
     event(stage="模型契约验收")

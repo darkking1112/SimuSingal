@@ -1551,8 +1551,10 @@ class MainWindow(DesktopWindow):
         bar.addWidget(width_row)
         self.amc_button = QtWidgets.QPushButton("识别所选数据")
         self.amc_button.setObjectName("primary")
+        self.amc_button.setToolTip(
+            "对左侧选中的数据资产按当前分析频带开始调制识别；模型清单若声明"
+            " iq_waveform_v1 则自动走原始 IQ 通路")
         self.amc_button.clicked.connect(self.amc_classify_selected)
-        bar.addWidget(self.amc_button)
         self.amc_from_detect = QtWidgets.QPushButton("取用检测结果频带")
         self.amc_from_detect.setToolTip(
             "把最近一次检测结果中功率最大的目标中心频率与带宽填进左侧输入框")
@@ -1570,6 +1572,7 @@ class MainWindow(DesktopWindow):
         self.amc_choose = QtWidgets.QPushButton("选择…")
         self.amc_choose.clicked.connect(self.choose_amc_model)
         model_bar.addWidget(self.amc_choose)
+        model_bar.addWidget(self.amc_button)  # 紧邻模型选择：选完模型即可点它开始识别
         self.amc_model_status = QtWidgets.QLabel()
         model_bar.addWidget(self.amc_model_status)
         model_bar.addStretch(1)
@@ -1577,6 +1580,8 @@ class MainWindow(DesktopWindow):
         grid = QtWidgets.QGridLayout()
         self.amc_plot = pg.PlotWidget(title="六类后验概率")
         self.amc_plot.setLabel("left", "概率")
+        # 类别轴与概率轴都是固定语义：禁用鼠标缩放/平移，避免类别名被移出视野
+        self.amc_plot.setMouseEnabled(x=False, y=False)
         self.amc_bars = None
         grid.addWidget(self.amc_plot, 0, 0)
         self.amc_table = QtWidgets.QTableWidget(0, 2)
@@ -1823,6 +1828,7 @@ class MainWindow(DesktopWindow):
         self.amc_plot.addItem(self.amc_bars)
         self.amc_plot.getAxis("bottom").setTicks(
             [[(float(position), labels[name]) for position, name in zip(positions, classes)]])
+        self.amc_plot.setXRange(-0.5, len(classes) - 0.5, padding=0.0)
         self.amc_plot.setYRange(0.0, max(1.0, max(values) * 1.15), padding=0.0)
         self.amc_plot.setTitle(title)
 
@@ -2152,7 +2158,7 @@ class MainWindow(DesktopWindow):
         self.detect_tf.setYRange(float(t[0]) - dt / 2, float(t[-1]) + dt / 2, padding=0.0)
         self.detect_tf.setTitle(f"时频图与检测框 · {side} {_fmt_hz(low)}～{_fmt_hz(high_edge)}"
                                 f" · 动态范围 80 dB"
-                                + (" · 红框 AI 检出，灰虚线传统基线" if baseline_boxes else ""))
+                                + (" · 红框 AI 检出，灰虚线传统基线" if len(baseline_boxes) else ""))
         self.detect_spectrum.setTitle(
             f"平均功率谱密度与检测门限 · {side} {_fmt_hz(low)}～{_fmt_hz(high_edge)}"
             f" · 本底 {noise_db:.1f} dB/Hz · 门限 {threshold_db:.1f} dB/Hz"

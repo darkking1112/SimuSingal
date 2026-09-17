@@ -11,7 +11,7 @@ def main():
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
     record_path = Path(args.config).resolve()
-    config = json.loads(record_path.read_text())["config"]
+    config = json.loads(record_path.read_text(encoding="utf-8"))["config"]
     output = record_path.parent
     upstream = Path(config["framework_path"]).resolve()
     if not (upstream / "src/core/yaml_config.py").is_file():
@@ -22,7 +22,7 @@ def main():
     from src.core import YAMLConfig
     from src.solver import TASKS
     from src.misc import dist_utils
-    card = json.loads((output / "data/dataset.json").read_text())
+    card = json.loads((output / "data/dataset.json").read_text(encoding="utf-8"))
     size = card["contract"]["image_size"]
     base = Path(config["framework_config"]).resolve()
     native = output / "native_data"
@@ -42,7 +42,7 @@ def main():
                        if split == "train" else [])}},
             "collate_fn": {"type": "BatchImageCollateFunction", "scales": None}}
     generated_path = output / "rtdetr_config.yml"
-    generated_path.write_text(yaml.safe_dump(generated))
+    generated_path.write_text(yaml.safe_dump(generated), encoding="utf-8")
     dist_utils.setup_distributed(seed=config["seed"])
     stop_monitor = threading.Event()
     log_path = output / "native_run/log.txt"
@@ -51,7 +51,8 @@ def main():
         seen = 0
         while True:
             if log_path.exists():
-                lines = log_path.read_text().splitlines()
+                # 日志由上游实现写出；errors=replace 防止上游按系统默认编码写中文时直接崩溃
+                lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
                 for line in lines[seen:]:
                     try:
                         values = json.loads(line)

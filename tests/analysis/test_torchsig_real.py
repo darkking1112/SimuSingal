@@ -34,14 +34,14 @@ def test_real_qpsk_generation_reproducible_and_ingested(tmp_path):
         assert samples.shape == (65536,) and np.iscomplexobj(samples)
         assert np.isfinite(samples).all()
         assert np.array_equal(samples, np.load(tmp_path / "repeat/iq" / path.name))
-    manifest = json.loads((first / "manifest.json").read_text())
+    manifest = json.loads((first / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["torchsig_version"] == "2.2.0"
     run_script("ingest_torchsig.py", "--bundle", first, "--output", tmp_path / "detection",
                "--image-size", 128, "--nfft", 512, tmp_path=tmp_path)
-    card = json.loads((tmp_path / "detection/dataset.json").read_text())
+    card = json.loads((tmp_path / "detection/dataset.json").read_text(encoding="utf-8"))
     assert card["ingest"]["accepted"] == 4
     assert card["ingest"]["rejected_total"] == 0
-    records = [json.loads(line) for line in (tmp_path / "detection/samples.jsonl").read_text().splitlines()]
+    records = [json.loads(line) for line in (tmp_path / "detection/samples.jsonl").read_text(encoding="utf-8").splitlines()]
     assert len(records) == 4 and all(len(r["boxes"]) == 1 for r in records)
     from signal_analysis.annotations import validate_boxes
     for record in records:

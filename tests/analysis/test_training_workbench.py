@@ -182,4 +182,39 @@ def test_failed_start_and_cancel_are_persisted(window, tmp_path):
         time.sleep(.01)
     page.stop()
     wait_process(app, page)
-    assert json.loads((page.directory / "experiment.json").read_text())["status"] == "stopped"
+    assert json.loads((page.directory / "experiment.json").read_text(encoding="utf-8"))["status"] == "stopped"
+
+
+@pytest.mark.gui
+def test_worker_output_is_decoded_as_utf8(window, tmp_path):
+    """子进程输出与 GUI 解码必须同为 UTF-8。
+
+    管道下 Python 默认按系统编码（中文 Windows=GBK）输出文字，GUI 按 UTF-8
+    解码会让中文日志全部变成乱码（训练正常、日志不可读）。
+    """
+    app, widget = window
+    page = widget.training_page
+    repo = tmp_path / "repo"
+    (repo / "training").mkdir(parents=True)
+    (repo / "training/desktop_worker.py").write_text(
+        "print('阶段：模型契约验收')\nprint('清单：detector@0.1.0 运行时 1.30.0')\n",
+        encoding="utf-8")
+    config = page.configuration()
+    config.update(task="generate", repository=str(repo), python=sys.executable)
+    page.start(config)
+    wait_process(app, page)
+    text = page.log.toPlainText()
+    assert "阶段：模型契约验收" in text
+    assert "清单：detector@0.1.0" in text
+    assert "\ufffd" not in text
+
+
+def test_worker_log_decoder_handles_legacy_gbk():
+    pytest.importorskip("PySide6")
+    pytest.importorskip("pyqtgraph")
+    from signal_analysis.training_gui import decode_worker_log
+
+    text = "清单：中文输出"
+    assert decode_worker_log(text.encode("utf-8")) == text
+    assert decode_worker_log(text.encode("gbk")) == text
+    assert isinstance(decode_worker_log(b"\xff\xfe\xff\xfe"), str)

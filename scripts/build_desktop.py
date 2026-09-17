@@ -20,7 +20,7 @@ def main():
     args = parser.parse_args()
     wheel = args.wheel.resolve(strict=True)
     root = Path(__file__).resolve().parents[1]
-    config = json.loads((root / "packaging/projects.json").read_text())[args.project]
+    config = json.loads((root / "packaging/projects.json").read_text(encoding="utf-8"))[args.project]
     with ZipFile(wheel) as archive:
         names = archive.namelist()
         if not any(name.startswith(config["package"] + "/") for name in names):

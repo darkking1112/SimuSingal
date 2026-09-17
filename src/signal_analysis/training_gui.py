@@ -18,6 +18,19 @@ from .training_jobs import iq_plan, list_experiments, save_record
 STATUS = {"running": "运行中", "success": "成功", "failed": "失败", "stopped": "已停止",
           "waiting": "等待", "interrupted": "已中断"}
 
+#: 强制结束信号；Windows 没有 SIGKILL，None 让 signal_process 直接走 QProcess.kill()
+FORCE_KILL = getattr(signal, "SIGKILL", None)
+
+
+def decode_worker_log(data):
+    """解码 worker.log 字节：新实验为 UTF-8；历史实验由管道默认编码（GBK）写出，逐级回退。"""
+    for encoding in ("utf-8", "gbk"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", "replace")
+
 
 def metric_text(report):
     def percent(value):
@@ -195,6 +208,11 @@ class TrainingPage(QtWidgets.QWidget):
                               "YOLO26s 供开发对照；RT-DETR 入口面向 lyuwenyu v2。训练依赖安装在所选 Python 环境。")
         note.setWordWrap(True)
         form.addRow(note)
+        # 启动失败时就地提示：只写在其它标签页会让用户以为按钮没反应
+        self.config_status = QtWidgets.QLabel("")
+        self.config_status.setWordWrap(True)
+        self.config_status.setStyleSheet("color: #b00020;")
+        form.addRow(self.config_status)
         self.task.currentIndexChanged.connect(self.update_models)
         self.update_models()
         scroll.setWidget(body)
@@ -249,8 +267,12 @@ class TrainingPage(QtWidgets.QWidget):
         return widget
 
     def report_error(self, error):
-        self.annotation_status.setText(str(error))
-        self.status.setText(str(error))
+        text = str(error)
+        self.annotation_status.setText(text)
+        self.status.setText(text)
+        status = getattr(self, "config_status", None)
+        if status is not None:
+            status.setText(text)
 
     def new_dataset(self):
         if self.process:
@@ -414,6 +436,7 @@ class TrainingPage(QtWidgets.QWidget):
 
     def start(self, config):
         if self.process:
+            self.report_error("已有任务正在运行；请等待完成，或到“实验与日志”页停止后再开始")
             return
         try:
             import shutil
@@ -452,6 +475,10 @@ class TrainingPage(QtWidgets.QWidget):
             environment.insert("PYTHONUNBUFFERED", "1")
             environment.insert("OMP_NUM_THREADS", "2")
             environment.insert("MKL_NUM_THREADS", "2")
+            # stdout 不是控制台时 Python 按系统编码（中文 Windows=GBK）输出；
+            # 这里强制子进程树输出 UTF-8，与 GUI 的 UTF-8 解码器（及日志文件）保持一致
+            environment.insert("PYTHONIOENCODING", "utf-8")
+            environment.insert("PYTHONUTF8", "1")
             self.process.setProcessEnvironment(environment)
             self.process.readyReadStandardOutput.connect(self.read_output)
             self.process.finished.connect(self.finished)
@@ -464,6 +491,7 @@ class TrainingPage(QtWidgets.QWidget):
             self.sections.widget(0).setEnabled(False)
             self.sections.setCurrentIndex(2)
             self.progress.setRange(0, 0)
+            self.config_status.clear()
             self.status.setText("启动训练环境…")
             self.process.start(python, ["-u", str(worker), str(self.directory / "experiment.json")])
         except (OSError, ValueError, KeyError) as exc:
@@ -546,7 +574,7 @@ class TrainingPage(QtWidgets.QWidget):
         self.status.setText("正在停止任务…")
         self.signal_process(signal.SIGTERM)
         process = self.process
-        QtCore.QTimer.singleShot(2000, lambda: self.signal_process(signal.SIGKILL)
+        QtCore.QTimer.singleShot(2000, lambda: self.signal_process(FORCE_KILL)
                                 if self.process is process else None)
 
     def signal_process(self, sig):
@@ -575,7 +603,7 @@ class TrainingPage(QtWidgets.QWidget):
             self.signal_process(signal.SIGTERM)
             self.process.waitForFinished(1000)
             if self.process:
-                self.signal_process(signal.SIGKILL)
+                self.signal_process(FORCE_KILL)
                 self.process.waitForFinished(1000)
         return self.process is None
 
@@ -610,9 +638,13 @@ class TrainingPage(QtWidgets.QWidget):
         directory = Path(record["directory"])
         path = directory / "worker.log"
         if path.is_file():
+            start = max(0, path.stat().st_size - 200000)
             with path.open("rb") as stream:
-                stream.seek(max(0, path.stat().st_size - 200000))
-                self.log.setPlainText(stream.read().decode("utf-8", "replace"))
+                stream.seek(start)
+                data = stream.read()
+            if start and b"\n" in data:  # 从中间截取时丢掉首个不完整行
+                data = data.split(b"\n", 1)[1]
+            self.log.setPlainText(decode_worker_log(data))
         else:
             self.log.clear()
         self.draw_metrics(record.get("metrics", []))
@@ -639,7 +671,7 @@ class TrainingPage(QtWidgets.QWidget):
             self.window.tabs.setCurrentIndex(self.window._page_index("调制识别"))
         else:
             path = directory / "detector.json"
-            manifest = json.loads(path.read_text())
+            manifest = json.loads(path.read_text(encoding="utf-8"))
             hop = manifest.get("training", {}).get("label_semantics") == "per_hop_v1"
             (self.window.hops_manifest if hop else self.window.ml_manifest).setText(str(path))
             self.window.tabs.setCurrentIndex(self.window._page_index("跳频参数" if hop else "信号检测"))

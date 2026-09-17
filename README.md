@@ -223,7 +223,7 @@ python benchmarks/run_smoke.py analysis
 python benchmarks/run_smoke.py simulation
 ```
 
-Windows PowerShell 先设置 `$env:QT_QPA_PLATFORM="offscreen"`。缺少 GUI 依赖或原生编译器的跳过项不能视为通过。基准脚本只记录基础流程耗时，不代表合同性能验收。
+Windows PowerShell 先设置 `$env:QT_QPA_PLATFORM="offscreen"`。该设置**只用于自动化测试**：设过之后同一个会话里再启动图形界面不会显示窗口，需先执行 `Remove-Item Env:QT_QPA_PLATFORM` 或另开一个终端。缺少 GUI 依赖或原生编译器的跳过项不能视为通过。基准脚本只记录基础流程耗时，不代表合同性能验收。
 
 ## 独立构建与发布
 

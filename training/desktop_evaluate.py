@@ -89,6 +89,7 @@ def evaluate(data, model_path, output):
             "latency_ms_p50": float(np.percentile(latency, 50)),
             "latency_ms_p95": float(np.percentile(latency, 95)),
             "timing_scope": "ONNX CPU 推理与框去重；不含 IQ 转时频图"}
-    Path(output).write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False))
+    Path(output).write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False),
+                            encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
     return report
