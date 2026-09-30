@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "/home/yj/worksrc/SimuSingal/examples/native_plugin"
+    "cmake.sourceDirectory": "/home/yj/worksrc/SimuSingal/examples/native_plugin",
+    "cmake.ignoreCMakeListsMissing": true
 }
