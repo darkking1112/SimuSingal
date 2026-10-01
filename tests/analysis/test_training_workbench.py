@@ -145,9 +145,29 @@ def test_gui_external_iq_training_export_verify_and_load(window):
     pytest.importorskip("onnx")
     app, widget = window
     page = widget.training_page
+    # 训练页不生成数据：数据集来自“所选集合”的导出（这里直接走服务等价路径）
+    from signal_analysis.tasks import run_job as service_job
+
+    collection = service_job({"workspace": str(widget.workspace.root),
+                              "action": "generate_collection", "collection_name": "训练数据",
+                              "recipe": {"contract": "gen_recipe_v1", "engine": "project",
+                                         "base_seed": 5, "count": 8,
+                                         "record": {"sample_rate_hz": {"fixed": 200000.0},
+                                                    "duration_s": {"fixed": 0.05}},
+                                         "signals": {"count": {"fixed": 1},
+                                                     "mode": {"balanced": ["qpsk", "fm"]},
+                                                     "bandwidth_ratio": {"fixed": 0.06},
+                                                     "snr_db": {"uniform": [10, 30]},
+                                                     "power_dbfs": {"fixed": -8.0}},
+                                         "labels": {"detection": "session_v1", "amc": True}}},
+                              timeout=120)
+    exported = service_job({"workspace": str(widget.workspace.root),
+                            "action": "export_training_data",
+                            "collection_id": collection["collection_id"],
+                            "task": "iq", "samples": 128}, timeout=120)
     config = page.configuration()
-    config.update(task="iq", source="generator", arch="cnn", epochs=1,
-                  per_class=3, samples=128, batch=4, snr_low=15, snr_high=25)
+    config.update(task="iq", source="existing", data=exported["path"], arch="cnn",
+                  epochs=1, batch=4)
     page.start(config)
     assert page.process is not None
     wait_process(app, page, timeout=60)
@@ -169,7 +189,7 @@ def test_failed_start_and_cancel_are_persisted(window, tmp_path):
     worker = repo / "training/desktop_worker.py"
     worker.write_text("raise RuntimeError('intentional failure')\n")
     config = page.configuration()
-    config.update(task="generate", repository=str(repo), python=sys.executable)
+    config.update(task="asset", repository=str(repo), python=sys.executable)
     page.start(config)
     wait_process(app, page)
     assert page.record["status"] == "failed"
@@ -200,7 +220,7 @@ def test_worker_output_is_decoded_as_utf8(window, tmp_path):
         "print('阶段：模型契约验收')\nprint('清单：detector@0.1.0 运行时 1.30.0')\n",
         encoding="utf-8")
     config = page.configuration()
-    config.update(task="generate", repository=str(repo), python=sys.executable)
+    config.update(task="asset", repository=str(repo), python=sys.executable)
     page.start(config)
     wait_process(app, page)
     text = page.log.toPlainText()

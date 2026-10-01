@@ -8,6 +8,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 from common.gui import DesktopWindow
 from common.reports import amc_metrics, detection_metrics
+from .collection_gen_gui import CollectionGenPanel
 from .core_api import MAX_SAMPLES, plan_signal, spectrum_row
 from .maintenance import RUN_KIND_LABELS, format_bytes, read_settings, write_settings
 from .storage import Workspace
@@ -23,6 +24,25 @@ EXPORT_FORMATS = [("不导出（仅内部资产 .npy）", ""), ("NPY 格式 (.np
                   ("CSV 两列 I,Q (.csv)", "csv"), ("交织 IQ · int16 (.bin)", "iq16"),
                   ("交织 IQ · float32 (.bin)", "iq32"),
                   ("SigMF 双文件 (.sigmf-meta + .sigmf-data)", "sigmf")]
+#: 目标粒度与来源分类的界面文案（与 storage 枚举一一对应）。
+_SCOPE_LABELS = {"whole_record": "整条记录", "session": "会话", "hop": "单跳",
+                 "segment": "片段"}
+_SOURCE_KIND_LABELS = {"imported": "导入", "generated": "生成", "derived": "衍生",
+                       "legacy": "历史", "manual": "手工", "algorithm": "算法",
+                       "external": "外部"}
+#: 目标参考参数版本的来源枚举与资产来源分类不同名（generator/import），单独映射。
+_VERSION_SOURCE_LABELS = {"generator": "生成器", "import": "导入", "manual": "手工",
+                          "external": "外部", "algorithm": "算法"}
+#: 导入页文件清单：过滤器、可收集的后缀与列序（2026-10 改版，以文件清单为中心）。
+IMPORT_FILE_FILTER = "数据 (*.npy *.csv *.bin *.raw *.iq *.sigmf-meta *.sigmf-data)"
+IMPORT_SUFFIXES = (".npy", ".csv", ".bin", ".raw", ".iq", ".sigmf-meta", ".sigmf-data")
+IMPORT_FORMAT_LABELS = {"npy": "NPY", "csv": "CSV", "binary": "IQ 二进制",
+                        "sigmf": "SigMF", "unknown": "—"}
+#: 调制下拉：A09 六类 + AM（字典外规范名）+ 未知；可自由输入其他类名（保留原名）。
+IMPORT_MODULATION_CHOICES = ("未知", "FM", "SSB", "2ASK", "QPSK", "16QAM", "64QAM", "AM")
+IMPORT_COL_FILE, IMPORT_COL_FORMAT, IMPORT_COL_RATE, IMPORT_COL_DTYPE = 0, 1, 2, 3
+IMPORT_COL_ENDIAN, IMPORT_COL_POINTS, IMPORT_COL_MOD, IMPORT_COL_NOTE = 4, 5, 6, 7
+IMPORT_COL_STATUS = 8
 # 滚动瀑布图：时间窗内最多保留的帧数与单次刷新最多计算的帧数。
 PLAY_MAX_ROWS = 360
 PLAY_MAX_ROWS_PER_TICK = 64
@@ -30,13 +50,24 @@ PLAY_MAX_ROWS_PER_TICK = 64
 PLAY_WAVE_POINTS = 2000
 
 
-def _run_task(request, cancel=None):
+def _run_task(request, cancel=None, progress=None):
     # 16M 样本的生成、导出与演示（同一点数上限）可能明显超过默认 30 s 子进程超时；
-    # 数据盘点/清理要遍历整棵工作区目录树，同样放宽。
+    # 数据盘点/清理要遍历整棵工作区目录树，同样放宽。集合生成是长任务：取消时给
+    # worker 优雅收尾的时间（封存已写数据并返回部分结果）。
     action = request.get("action")
-    timeout = 600.0 if action in ("generate", "demo") else (
-        300.0 if action in ("storage_report", "storage_cleanup") else 30.0)
-    return run_job(request, timeout=timeout, cancel=cancel)
+    if action in ("generate", "demo"):
+        timeout = 600.0
+    elif action in ("generate_collection", "torchsig_import", "export_training_data",
+                    "torchsig_probe"):
+        timeout = 3600.0
+    elif action in ("storage_report", "storage_cleanup", "migrate_legacy"):
+        timeout = 300.0
+    else:
+        timeout = 30.0
+    grace = 120.0 if action in ("generate_collection", "torchsig_import",
+                                "export_training_data") else 0.0
+    return run_job(request, timeout=timeout, cancel=cancel, progress=progress,
+                   cancel_grace=grace)
 
 
 class UnitSpinBox(QtWidgets.QDoubleSpinBox):
@@ -224,20 +255,25 @@ def _freq_spin(minimum, maximum, value, decimals):
     return _unit_row(spin), spin
 
 
-class BinaryImportDialog(QtWidgets.QDialog):
-    """Explicit datatype/endian choice for headerless interleaved IQ files."""
+class ImportBatchDialog(QtWidgets.QDialog):
+    """对所选文件统一填采样率/类型/字节序；留空或“不修改”表示保持原值。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("交织 IQ 二进制参数")
+        self.setWindowTitle("批量设置解析参数")
         layout = QtWidgets.QFormLayout(self)
+        self.sample_rate = QtWidgets.QLineEdit()
+        self.sample_rate.setPlaceholderText("Hz，留空 = 不修改；SigMF 行自动忽略")
+        layout.addRow("采样率", self.sample_rate)
         self.dtype = QtWidgets.QComboBox()
-        self.dtype.addItem("int16（有符号 16 位，按 1/32768 缩放）", "int16")
-        self.dtype.addItem("float32（单精度浮点）", "float32")
-        layout.addRow("数据类型", self.dtype)
+        self.dtype.addItem("不修改", None)
+        self.dtype.addItem("int16", "int16")
+        self.dtype.addItem("float32", "float32")
+        layout.addRow("二进制类型", self.dtype)
         self.endian = QtWidgets.QComboBox()
-        self.endian.addItem("小端（little-endian）", "little")
-        self.endian.addItem("大端（big-endian）", "big")
+        self.endian.addItem("不修改", None)
+        self.endian.addItem("小端（little）", "little")
+        self.endian.addItem("大端（big）", "big")
         layout.addRow("字节序", self.endian)
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
@@ -246,7 +282,9 @@ class BinaryImportDialog(QtWidgets.QDialog):
         layout.addRow(buttons)
 
     def values(self):
-        return self.dtype.currentData(), self.endian.currentData()
+        return {"sample_rate": self.sample_rate.text().strip(),
+                "binary_dtype": self.dtype.currentData(),
+                "endian": self.endian.currentData()}
 
 
 class SignalParamsDialog(QtWidgets.QDialog):
@@ -518,6 +556,8 @@ class MainWindow(DesktopWindow):
 
     def __init__(self, workspace):
         self.asset_limit = 100
+        self.asset_page = 0
+        self.adopt_run_ids = {}
         super().__init__(Workspace(workspace), "电磁信号分析 · SignalAnalysis",
                          "离线数据 · 通用统计与时频展示 · IQ 信号生成 · 信号检测与调制识别 · "
                          "算法对比与离线报告 · 原生插件")
@@ -525,6 +565,7 @@ class MainWindow(DesktopWindow):
         # 其余代码一律用 _page_index("页面名") 取下标、用页面名作 tab_results 的键，
         # 这样调整页序不会出现“静默跳到错误页面”或“读到别的页面的结果”。
         pages = {
+            "信号导入": self.build_import,
             "IQ 信号生成": self.build_generator,
             "数据分析": self.build_analysis,
             "信号检测": self.build_detect,
@@ -553,6 +594,7 @@ class MainWindow(DesktopWindow):
         self.play_timer.setInterval(33)
         self.play_timer.timeout.connect(self._on_playback_tick)
         self.refresh_history()
+        self.refresh_collections()
         self.refresh_assets()
 
     def build_training(self):
@@ -595,30 +637,118 @@ class MainWindow(DesktopWindow):
             self.status.setText(f"无法读取历史结果：{exc}")
 
     def job_buttons(self):
-        return (self.demo_button, self.import_button, self.analyze_button, self.native_button,
+        return (self.demo_button, self.analyze_button, self.native_button,
                 self.generate_button, self.detect_button, self.hops_button, self.ml_button,
                 self.hops_ml_button, self.amc_button, self.storage_scan_button,
-                self.storage_preview_button, self.storage_cleanup_button)
+                self.storage_preview_button, self.storage_cleanup_button,
+                self.migrate_button, self.import_start_button,
+                *self.gen_panel.action_buttons())
+
+    def set_busy(self, busy):
+        """输入控件的启停由父类处理；采纳按钮与导入按钮的可用性由页面状态决定。"""
+        super().set_busy(busy)
+        for page, button in self._adopt_buttons().items():
+            button.setEnabled(not busy and page in self.adopt_run_ids)
+        if hasattr(self, "import_start_button"):
+            self.import_start_button.setEnabled(not busy and self._import_has_ready())
+
+    def _adopt_buttons(self):
+        return {"信号检测": getattr(self, "adopt_detect_button", None),
+                "跳频参数": getattr(self, "adopt_hops_button", None),
+                "调制识别": getattr(self, "adopt_amc_button", None)}
 
     def result_status(self, result):
-        """数据盘点/清理不写运行记录，状态栏不能沿用“结果已保存”文案。"""
+        """数据盘点/清理/历史登记不写运行记录，状态栏不能沿用“结果已保存”文案。"""
         kind = result.get("kind")
         if kind == "storage_cleanup":
             return "清理完成 · 正在重新扫描（未写入运行记录）"
         if kind == "storage_report":
             return "数据盘点完成（只读，未写入运行记录）"
+        if kind == "legacy_migration":
+            return (f"历史数据登记完成：数据集 {len(result['datasets']['registered'])} · "
+                    f"实验 {len(result['experiments']['registered'])} · "
+                    f"跳过 {len(result['datasets']['skipped'])} 项（幂等，可重复执行）")
+        if kind == "recipe_preview":
+            return f"参数预览完成：{result.get('count')} 组参数（未合成 IQ）"
+        if kind == "generate_collection":
+            engine = {"project": "项目引擎", "torchsig": "TorchSig",
+                      "torchsig_import": "TorchSig 导入"}.get(result.get("engine"),
+                                                              result.get("engine"))
+            text = (f"集合生成完成（{engine}）：新建 {result.get('created', 0)}"
+                    f" / 请求 {result.get('requested', 0)} 条")
+            if result.get("failed"):
+                text += f" · 跳过 {result['failed']} 条"
+            if result.get("stopped") == "cancelled":
+                text = text.replace("完成", "已取消")
+            elif result.get("stopped") == "time_limit":
+                text += " · 达到时间上限"
+            text += (f" · 会话 {result.get('sessions', 0)}"
+                     + (f" · 逐跳 {result.get('hops')}" if result.get("hops") else ""))
+            if result.get("collection_name"):
+                text += f" · 集合「{result['collection_name']}」"
+            return text
+        if kind == "torchsig_probe":
+            if result.get("ok"):
+                return "TorchSig 环境可用：" + str(result.get("version"))
+            return f"TorchSig 环境不可用：{result.get('message')}"
+        if kind == "training_export":
+            name = {"detection": "检测", "iq": "AMC"}.get(result.get("task"))
+            return f"{name}训练数据导出完成：{result.get('samples', 0)} 个样本"
+        if kind == "import_inspect":
+            return f"已识别 {len(result.get('files', []))} 个文件（只读头部，未写入资产）"
+        if kind == "import_manifest":
+            return (f"标注清单解析完成：挂接 {result.get('matched', 0)} 条 · "
+                    f"未匹配 {len(result.get('unmatched', []))} 行（未写入资产）")
+        if kind == "import_files":
+            storage = "分片" if result.get("shard_id") else "独立文件"
+            text = (f"导入完成：成功 {result.get('created', 0)} · 失败 {result.get('failed', 0)}"
+                    f" · 目标 {result.get('targets_total', 0)} 条 · {storage}")
+            if result.get("collection_name"):
+                text += f" · 集合「{result['collection_name']}」"
+            if result.get("initial_labels"):
+                text += f" · 初始标注 {result['initial_labels']} 条"
+            return text
+        if kind == "adopt_result":
+            return (f"已采纳为参数标注：新建目标 {result.get('created_targets', 0)} · "
+                    f"更新 {result.get('updated_targets', 0)} · 标签 {result.get('labels', 0)}"
+                    + (f"（{'、'.join(result['task_sets'])}）" if result.get("task_sets") else ""))
         return super().result_status(result)
 
     def result_ready(self, result):
         self.refresh_history()
         self.refresh_assets()
-        if result.get("kind") == "storage_report":
+        if result.get("kind") == "legacy_migration":
+            self._collections_changed()
+        elif result.get("kind") == "recipe_preview":
+            self.gen_panel.show_preview(result)
+        elif result.get("kind") == "generate_collection":
+            self.last_result = result
+            self.gen_panel.show_generation(result)
+            self._collections_changed()
+        elif result.get("kind") == "torchsig_probe":
+            self.gen_panel.show_probe(result)
+        elif result.get("kind") == "training_export":
+            self.training_page.export_finished(result)
+            self.tabs.setCurrentIndex(self._page_index("模型训练"))
+        elif result.get("kind") == "adopt_result":
+            # 目标参考参数与标签已变：刷新侧栏只读详情与集合面板进度
+            self.asset_changed()
+            self.refresh_collections_panel()
+        elif result.get("kind") == "import_inspect":
+            self._apply_import_inspection(result["files"])
+        elif result.get("kind") == "import_manifest":
+            self._apply_import_manifest(result)
+        elif result.get("kind") == "import_files":
+            self._render_import_batch(result)
+        elif result.get("kind") == "storage_report":
             self._render_data_management(result)
         elif result.get("kind") == "storage_cleanup":
             self._render_storage_cleanup(result)
         elif result.get("kind") == "generate":
             self.last_result = result
             self.show_generation_result(result)
+            if result.get("collection_id"):
+                self._collections_changed()
             for row in range(self.assets.count()):
                 item = self.assets.item(row)
                 if item.data(QtCore.Qt.ItemDataRole.UserRole)["id"] == result["id"]:
@@ -636,6 +766,13 @@ class MainWindow(DesktopWindow):
         box = QtWidgets.QWidget()
         box.setMinimumWidth(250)
         layout = QtWidgets.QVBoxLayout(box)
+        layout.addWidget(QtWidgets.QLabel("信号集合"))
+        self.collection_combo = QtWidgets.QComboBox()
+        self.collection_combo.setToolTip("按集合筛选资产；零散资产指不在任何未归档集合中的资产")
+        self.collection_combo.addItem("全部资产", None)
+        self.collection_combo.addItem("零散资产", "__scattered__")
+        self.collection_combo.currentIndexChanged.connect(self.refresh_assets)
+        layout.addWidget(self.collection_combo)
         layout.addWidget(QtWidgets.QLabel("数据资产"))
         self.search = QtWidgets.QLineEdit()
         self.search.setPlaceholderText("按文件名查找")
@@ -644,29 +781,714 @@ class MainWindow(DesktopWindow):
         self.assets = QtWidgets.QListWidget()
         self.assets.currentItemChanged.connect(self.asset_changed)
         layout.addWidget(self.assets, 1)
-        more = QtWidgets.QPushButton("显示更多（最多 500 条）")
-        more.clicked.connect(self.more_assets)
-        layout.addWidget(more)
+        page_row = QtWidgets.QHBoxLayout()
+        self.prev_page = QtWidgets.QPushButton("上一页")
+        self.prev_page.clicked.connect(lambda: self.change_asset_page(-1))
+        page_row.addWidget(self.prev_page)
+        self.page_label = QtWidgets.QLabel("第 0/0 页")
+        self.page_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        page_row.addWidget(self.page_label, 1)
+        self.next_page = QtWidgets.QPushButton("下一页")
+        self.next_page.clicked.connect(lambda: self.change_asset_page(1))
+        page_row.addWidget(self.next_page)
+        layout.addLayout(page_row)
+        size_row = QtWidgets.QHBoxLayout()
+        size_row.addWidget(QtWidgets.QLabel("每页"))
+        self.page_size = QtWidgets.QComboBox()
+        self.page_size.addItems(["100", "200", "500"])
+        self.page_size.currentIndexChanged.connect(lambda *_: self.change_asset_page(0, reset=True))
+        size_row.addWidget(self.page_size)
+        self.asset_total = QtWidgets.QLabel("共 0 条")
+        size_row.addWidget(self.asset_total, 1)
+        layout.addLayout(size_row)
         self.asset_info = QtWidgets.QLabel("尚未选择数据")
         self.asset_info.setWordWrap(True)
         layout.addWidget(self.asset_info)
-        self.label = QtWidgets.QLineEdit()
-        self.label.setPlaceholderText("数据备注，最多 200 字")
-        self.label.setMaxLength(200)
-        layout.addWidget(self.label)
-        save = QtWidgets.QPushButton("保存备注")
-        save.clicked.connect(self.save_label)
-        layout.addWidget(save)
-        layout.addWidget(QtWidgets.QLabel("导入采样率"))
-        rate_row, self.sample_rate = _freq_spin(1, 1e9, 48000, 2)
-        layout.addWidget(rate_row)
-        self.import_button = QtWidgets.QPushButton("导入 IQ / SigMF")
-        self.import_button.clicked.connect(self.import_file)
-        layout.addWidget(self.import_button)
+        layout.addWidget(QtWidgets.QLabel("目标与标注（只读）"))
+        self.target_list = QtWidgets.QListWidget()
+        self.target_list.setMaximumHeight(150)
+        self.target_list.setToolTip("目标参考参数与标注状态；参数标注在“信号导入”页维护")
+        layout.addWidget(self.target_list)
         workspace_label = QtWidgets.QLabel(f"工作目录\n{self.workspace.root}")
         workspace_label.setWordWrap(True)
         layout.addWidget(workspace_label)
         return box
+
+    def build_import(self):
+        """独立导入页（方案 §7.1，2026-10 改版）：以文件清单为中心。
+
+        每个文件在清单里保留自己的解析参数（采样率/类型/字节序）、调制与备注；
+        缺参数的单元格标红、状态不为“就绪”的行不参与导入。成批参数用“批量设置”，
+        成批真值用“导入标注清单 CSV”（按文件名匹配，未匹配行原样列出）。
+        """
+        box = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(box)
+        intro = QtWidgets.QLabel(
+            "批量导入离线 IQ：先添加文件或文件夹，自动识别格式与已知参数；"
+            "缺采样率/类型/字节序的行标红、不参与导入。SigMF 自动读采样率，"
+            "二进制需显式给出类型与字节序。目标真值可用“导入标注清单 CSV…”集中申报。")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        toolbar = QtWidgets.QHBoxLayout()
+        self.import_add_files_button = QtWidgets.QPushButton("添加文件…")
+        self.import_add_files_button.clicked.connect(self.choose_import_files)
+        toolbar.addWidget(self.import_add_files_button)
+        self.import_add_folder_button = QtWidgets.QPushButton("添加文件夹…")
+        self.import_add_folder_button.setToolTip(
+            "递归收集 .npy/.csv/.bin/.raw/.iq 与 SigMF 元数据文件（SigMF 数据文件自动去重）")
+        self.import_add_folder_button.clicked.connect(self.choose_import_folder)
+        toolbar.addWidget(self.import_add_folder_button)
+        self.import_remove_button = QtWidgets.QPushButton("移除选中")
+        self.import_remove_button.clicked.connect(self.remove_import_rows)
+        toolbar.addWidget(self.import_remove_button)
+        self.import_batch_set_button = QtWidgets.QPushButton("批量设置…")
+        self.import_batch_set_button.setToolTip("对选中行统一填采样率/类型/字节序；SigMF 行采样率只读")
+        self.import_batch_set_button.clicked.connect(self.batch_set_import_params)
+        toolbar.addWidget(self.import_batch_set_button)
+        self.import_recheck_button = QtWidgets.QPushButton("重新识别")
+        self.import_recheck_button.setToolTip("对选中文件重读头部/元数据（文件被外部替换后使用）")
+        self.import_recheck_button.clicked.connect(self.recheck_import_rows)
+        toolbar.addWidget(self.import_recheck_button)
+        self.import_csv_button = QtWidgets.QPushButton("导入标注清单 CSV…")
+        self.import_csv_button.clicked.connect(self.import_csv_manifest)
+        toolbar.addWidget(self.import_csv_button)
+        self.import_csv_template_button = QtWidgets.QPushButton("导出模板")
+        self.import_csv_template_button.clicked.connect(self.export_import_template)
+        toolbar.addWidget(self.import_csv_template_button)
+        toolbar.addStretch(1)
+        self.import_count_label = QtWidgets.QLabel("清单为空")
+        toolbar.addWidget(self.import_count_label)
+        layout.addLayout(toolbar)
+
+        self.import_table = self._make_table(
+            ["文件名", "格式", "采样率", "类型", "字节序", "点数/时长", "调制", "备注", "状态"],
+            editable=True)
+        self.import_table.setMinimumHeight(220)
+        self.import_table.itemChanged.connect(self._import_item_changed)
+        layout.addWidget(self.import_table, 1)
+
+        record_group = QtWidgets.QGroupBox("归属与录制信息（应用到本批）")
+        record_row = QtWidgets.QHBoxLayout(record_group)
+        record_row.addWidget(QtWidgets.QLabel("目标集合"))
+        self.import_collection = QtWidgets.QComboBox()
+        self.import_collection.addItem("不加入集合", None)
+        self.import_collection.addItem("新建集合…", "__new__")
+        self.import_collection.currentIndexChanged.connect(
+            lambda *_: self._import_collection_changed())
+        record_row.addWidget(self.import_collection, 1)
+        self.import_collection_name = QtWidgets.QLineEdit()
+        self.import_collection_name.setPlaceholderText("新集合名称")
+        self.import_collection_name.setVisible(False)
+        record_row.addWidget(self.import_collection_name)
+        self.import_initial_labels = QtWidgets.QCheckBox("同时生成初始标注（来源 import）")
+        self.import_initial_labels.setToolTip(
+            "按目标参考参数为新资产写检测/AMC 初始标签；集合无标注集时自动建立")
+        record_row.addWidget(self.import_initial_labels)
+        record_row.addWidget(QtWidgets.QLabel("射频中心"))
+        self.import_rf_center = QtWidgets.QLineEdit()
+        self.import_rf_center.setPlaceholderText("Hz，可留空")
+        self.import_rf_center.setMaximumWidth(120)
+        record_row.addWidget(self.import_rf_center)
+        record_row.addWidget(QtWidgets.QLabel("采集时间"))
+        self.import_capture = QtWidgets.QLineEdit()
+        self.import_capture.setPlaceholderText("ISO 时间，可留空")
+        self.import_capture.setMaximumWidth(150)
+        record_row.addWidget(self.import_capture)
+        layout.addWidget(record_group)
+
+        params_bar = QtWidgets.QHBoxLayout()
+        self.import_params_toggle = QtWidgets.QToolButton()
+        self.import_params_toggle.setText("信号参数（可选）")
+        self.import_params_toggle.setCheckable(True)
+        self.import_params_toggle.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        self.import_params_toggle.toggled.connect(self._toggle_import_params)
+        params_bar.addWidget(self.import_params_toggle)
+        params_bar.addWidget(QtWidgets.QLabel(
+            "默认不建目标（未知待标注）；多目标请用 CSV 标注清单"), 1)
+        layout.addLayout(params_bar)
+
+        self.import_params_body = QtWidgets.QGroupBox("整条为单一信号（应用到所选文件）")
+        self.import_params_body.setVisible(False)
+        params_layout = QtWidgets.QHBoxLayout(self.import_params_body)
+        params_layout.addWidget(QtWidgets.QLabel("调制"))
+        self.import_single_modulation = QtWidgets.QComboBox()
+        self.import_single_modulation.addItems(list(IMPORT_MODULATION_CHOICES))
+        self.import_single_modulation.setEditable(True)
+        self.import_single_modulation.setInsertPolicy(
+            QtWidgets.QComboBox.InsertPolicy.NoInsert)
+        params_layout.addWidget(self.import_single_modulation)
+        for title, name in (("频率下限 Hz", "import_single_f_low"),
+                            ("频率上限 Hz", "import_single_f_high"),
+                            ("SNR dB", "import_single_snr")):
+            params_layout.addWidget(QtWidgets.QLabel(title))
+            field = QtWidgets.QLineEdit()
+            field.setMaximumWidth(110)
+            setattr(self, name, field)
+            params_layout.addWidget(field)
+        self.import_apply_single_button = QtWidgets.QPushButton("应用到所选文件")
+        self.import_apply_single_button.clicked.connect(self.apply_single_signal_targets)
+        params_layout.addWidget(self.import_apply_single_button)
+        params_layout.addStretch(1)
+        layout.addWidget(self.import_params_body)
+
+        advanced = QtWidgets.QGroupBox("高级")
+        advanced_row = QtWidgets.QHBoxLayout(advanced)
+        advanced_row.addWidget(QtWidgets.QLabel("写入方式"))
+        self.import_shard_mode = QtWidgets.QComboBox()
+        self.import_shard_mode.addItem("自动（按文件数）", "auto")
+        self.import_shard_mode.addItem("强制独立文件（每条一个 NPY）", "file")
+        self.import_shard_mode.addItem("强制写入分片", "shard")
+        advanced_row.addWidget(self.import_shard_mode)
+        advanced_row.addWidget(QtWidgets.QLabel("自动阈值"))
+        self.import_shard_threshold = QtWidgets.QSpinBox()
+        self.import_shard_threshold.setRange(2, 500)
+        self.import_shard_threshold.setValue(20)
+        self.import_shard_threshold.setSuffix(" 个文件")
+        self.import_shard_threshold.setToolTip("文件数达到阈值时自动写入分片（assets/shards/）")
+        self.import_shard_threshold.valueChanged.connect(
+            lambda *_: self._update_import_controls())
+        advanced_row.addWidget(self.import_shard_threshold)
+        advanced_row.addStretch(1)
+        layout.addWidget(advanced)
+
+        action_bar = QtWidgets.QHBoxLayout()
+        self.import_start_button = QtWidgets.QPushButton("开始导入")
+        self.import_start_button.setObjectName("primary")
+        self.import_start_button.setEnabled(False)
+        self.import_start_button.clicked.connect(self.start_import_batch)
+        action_bar.addWidget(self.import_start_button)
+        self.import_manage_button = QtWidgets.QPushButton("去数据管理查看")
+        self.import_manage_button.setVisible(False)
+        self.import_manage_button.clicked.connect(
+            lambda: self.tabs.setCurrentIndex(self._page_index("数据管理")))
+        action_bar.addWidget(self.import_manage_button)
+        self.import_status = QtWidgets.QLabel("")
+        self.import_status.setWordWrap(True)
+        action_bar.addWidget(self.import_status, 1)
+        layout.addLayout(action_bar)
+        self.import_csv_report = QtWidgets.QLabel("")
+        self.import_csv_report.setWordWrap(True)
+        layout.addWidget(self.import_csv_report)
+
+        self._import_filling = False
+        return box
+
+    # ------------------------------------------------------------------ 文件清单
+    def choose_import_files(self):
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, "选择要导入的 IQ 数据", "", IMPORT_FILE_FILTER)
+        self._add_import_paths(list(paths))
+
+    def choose_import_folder(self):
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择要导入的文件夹")
+        if not folder:
+            return
+        found = sorted(str(item) for item in Path(folder).rglob("*")
+                       if item.is_file() and item.suffix.lower() in IMPORT_SUFFIXES)
+        # SigMF 双文件按一条记录算：有同名 .sigmf-meta 时忽略 .sigmf-data
+        metas = {item[:-11] for item in found if item.endswith(".sigmf-meta")}
+        found = [item for item in found
+                 if not (item.endswith(".sigmf-data") and item[:-11] in metas)]
+        if len(found) > 2000:
+            found = found[:2000]
+            self.status.setText("文件夹内文件超过 2000 个，本次只加入前 2000 个")
+        self._add_import_paths(found)
+
+    def _add_import_paths(self, paths):
+        existing = {self._import_row_info(row)["path"]
+                    for row in range(self.import_table.rowCount())}
+        new = [str(item) for item in paths if str(item) not in existing]
+        if not new:
+            self.status.setText("没有新增文件（重复路径已跳过）")
+            return
+        if len(new) > 2000:
+            new = new[:2000]
+        self.start_job("import_inspect", paths=new)
+
+    def _apply_import_inspection(self, files):
+        for info in files:
+            row = self._import_row_by_path(info["path"])
+            if row is None:
+                self._append_import_row(info)
+            else:
+                self._replace_import_row(row, info)
+        self._update_import_controls()
+        self.status.setText(f"已识别 {len(files)} 个文件")
+
+    def _append_import_row(self, info):
+        row = self.import_table.rowCount()
+        self.import_table.insertRow(row)
+        self._fill_import_row(row, info)
+        self._refresh_import_row(row)
+
+    def _replace_import_row(self, row, info):
+        """重新识别：保留用户已填的采样率与调制，只刷新文件自身的信息。"""
+        previous = self._import_row_info(row)
+        info.setdefault("targets", previous.get("targets") or [])
+        rate_text = self._import_rate_text(row)
+        modulation = self._import_row_modulation(row)
+        self._fill_import_row(row, info)
+        if rate_text and info["format"] != "sigmf":
+            self._set_rate_text(row, rate_text)
+        if modulation:
+            self._set_modulation_text(row, modulation)
+        self._refresh_import_row(row)
+
+    def _fill_import_row(self, row, info):
+        self._import_filling = True
+        try:
+            flags = QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable
+            file_item = QtWidgets.QTableWidgetItem(info["name"])
+            file_item.setFlags(flags)
+            file_item.setToolTip(info["path"])
+            file_item.setData(QtCore.Qt.ItemDataRole.UserRole, info)
+            self.import_table.setItem(row, IMPORT_COL_FILE, file_item)
+            for column, text in (
+                    (IMPORT_COL_FORMAT, IMPORT_FORMAT_LABELS.get(info["format"], "—")),
+                    (IMPORT_COL_POINTS, "—"), (IMPORT_COL_STATUS, "")):
+                item = QtWidgets.QTableWidgetItem(text)
+                item.setFlags(flags)
+                self.import_table.setItem(row, column, item)
+            rate_item = QtWidgets.QTableWidgetItem(
+                f"{info['sample_rate']:g}" if info["format"] == "sigmf" else "")
+            if info["format"] == "sigmf":
+                rate_item.setFlags(flags)
+                rate_item.setToolTip("SigMF 采样率取自元数据，只读")
+            self.import_table.setItem(row, IMPORT_COL_RATE, rate_item)
+            note_item = QtWidgets.QTableWidgetItem("")
+            note_item.setToolTip("写入资产备注（最多 200 字）")
+            self.import_table.setItem(row, IMPORT_COL_NOTE, note_item)
+            if info["format"] == "binary":
+                self._install_combo(row, IMPORT_COL_DTYPE,
+                                    (("未设置", None), ("int16", "int16"),
+                                     ("float32", "float32")), None)
+                self._install_combo(row, IMPORT_COL_ENDIAN,
+                                    (("未设置", None), ("小端 little", "little"),
+                                     ("大端 big", "big")), None)
+            else:
+                auto_text = info.get("dtype") or "解析确定"
+                self._install_combo(row, IMPORT_COL_DTYPE, ((auto_text, None),), None,
+                                    enabled=False)
+                self._install_combo(row, IMPORT_COL_ENDIAN, (("自动", None),), None,
+                                    enabled=False)
+            modulation = QtWidgets.QComboBox()
+            modulation.addItems(list(IMPORT_MODULATION_CHOICES))
+            modulation.setEditable(True)
+            modulation.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
+            modulation.currentTextChanged.connect(
+                lambda *_, r=row: self._refresh_import_row(r))
+            self.import_table.setCellWidget(row, IMPORT_COL_MOD, modulation)
+        finally:
+            self._import_filling = False
+
+    def _install_combo(self, row, column, items, current, *, enabled=True):
+        combo = QtWidgets.QComboBox()
+        for label, value in items:
+            combo.addItem(label, value)
+        if current is not None:
+            index = combo.findData(current)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+        combo.setEnabled(enabled)
+        combo.currentIndexChanged.connect(lambda *_, r=row: self._refresh_import_row(r))
+        self.import_table.setCellWidget(row, column, combo)
+
+    def _import_row_info(self, row):
+        item = self.import_table.item(row, IMPORT_COL_FILE)
+        return item.data(QtCore.Qt.ItemDataRole.UserRole) if item else {}
+
+    def _set_import_row_info(self, row, **changes):
+        """写回行状态（``item.data()`` 返回的是副本，必须重新 setData 才生效）。"""
+        info = dict(self._import_row_info(row))
+        info.update(changes)
+        item = self.import_table.item(row, IMPORT_COL_FILE)
+        if item is None:
+            return info
+        item.setData(QtCore.Qt.ItemDataRole.UserRole, info)
+        self._refresh_import_row(row)
+        return info
+
+    def _import_row_by_path(self, path):
+        for row in range(self.import_table.rowCount()):
+            if self._import_row_info(row).get("path") == path:
+                return row
+        return None
+
+    def _import_rate_text(self, row):
+        item = self.import_table.item(row, IMPORT_COL_RATE)
+        return item.text().strip() if item else ""
+
+    def _set_rate_text(self, row, text):
+        self._import_filling = True
+        try:
+            item = self.import_table.item(row, IMPORT_COL_RATE)
+            if item is not None:
+                item.setText(text)
+        finally:
+            self._import_filling = False
+
+    def _set_modulation_text(self, row, text):
+        combo = self.import_table.cellWidget(row, IMPORT_COL_MOD)
+        if combo is not None:
+            combo.setCurrentText(text)
+
+    def _import_combo_value(self, row, column):
+        combo = self.import_table.cellWidget(row, column)
+        return combo.currentData() if combo is not None else None
+
+    def _import_row_rate(self, row):
+        info = self._import_row_info(row)
+        if info.get("format") == "sigmf":
+            return info.get("sample_rate")
+        text = self._import_rate_text(row)
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+        return value if value > 0 else None
+
+    def _import_row_modulation(self, row):
+        combo = self.import_table.cellWidget(row, IMPORT_COL_MOD)
+        if combo is None:
+            return None
+        text = combo.currentText().strip()
+        return None if text in ("", "未知") else text
+
+    def _import_row_note(self, row):
+        item = self.import_table.item(row, IMPORT_COL_NOTE)
+        return item.text().strip() if item else ""
+
+    def _import_samples(self, row):
+        """返回 ``(点数, 错误)``：NPY/SigMF 直接可用，二进制按类型推算。"""
+        info = self._import_row_info(row)
+        if info.get("sample_count") is not None:
+            return int(info["sample_count"]), None
+        if info.get("format") == "binary":
+            dtype = self._import_combo_value(row, IMPORT_COL_DTYPE)
+            if dtype:
+                width = 2 * int(np.dtype(dtype).itemsize)
+                size = int(info.get("size_bytes") or 0)
+                if size % width:
+                    return None, f"字节数不是 {dtype} 交织 I/Q 的整数倍（可能被截断）"
+                return size // width, None
+        return None, None
+
+    def _import_missing_fields(self, row):
+        info = self._import_row_info(row)
+        if info.get("error") or info.get("format") in ("sigmf", "unknown"):
+            return []
+        missing = []
+        if self._import_row_rate(row) is None:
+            missing.append("采样率")
+        if info.get("format") == "binary":
+            if self._import_combo_value(row, IMPORT_COL_DTYPE) is None:
+                missing.append("类型")
+            if self._import_combo_value(row, IMPORT_COL_ENDIAN) is None:
+                missing.append("字节序")
+        return missing
+
+    def _import_row_problem(self, row):
+        """返回该行的阻塞原因；``None`` = 就绪。"""
+        info = self._import_row_info(row)
+        if info.get("error"):
+            return f"解析失败：{info['error']}"
+        missing = self._import_missing_fields(row)
+        if missing:
+            return "缺" + "、".join(missing)
+        _, error = self._import_samples(row)
+        return error
+
+    def _import_row_ready(self, row):
+        return bool(self._import_row_info(row)) and self._import_row_problem(row) is None
+
+    def _refresh_import_row(self, row):
+        if self._import_filling or not self._import_row_info(row):
+            return
+        info = self._import_row_info(row)
+        count, _ = self._import_samples(row)
+        rate = self._import_row_rate(row)
+        if count is None:
+            points = "—" if info.get("format") != "csv" else "解析时确定"
+        elif rate:
+            points = f"{count:,} 点 · {count / rate:g} s"
+        else:
+            points = f"{count:,} 点"
+        problem = self._import_row_problem(row)
+        targets = info.get("targets") or []
+        suffix = f" · 目标 {len(targets)} 条" if targets else ""
+        status = (problem or "就绪") + suffix
+        item = self.import_table.item(row, IMPORT_COL_POINTS)
+        if item is not None:
+            item.setText(points)
+        status_item = self.import_table.item(row, IMPORT_COL_STATUS)
+        if status_item is not None:
+            status_item.setText(status)
+            if problem:
+                status_item.setForeground(QtGui.QBrush(QtGui.QColor("#b00020")))
+                status_item.setToolTip(problem)
+            else:
+                status_item.setData(QtCore.Qt.ItemDataRole.ForegroundRole, None)
+                status_item.setToolTip("；".join(
+                    f"{target.get('scope')} {target.get('f_low_hz') or '—'}～"
+                    f"{target.get('f_high_hz') or '—'} Hz" for target in targets) or "")
+        missing = self._import_missing_fields(row)
+        highlight = QtGui.QBrush(QtGui.QColor("#ffe0e0"))
+        rate_item = self.import_table.item(row, IMPORT_COL_RATE)
+        if rate_item is not None:
+            rate_item.setData(QtCore.Qt.ItemDataRole.BackgroundRole,
+                              highlight if "采样率" in missing else None)
+        for column, field in ((IMPORT_COL_DTYPE, "类型"), (IMPORT_COL_ENDIAN, "字节序")):
+            combo = self.import_table.cellWidget(row, column)
+            if combo is not None and info.get("format") == "binary":
+                combo.setStyleSheet("background:#ffe0e0" if field in missing else "")
+        self._update_import_controls()
+
+    def _import_has_ready(self):
+        return any(self._import_row_ready(row)
+                   for row in range(self.import_table.rowCount()))
+
+    def _update_import_controls(self):
+        total = self.import_table.rowCount()
+        ready = sum(1 for row in range(total) if self._import_row_ready(row))
+        self.import_count_label.setText(
+            "清单为空" if not total else f"清单 {total} 个文件 · 就绪 {ready} 个")
+        self.import_start_button.setEnabled(ready > 0 and self.active_job is None)
+
+    def _import_item_changed(self, item):
+        if self._import_filling or item.column() != IMPORT_COL_RATE:
+            return
+        self._refresh_import_row(item.row())
+
+    def recheck_import_rows(self):
+        rows = sorted({index.row() for index in self.import_table.selectedIndexes()})
+        if not rows:
+            self.status.setText("请先在文件清单里选择要重新识别的行")
+            return
+        self.start_job("import_inspect",
+                       paths=[self._import_row_info(row)["path"] for row in rows])
+
+    def remove_import_rows(self):
+        rows = sorted({index.row() for index in self.import_table.selectedIndexes()},
+                      reverse=True)
+        if not rows:
+            self.status.setText("请先选择要移除的行")
+            return
+        for row in rows:
+            self.import_table.removeRow(row)
+        self._update_import_controls()
+
+    def _import_collection_changed(self):
+        self.import_collection_name.setVisible(
+            self.import_collection.currentData() == "__new__")
+
+    def _toggle_import_params(self, visible):
+        self.import_params_toggle.setArrowType(
+            QtCore.Qt.ArrowType.DownArrow if visible else QtCore.Qt.ArrowType.RightArrow)
+        self.import_params_body.setVisible(visible)
+
+    def batch_set_import_params(self):
+        rows = sorted({index.row() for index in self.import_table.selectedIndexes()})
+        if not rows:
+            self.status.setText("请先在文件清单里选择要设置的行")
+            return
+        dialog = ImportBatchDialog(self)
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        self._apply_batch_settings(rows, **dialog.values())
+
+    def _apply_batch_settings(self, rows, *, sample_rate="", binary_dtype=None, endian=None):
+        """把批量设置应用到给定行；SigMF 行的采样率保持只读。"""
+        if sample_rate:
+            try:
+                value = float(sample_rate)
+            except ValueError:
+                self.status.setText(f"采样率应为数值：{sample_rate}")
+                return
+            if value <= 0:
+                self.status.setText("采样率必须为正数")
+                return
+            for row in rows:
+                if self._import_row_info(row).get("format") != "sigmf":
+                    self._set_rate_text(row, f"{value:g}")
+        for row in rows:
+            if self._import_row_info(row).get("format") == "binary":
+                if binary_dtype:
+                    combo = self.import_table.cellWidget(row, IMPORT_COL_DTYPE)
+                    if combo is not None:
+                        combo.setCurrentIndex(combo.findData(binary_dtype))
+                if endian:
+                    combo = self.import_table.cellWidget(row, IMPORT_COL_ENDIAN)
+                    if combo is not None:
+                        combo.setCurrentIndex(combo.findData(endian))
+            self._refresh_import_row(row)
+        self.status.setText(f"批量设置已应用到 {len(rows)} 行")
+
+    def _optional_field_float(self, field, name):
+        text = field.text().strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError as exc:
+            raise ValueError(f"{name}应为数值") from exc
+
+    def apply_single_signal_targets(self):
+        """把“整条为单一信号”目标应用到所选文件（覆盖它们已有的目标行）。"""
+        rows = sorted({index.row() for index in self.import_table.selectedIndexes()})
+        if not rows:
+            self.status.setText("请先在文件清单里选择要应用的文件")
+            return
+        modulation = self.import_single_modulation.currentText().strip()
+        modulation = None if modulation in ("", "未知") else modulation
+        try:
+            low = self._optional_field_float(self.import_single_f_low, "频率下限")
+            high = self._optional_field_float(self.import_single_f_high, "频率上限")
+            snr = self._optional_field_float(self.import_single_snr, "SNR")
+        except ValueError as exc:
+            self.status.setText(str(exc))
+            return
+        if (low is None) != (high is None):
+            self.status.setText("频率范围必须同时给出上下限")
+            return
+        if low is not None and high <= low:
+            self.status.setText("频率上限必须大于下限")
+            return
+        for row in rows:
+            count, _ = self._import_samples(row)
+            target = {"scope": "whole_record", "start": 0, "end": count,
+                      "start_unit": "samples", "f_low_hz": low,
+                      "f_high_hz": high, "modulation": modulation,
+                      "snr_db": snr, "note": None}
+            self._set_import_row_info(row, targets=[target])
+        self.status.setText(f"已为 {len(rows)} 个文件设置“整条为单一信号”目标")
+
+    # ------------------------------------------------------------------ 标注清单
+    def import_csv_manifest(self):
+        if not self.import_table.rowCount():
+            self.status.setText("请先添加文件，再导入标注清单")
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "选择标注清单 CSV", "", "CSV (*.csv)")
+        if not path:
+            return
+        paths = [self._import_row_info(row)["path"]
+                 for row in range(self.import_table.rowCount())]
+        self.start_job("import_manifest", path=path, paths=paths)
+
+    def export_import_template(self):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "导出标注清单模板", "标注清单模板.csv", "CSV (*.csv)")
+        if not path:
+            return
+        import csv as _csv
+
+        header = ["文件", "粒度", "起止单位", "起始", "结束", "频率下限Hz",
+                  "频率上限Hz", "调制", "SNR", "备注"]
+        examples = [["record_000.npy", "whole_record", "采样点", "0", "", "-20000",
+                     "20000", "QPSK", "18", "整条为单一信号"],
+                    ["record_001.npy", "session", "毫秒", "0", "120", "50000",
+                     "150000", "AM", "", "同一文件多行 = 多目标"],
+                    ["record_001.npy", "session", "毫秒", "130", "260", "-150000",
+                     "-60000", "QPSK", "12", "时间可写毫秒或秒"]]
+        try:
+            with Path(path).open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = _csv.writer(handle)
+                writer.writerow(header)
+                writer.writerows(examples)
+        except OSError as exc:
+            self.status.setText(f"模板导出失败：{exc}")
+            return
+        self.status.setText(f"已导出标注清单模板：{path}")
+
+    def _apply_import_manifest(self, result):
+        files = result.get("files") or {}
+        applied_rows = applied_targets = 0
+        for row in range(self.import_table.rowCount()):
+            info = self._import_row_info(row)
+            targets = files.get(info["path"])
+            if targets:
+                self._set_import_row_info(row, targets=list(targets))
+                applied_rows += 1
+                applied_targets += len(targets)
+        unmatched = result.get("unmatched") or []
+        text = f"标注清单：已挂接 {applied_targets} 条目标（{applied_rows} 个文件）"
+        if unmatched:
+            lines = [f"第 {item['line']} 行 · {item['file']}：{item['error']}"
+                     for item in unmatched[:15]]
+            text += f"；未匹配/非法 {len(unmatched)} 行：\n" + "\n".join(lines)
+        self.import_csv_report.setText(text)
+        self.status.setText(f"标注清单解析完成：挂接 {applied_targets} 条 · "
+                            f"未匹配 {len(unmatched)} 行")
+
+    # ------------------------------------------------------------------ 导入
+    def _resolve_batch_shard(self, file_count):
+        mode = self.import_shard_mode.currentData()
+        if mode == "file":
+            return False
+        if mode == "shard":
+            return True
+        return file_count >= self.import_shard_threshold.value()
+
+    def start_import_batch(self):
+        if self.active_job is not None:
+            return
+        rows = [row for row in range(self.import_table.rowCount())
+                if self._import_row_ready(row)]
+        if not rows:
+            self.status.setText("没有参数完备（就绪）的文件可导入")
+            return
+        scope = self.import_collection.currentData()
+        collection_name = None
+        if scope == "__new__":
+            collection_name = self.import_collection_name.text().strip()
+            if not collection_name:
+                self.status.setText("已选择“新建集合”，请填写集合名称")
+                return
+        files = []
+        for row in rows:
+            info = self._import_row_info(row)
+            files.append({
+                "path": info["path"],
+                "sample_rate": (None if info.get("format") == "sigmf"
+                                else self._import_row_rate(row)),
+                "binary_dtype": self._import_combo_value(row, IMPORT_COL_DTYPE),
+                "endian": self._import_combo_value(row, IMPORT_COL_ENDIAN),
+                "label": self._import_row_note(row) or None,
+                "targets": list(info.get("targets") or [])})
+        self.import_manage_button.setVisible(False)
+        self.start_job("import_files", files=files,
+                       batch_shard=self._resolve_batch_shard(len(files)),
+                       rf_center_hz=self.import_rf_center.text().strip() or None,
+                       capture_started_at=self.import_capture.text().strip() or None,
+                       collection_id=scope if scope not in (None, "__new__") else None,
+                       collection_name=collection_name,
+                       initial_labels=self.import_initial_labels.isChecked())
+
+    def _render_import_batch(self, result):
+        """成功行移出清单；失败行带原因留下，修正后可再次导入。"""
+        by_path = {item["path"]: item for item in result["results"]}
+        for row in range(self.import_table.rowCount() - 1, -1, -1):
+            info = self._import_row_info(row)
+            item = by_path.get(info["path"])
+            if item is None:
+                continue
+            if item["ok"]:
+                self.import_table.removeRow(row)
+            else:
+                self._set_import_row_info(row, error=item["error"])
+        self.import_status.setText(self.result_status(result))
+        self.import_manage_button.setVisible(bool(result.get("collection_id")))
+        self.refresh_assets()
+        self._collections_changed()
+        # 刷新下拉之后再切换：新集合只在任务里创建，刷新前下拉里还没有它
+        if result.get("collection_id"):
+            index = self.collection_combo.findData(result["collection_id"])
+            if index >= 0:
+                self.collection_combo.setCurrentIndex(index)
+        self._update_import_controls()
 
 
     def build_analysis(self):
@@ -822,6 +1644,11 @@ class MainWindow(DesktopWindow):
     def build_generator(self):
         box = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(box)
+        tabs = QtWidgets.QTabWidget()
+        tabs.setObjectName("gen_sections")
+        layout.addWidget(tabs)
+        single = QtWidgets.QWidget()
+        single_layout = QtWidgets.QVBoxLayout(single)
         intro = QtWidgets.QLabel("生成用于测试检测、参数估计与调制识别算法的 IQ 基带信号。"
                                  "IQ 为复基带记录，不设置载频：\"频点\"指基带频率偏移；"
                                  "频率值以 Hz / kHz / MHz 显示（单位在输入框外）。"
@@ -829,17 +1656,21 @@ class MainWindow(DesktopWindow):
                                  "另有“数学双音演示”：不建模通信链路，按下方的采样率与持续时间"
                                  "生成一对可复现的复基带双音，供快速试跑分析流程。")
         intro.setWordWrap(True)
-        layout.addWidget(intro)
-        layout.addWidget(self._build_global_row())
-        layout.addWidget(self._build_demo_row())
-        layout.addWidget(self._build_noise_group())
-        layout.addWidget(self._build_signal_table(), 1)
-        layout.addWidget(self._build_export_row())
+        single_layout.addWidget(intro)
+        single_layout.addWidget(self._build_global_row())
+        single_layout.addWidget(self._build_collection_row())
+        single_layout.addWidget(self._build_demo_row())
+        single_layout.addWidget(self._build_noise_group())
+        single_layout.addWidget(self._build_signal_table(), 1)
+        single_layout.addWidget(self._build_export_row())
         self.gen_result = QtWidgets.QLabel("尚未生成")
         self.gen_result.setWordWrap(True)
         self.gen_result.setStyleSheet(
             "background:white;border:1px solid #d8e1ec;border-radius:5px;padding:8px;")
-        layout.addWidget(self.gen_result)
+        single_layout.addWidget(self.gen_result)
+        tabs.addTab(single, "单个信号生成")
+        self.gen_panel = CollectionGenPanel(self)
+        tabs.addTab(self.gen_panel, "信号集合生成")
         self.iq_signals = []
         self._last_suggested_name = ""
         self.update_gen_controls()
@@ -866,6 +1697,41 @@ class MainWindow(DesktopWindow):
         self.gen_duration.valueChanged.connect(self.update_gen_count)
         return group
 
+
+    def _build_collection_row(self):
+        """生成产物的目标集合（新建或追加）与初始标注开关（方案 §7.2）。"""
+        group = QtWidgets.QGroupBox("目标集合")
+        row = QtWidgets.QHBoxLayout(group)
+        self.gen_collection = QtWidgets.QComboBox()
+        self.gen_collection.setToolTip("生成后把资产加入所选集合；选“新建集合…”时填名称（同名沿用）")
+        self.gen_collection.addItem("不加入集合", None)
+        self.gen_collection.addItem("新建集合…", "__new__")
+        self.gen_collection.currentIndexChanged.connect(
+            lambda *_: self._gen_collection_changed())
+        row.addWidget(self.gen_collection, 1)
+        self.gen_collection_name = QtWidgets.QLineEdit()
+        self.gen_collection_name.setPlaceholderText("新集合名称")
+        self.gen_collection_name.setVisible(False)
+        row.addWidget(self.gen_collection_name)
+        self.gen_initial_labels = QtWidgets.QCheckBox("同时生成初始标注（来源 generator）")
+        self.gen_initial_labels.setToolTip(
+            "按目标参考参数写入初始标注：集合无标注集时自动建立默认检测/AMC 标注集")
+        row.addWidget(self.gen_initial_labels)
+        return group
+
+    def _gen_collection_changed(self):
+        self.gen_collection_name.setVisible(self.gen_collection.currentData() == "__new__")
+
+    def _gen_collection_request(self):
+        scope = self.gen_collection.currentData()
+        request = {"collection_id": scope if scope not in (None, "__new__") else None,
+                   "initial_labels": self.gen_initial_labels.isChecked()}
+        if scope == "__new__":
+            name = self.gen_collection_name.text().strip()
+            if not name:
+                raise ValueError("已选择“新建集合”，请填写集合名称")
+            request["collection_name"] = name
+        return request
 
     def _build_demo_row(self):
         group = QtWidgets.QGroupBox("数学双音演示")
@@ -1093,9 +1959,15 @@ class MainWindow(DesktopWindow):
         fmt = self.gen_export_format.currentData()
         if fmt:
             export = {"format": fmt, "endian": self.gen_endian.currentData()}
+        try:
+            collection = self._gen_collection_request()
+        except ValueError as exc:
+            self.status.setText(str(exc))
+            return
         self.start_job("generate", sample_rate=rate, duration=duration,
                        seed=int(self.gen_seed.value()), signals=self.iq_signals,
-                       noise=noise, name=self.gen_name.text().strip() or None, export=export)
+                       noise=noise, name=self.gen_name.text().strip() or None,
+                       export=export, **collection)
 
 
     def generate_demo_clicked(self):
@@ -1137,53 +2009,170 @@ class MainWindow(DesktopWindow):
             lines.append(f"导出文件：{result['export_path']}（格式 {result['export_format']}）")
             if result.get("export_data_path"):
                 lines.append(f"IQ 数据文件：{result['export_data_path']}")
+        targets = result.get("targets") or {}
+        if targets.get("sessions"):
+            lines.append(f"目标参考参数：会话 {targets['sessions']} 个"
+                         + (f" · 逐跳 {targets['hops']} 个" if targets.get("hops") else ""))
+        if result.get("collection_id"):
+            labels = result.get("initial_labels") or 0
+            lines.append(f"目标集合：{result['collection_name']}"
+                         + (f" · 初始标注 {labels} 条" if labels else ""))
         self.gen_result.setText("\n".join(lines))
 
 
     def selected_asset(self):
         item = self.assets.currentItem()
         return item.data(QtCore.Qt.ItemDataRole.UserRole) if item else None
+
+    def refresh_collections(self, *_):
+        """刷新侧栏集合下拉：全部资产 / 零散资产 / 各集合（附资产数）。"""
+        previous = self.collection_combo.currentData() if hasattr(
+            self, "collection_combo") else None
+        self.collection_combo.blockSignals(True)
+        self.collection_combo.clear()
+        self.collection_combo.addItem("全部资产", None)
+        self.collection_combo.addItem("零散资产", "__scattered__")
+        for collection in self.workspace.list_collections():
+            self.collection_combo.addItem(f"{collection['name']}（{collection['asset_count']}）",
+                                          collection["id"])
+        index = self.collection_combo.findData(previous) if previous else 0
+        self.collection_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.collection_combo.blockSignals(False)
+        if hasattr(self, "import_collection"):
+            previous_scope = self.import_collection.currentData()
+            self.import_collection.blockSignals(True)
+            self.import_collection.clear()
+            self.import_collection.addItem("不加入集合", None)
+            self.import_collection.addItem("新建集合…", "__new__")
+            for collection in self.workspace.list_collections():
+                self.import_collection.addItem(collection["name"], collection["id"])
+            scope_index = (self.import_collection.findData(previous_scope)
+                           if previous_scope else 0)
+            self.import_collection.setCurrentIndex(scope_index if scope_index >= 0 else 0)
+            self.import_collection.blockSignals(False)
+            self._import_collection_changed()
+        if hasattr(self, "gen_collection"):
+            previous_scope = self.gen_collection.currentData()
+            self.gen_collection.blockSignals(True)
+            self.gen_collection.clear()
+            self.gen_collection.addItem("不加入集合", None)
+            self.gen_collection.addItem("新建集合…", "__new__")
+            for collection in self.workspace.list_collections():
+                self.gen_collection.addItem(collection["name"], collection["id"])
+            scope_index = (self.gen_collection.findData(previous_scope)
+                           if previous_scope else 0)
+            self.gen_collection.setCurrentIndex(scope_index if scope_index >= 0 else 0)
+            self.gen_collection.blockSignals(False)
+            self._gen_collection_changed()
+        if hasattr(self, "gen_panel"):
+            self.gen_panel.refresh_collections()
+        if hasattr(self, "training_page"):
+            self.training_page.refresh_collections()
+
+    def _asset_scope(self):
+        data = self.collection_combo.currentData()
+        if data == "__scattered__":
+            return {"scattered": True}
+        if data:
+            return {"collection_id": data}
+        return {}
+
+    def change_asset_page(self, delta, reset=False):
+        """翻页或重置到第一页；页码越界时由 refresh_assets 夹取。"""
+        self.asset_page = 0 if reset else max(0, self.asset_page + delta)
+        self.refresh_assets()
+
     def refresh_assets(self, *_):
         selected = self.selected_asset()
+        scope = self._asset_scope()
+        total = self.workspace.count_assets(self.search.text(), **scope)
+        self.asset_limit = int(self.page_size.currentText())
+        pages = max(1, -(-total // self.asset_limit))
+        self.asset_page = min(self.asset_page, pages - 1)
         self.assets.clear()
-        for asset in self.workspace.list_assets(self.search.text(), self.asset_limit):
+        for asset in self.workspace.list_assets(self.search.text(), self.asset_limit,
+                                                self.asset_page * self.asset_limit,
+                                                **scope):
             item = QtWidgets.QListWidgetItem(asset["name"])
             item.setData(QtCore.Qt.ItemDataRole.UserRole, asset)
             self.assets.addItem(item)
             if selected and selected["id"] == asset["id"]:
                 self.assets.setCurrentItem(item)
+        self.page_label.setText(f"第 {self.asset_page + 1}/{pages} 页")
+        self.asset_total.setText(f"共 {total} 条")
+        self.prev_page.setEnabled(self.asset_page > 0)
+        self.next_page.setEnabled(self.asset_page + 1 < pages)
         if self.assets.currentItem() is None and self.assets.count():
             self.assets.setCurrentRow(0)
 
-
-    def more_assets(self):
-        self.asset_limit = min(500, self.asset_limit + 100)
-        self.refresh_assets()
-
+    def _append_target_rows(self, asset):
+        """侧栏只读目标列表：适用标记、标注状态、当前参数与来源。"""
+        self.target_list.clear()
+        try:
+            targets = self.workspace.list_targets(asset["id"], with_current=True)
+            status = self.workspace.asset_label_status(asset["id"])
+        except ValueError:
+            return
+        for target in targets:
+            current = target["current"] or {}
+            flags = (f"检测{'✓' if target['for_detection'] else '—'} · "
+                     f"AMC{'✓' if target['for_amc'] else '—'}")
+            marks = []
+            if target["id"] in status["detection"]:
+                marks.append("检测已标注")
+            if target["id"] in status["amc"]:
+                marks.append("AMC已标注")
+            if not marks:
+                marks.append("待标注")
+            scope = _SCOPE_LABELS.get(target["scope"], target["scope"])
+            modulation = current.get("modulation") or "调制未知"
+            source = _VERSION_SOURCE_LABELS.get(current.get("source"),
+                                                 current.get("source") or "—")
+            text = (f"{target['target_key']} · {scope} · {flags}\n"
+                    f"    {modulation} · {' / '.join(marks)} · 来源 {source}")
+            item = QtWidgets.QListWidgetItem(text)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, target["id"])
+            low, high = current.get("f_low_hz"), current.get("f_high_hz")
+            band = (f"{low:g}～{high:g} Hz" if low is not None and high is not None else "频带未知")
+            detail = f"{target['target_key']}：{band}"
+            snr = current.get("snr_db")
+            if snr is not None:
+                detail += f" · SNR {snr:.1f} dB"
+            item.setToolTip(detail)
+            self.target_list.addItem(item)
 
     def asset_changed(self, *_):
         if self._play_data is not None:
             self._stop_playback()
         asset = self.selected_asset()
         if asset:
-            self.asset_info.setText(f"{asset['sample_count']:,} 个复采样\n{asset['sample_rate']:g} Hz")
-            self.label.setText(asset["label"])
+            storage = "分片" if asset.get("storage_kind") == "shard" else "文件"
+            source_kind = _SOURCE_KIND_LABELS.get(asset.get("source_kind"), "未知")
+            self.asset_info.setText(
+                f"{asset['sample_count']:,} 个复采样\n{asset['sample_rate']:g} Hz\n"
+                f"来源：{source_kind} · 存储：{storage}")
             self.set_status_detail(self._asset_status_text(asset))
+            self._append_target_rows(asset)
         else:
             self.asset_info.setText("尚未选择数据")
-            self.label.clear()
             self.set_status_detail("")
+            self.target_list.clear()
 
     def _asset_status_text(self, asset):
         """状态栏摘要：文件名 / 相对位置 / 大小 / 资产（工作区存储格式）/ 导出。
 
         路径一律相对工作目录，不重复写出工作目录本身；文件缺失时明确提示而不是
-        抛异常。资产与导出分开写：前者是工作区里的 NPY 本体，后者是 ``exports/``
-        下本次实际生成的副本（没有就写“无”）。
+        抛异常。资产与导出分开写：前者是工作区里的存储本体（独立 NPY 或分片记录），
+        后者是 ``exports/`` 下本次实际生成的副本（没有就写“无”）。
         """
         path = self.workspace.root / asset["path"]
+        shard = asset.get("storage_kind") == "shard"
         try:
-            size = format_bytes(path.stat().st_size)
+            if shard:
+                # 分片资产只报本条记录的份额（complex64 = 8 B/采样点）
+                size = format_bytes(int(asset.get("shard_length") or 0) * 8) + "（分片份额）"
+            else:
+                size = format_bytes(path.stat().st_size)
         except OSError:
             size = "文件缺失"
         rate = float(asset["sample_rate"])
@@ -1193,28 +2182,6 @@ class MainWindow(DesktopWindow):
                 f"大小 {size}（{asset['sample_count']:,} 复采样 @ {rate:g} Hz · {duration}）  ·  "
                 f"资产：{_asset_format(asset)}  ·  "
                 f"导出：{'、'.join(exports) if exports else '无'}")
-
-    def save_label(self):
-        asset = self.selected_asset()
-        if asset:
-            self.workspace.set_label(asset["id"], self.label.text())
-            self.refresh_assets()
-            self.status.setText("数据备注已保存")
-
-    def import_file(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "选择离线数据", "",
-                                                        "数据 (*.npy *.csv *.bin *.raw *.iq *.sigmf-meta *.sigmf-data)")
-        if not path:
-            return
-        request = {"sample_rate": self.sample_rate.value()}
-        if Path(path).suffix.lower() in (".sigmf-meta", ".sigmf-data"):
-            request = {}  # The recording owns its sample rate, not the manual input.
-        if Path(path).suffix.lower() in (".bin", ".raw", ".iq"):
-            dialog = BinaryImportDialog(self)
-            if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-                return
-            request["binary_dtype"], request["endian"] = dialog.values()
-        self.start_job("import", path=path, **request)
 
     def analyze_selected(self):
         if self.analyze_mode.currentText() == "实时播放":
@@ -1304,6 +2271,14 @@ class MainWindow(DesktopWindow):
         self.detect_button.setObjectName("primary")
         self.detect_button.clicked.connect(self.detect_selected)
         bar.addWidget(self.detect_button)
+        self.adopt_detect_button = QtWidgets.QPushButton("采纳为参数标注")
+        self.adopt_detect_button.setEnabled(False)
+        self.adopt_detect_button.setToolTip(
+            "把当前检测结果写入目标参考参数（source=algorithm）；集合已有检测标注集时"
+            "同时追加标签。全部为追加式：旧版本与旧标签保留，重复采纳产生新版本。")
+        self.adopt_detect_button.clicked.connect(
+            lambda: self.adopt_page_result("信号检测"))
+        bar.addWidget(self.adopt_detect_button)
         bar.addStretch(1)
         layout.addLayout(bar)
         ai_bar = QtWidgets.QHBoxLayout()
@@ -1452,6 +2427,14 @@ class MainWindow(DesktopWindow):
         self.hops_button.setObjectName("primary")
         self.hops_button.clicked.connect(self.hops_selected)
         bar.addWidget(self.hops_button)
+        self.adopt_hops_button = QtWidgets.QPushButton("采纳为参数标注")
+        self.adopt_hops_button.setEnabled(False)
+        self.adopt_hops_button.setToolTip(
+            "把当前逐跳结果写回会话与逐跳目标的参考参数（source=algorithm）；"
+            "集合已有逐跳标注集时同时追加标签，全部为追加式。")
+        self.adopt_hops_button.clicked.connect(
+            lambda: self.adopt_page_result("跳频参数"))
+        bar.addWidget(self.adopt_hops_button)
         bar.addStretch(1)
         layout.addLayout(bar)
         ai_bar = QtWidgets.QHBoxLayout()
@@ -1560,6 +2543,14 @@ class MainWindow(DesktopWindow):
             "把最近一次检测结果中功率最大的目标中心频率与带宽填进左侧输入框")
         self.amc_from_detect.clicked.connect(self.use_detected_band)
         bar.addWidget(self.amc_from_detect)
+        self.adopt_amc_button = QtWidgets.QPushButton("采纳为参数标注")
+        self.adopt_amc_button.setEnabled(False)
+        self.adopt_amc_button.setToolTip(
+            "把当前识别结论写入目标参考参数（modulation，source=algorithm）；"
+            "集合已有 AMC 标注集时同时追加标签（字典外保留原始类名）。")
+        self.adopt_amc_button.clicked.connect(
+            lambda: self.adopt_page_result("调制识别"))
+        bar.addWidget(self.adopt_amc_button)
         bar.addStretch(1)
         layout.addLayout(bar)
         model_bar = QtWidgets.QHBoxLayout()
@@ -2560,12 +3551,187 @@ class MainWindow(DesktopWindow):
                               (self.storage_issue_table, "一致性"),
                               (self.storage_cleanup_table, "可清理项")):
             self.storage_tables.addTab(widget, title)
+        self.storage_tables.addTab(self._build_collections_tab(), "信号集合")
         splitter.addWidget(self.storage_tables)
         splitter.setSizes([170, 640])
         layout.addWidget(splitter, 1)
 
         self._reload_extra_combo()
+        self.refresh_collections_panel()
         return box
+
+    # ------------------------------------------------------------- 信号集合子页
+    def _build_collections_tab(self):
+        """数据管理页的“信号集合”子页：成员增删、标注进度与参数统计。"""
+        box = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(box)
+        left = QtWidgets.QVBoxLayout()
+        self.collection_panel = QtWidgets.QListWidget()
+        self.collection_panel.currentItemChanged.connect(self._collection_selected)
+        left.addWidget(self.collection_panel, 1)
+        buttons = QtWidgets.QHBoxLayout()
+        for name, text, callback, tip in (
+                ("new_collection_button", "新建集合…", self.new_collection,
+                 "创建一个手工集合"),
+                ("add_member_button", "加入所选资产", self.add_selected_asset_to_collection,
+                 "把左侧当前选中的数据资产加入该集合"),
+                ("remove_member_button", "移除所选资产",
+                 self.remove_selected_asset_from_collection,
+                 "只删除成员关系；资产、标注与数据版本不受影响"),
+                ("archive_collection_button", "归档集合", self.archive_selected_collection,
+                 "归档后集合不再出现在选择器中，成员关系保留"),
+                ("migrate_button", "登记历史数据…", self.migrate_legacy,
+                 "扫描工作区 datasets/ 与 training/runs/，把旧标注数据集与实验登记进索引（幂等）")):
+            button = QtWidgets.QPushButton(text)
+            button.setToolTip(tip)
+            button.clicked.connect(callback)
+            setattr(self, name, button)
+            buttons.addWidget(button)
+        left.addLayout(buttons)
+        hint = QtWidgets.QLabel("集合成员来自左侧“数据资产”的当前选择；同一资产可属于多个集合，"
+                                "标注挂在目标上、全集合共享同一份当前标签。")
+        hint.setWordWrap(True)
+        left.addWidget(hint)
+        layout.addLayout(left, 2)
+        self.collection_detail = QtWidgets.QPlainTextEdit()
+        self.collection_detail.setReadOnly(True)
+        self.collection_detail.setPlaceholderText("选择集合后显示概览")
+        layout.addWidget(self.collection_detail, 3)
+        return box
+
+    def refresh_collections_panel(self, *_):
+        current = self.collection_panel.currentItem()
+        keep = current.data(QtCore.Qt.ItemDataRole.UserRole) if current else None
+        self.collection_panel.clear()
+        selected_row = -1
+        for index, collection in enumerate(self.workspace.list_collections()):
+            item = QtWidgets.QListWidgetItem(
+                f"{collection['name']} · {collection['asset_count']} 个资产 · "
+                f"{_SOURCE_KIND_LABELS.get(collection['source_kind'], collection['source_kind'])}")
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, collection["id"])
+            self.collection_panel.addItem(item)
+            if collection["id"] == keep:
+                selected_row = index
+        if selected_row >= 0:
+            self.collection_panel.setCurrentRow(selected_row)
+        elif self.collection_panel.count():
+            self.collection_panel.setCurrentRow(0)
+        else:
+            self._collection_selected()
+
+    def _selected_collection_id(self):
+        item = self.collection_panel.currentItem()
+        return item.data(QtCore.Qt.ItemDataRole.UserRole) if item else None
+
+    def _collection_selected(self, *_):
+        collection_id = self._selected_collection_id()
+        if not collection_id:
+            self.collection_detail.setPlainText(
+                "尚未创建集合。点击「新建集合…」后，把左侧选中的数据资产加入。")
+            return
+        summary = self.workspace.collection_summary(collection_id)
+        lines = [f"集合：{summary['name']}"
+                 f"（{_SOURCE_KIND_LABELS.get(summary['source_kind'], summary['source_kind'])}）",
+                 f"资产 {summary['asset_count']} · 目标 {summary['target_count']}"
+                 f"（其中逐跳 {summary['hop_count']}）",
+                 "来源分布：" + ("、".join(
+                     f"{_SOURCE_KIND_LABELS.get(key, key)} {value}"
+                     for key, value in summary["source_kinds"].items()) or "—"),
+                 "", "任务标注进度："]
+        if summary["task_sets"]:
+            for progress in summary["task_sets"]:
+                task_name = "检测" if progress["task"] == "detection" else "AMC"
+                line = (f"· {task_name}「{progress['name']}」：已标注 {progress['labeled']}/"
+                        f"{progress['targets']} · 待标注 {progress['pending']} · "
+                        f"重新标注 {progress['reannotated']}")
+                if progress.get("label_semantics"):
+                    line += f" · 粒度 {progress['label_semantics']}"
+                lines.append(line)
+                coverage = progress["coverage"]
+                lines.append(f"    覆盖度：完整 {coverage['complete']} · 部分 {coverage['partial']} · "
+                             f"未标记 {coverage['unmarked']}")
+        else:
+            lines.append("· 该集合还没有任务标注集（检测 / AMC 标注集随标注或配方生成创建）")
+        lines.append("")
+        lines.append("参数统计（信号级，按目标数）：")
+        for axis, title in (("modulation", "调制"), ("waveform_mode", "样式"),
+                            ("is_hopping", "跳频"), ("snr_db", "SNR")):
+            stats = self.workspace.target_axis_stats(collection_id, axis, scope="signal",
+                                                     top=8)
+            if stats:
+                lines.append("· " + title + "：" + "、".join(
+                    f"{item['label']} {item['count']}" for item in stats))
+        self.collection_detail.setPlainText("\n".join(lines))
+
+    def _collections_changed(self):
+        self.refresh_collections()
+        self.refresh_assets()
+        self.refresh_collections_panel()
+
+    def new_collection(self):
+        name, accepted = QtWidgets.QInputDialog.getText(self, "新建信号集合", "集合名称")
+        if not accepted or not name.strip():
+            return
+        try:
+            collection = self.workspace.create_collection(name.strip(), created_by="gui")
+        except ValueError as exc:
+            self.status.setText(f"无法新建集合：{exc}")
+            return
+        self._collections_changed()
+        for row in range(self.collection_panel.count()):
+            if self.collection_panel.item(row).data(
+                    QtCore.Qt.ItemDataRole.UserRole) == collection["id"]:
+                self.collection_panel.setCurrentRow(row)
+                break
+        self.status.setText(f"已新建集合「{collection['name']}」")
+
+    def add_selected_asset_to_collection(self):
+        asset = self.selected_asset()
+        collection_id = self._selected_collection_id()
+        if asset is None:
+            self.status.setText("请先在左侧选择数据资产")
+            return
+        if not collection_id:
+            self.status.setText("请先选择或新建集合")
+            return
+        added = self.workspace.add_collection_member(collection_id, asset["id"],
+                                                     added_by="gui")
+        self._collections_changed()
+        self.status.setText("已加入集合" if added else "该资产已在集合中")
+
+    def remove_selected_asset_from_collection(self):
+        asset = self.selected_asset()
+        collection_id = self._selected_collection_id()
+        if asset is None:
+            self.status.setText("请先在左侧选择数据资产")
+            return
+        if not collection_id:
+            self.status.setText("请先选择集合")
+            return
+        removed = self.workspace.remove_collection_member(collection_id, asset["id"])
+        self._collections_changed()
+        self.status.setText("已从集合移除（资产与标注保留）" if removed
+                            else "该资产不在所选集合中")
+
+    def archive_selected_collection(self):
+        collection_id = self._selected_collection_id()
+        if not collection_id:
+            self.status.setText("请先选择集合")
+            return
+        collection = self.workspace.get_collection(collection_id)
+        answer = QtWidgets.QMessageBox.question(
+            self, "归档信号集合",
+            f"归档「{collection['name']}」？\n集合将不再出现在选择器中，成员关系与标注保留，"
+            "之后可重新启用。")
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self.workspace.archive_collection(collection_id)
+        self._collections_changed()
+        self.status.setText(f"已归档集合「{collection['name']}」")
+
+    def migrate_legacy(self):
+        """把旧标注数据集与旧实验登记进新索引（幂等，可重复点击）。"""
+        self.start_job("migrate_legacy")
 
     def scan_storage(self, preview=False):
         """扫描工作区；``preview=True`` 时视为一次显式清理预览（解锁删除按钮）。"""
@@ -2870,6 +4036,27 @@ class MainWindow(DesktopWindow):
         parts.append("</body></html>")
         return "".join(parts)
 
+    def adopt_page_result(self, page):
+        """把当前页展示的结果采纳为目标参考参数与标签（追加式）。"""
+        run_id = self.adopt_run_ids.get(page)
+        if run_id is None:
+            self.status.setText("当前页还没有可采纳的结果")
+            return
+        self.start_job("adopt_result", run_id=run_id)
+
+    def _set_adopt_run(self, page, result):
+        """更新某页的采纳按钮可用状态；不可采纳的结果类型保持禁用。"""
+        button = self._adopt_buttons().get(page)
+        run_id = (result or {}).get("run_id")
+        if run_id:
+            self.adopt_run_ids[page] = run_id
+            if button is not None:
+                button.setEnabled(True)
+        else:
+            self.adopt_run_ids.pop(page, None)
+            if button is not None:
+                button.setEnabled(False)
+
     def display_result(self, result):
         """按结果类型写回对应页面并切过去；页面名与下标一律经由页面注册表解析。"""
         self.last_result = result
@@ -2883,22 +4070,26 @@ class MainWindow(DesktopWindow):
             with np.load(self.workspace.root / result["plots_path"], allow_pickle=False) as arrays:
                 self._render_detect(result, arrays)
             self._render_compare()
+            self._set_adopt_run("信号检测", result)
             self.tabs.setCurrentIndex(self._page_index("信号检测"))
         elif result["kind"] in ("detect_hops", "ml_detect_hops"):
             self.tab_results["跳频参数"] = result
             with np.load(self.workspace.root / result["plots_path"], allow_pickle=False) as arrays:
                 self._render_hops(result, arrays)
             self._render_compare()
+            self._set_adopt_run("跳频参数", result)
             self.tabs.setCurrentIndex(self._page_index("跳频参数"))
         elif result["kind"] == "amc_classify":
             self.tab_results["调制识别"] = result
             self._render_amc(result)
             self._render_compare()
+            self._set_adopt_run("调制识别", result)
             self.tabs.setCurrentIndex(self._page_index("调制识别"))
         elif result["kind"] == "amc_iq_classify":
             self.tab_results["调制识别"] = result
             self._render_amc_iq(result)
             self._render_compare()
+            self._set_adopt_run("调制识别", result)
             self.tabs.setCurrentIndex(self._page_index("调制识别"))
         elif result["kind"] == "native":
             self.tab_results["数据分析"] = result

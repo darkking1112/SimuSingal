@@ -16,11 +16,11 @@ SUPPORTED_TYPES = {"cf32_le": 8, "cf32_be": 8, "cf64_le": 16, "cf64_be": 16,
                    "ci16_le": 4, "ci16_be": 4}
 
 
-def read_sigmf(path):
-    """Return validated IQ, metadata sample rate, and original metadata.
+def read_sigmf_metadata(path):
+    """只读 SigMF 元数据与文件统计（不加载 IQ），供导入清单自动识别用。
 
-    Only contiguous, single-channel, same-name file pairs are accepted.
-    Integer scaling and binary decoding are performed by sigmf itself.
+    返回 ``sample_rate`` / ``sample_count`` / ``datatype`` / ``metadata``；
+    校验口径与 :func:`read_sigmf` 完全一致。
     """
     path = Path(path).expanduser().resolve()
     if path.suffix.lower() not in SIGMF_EXTENSIONS:
@@ -31,29 +31,43 @@ def read_sigmf(path):
         raise ValueError("SigMF 元数据文件缺失、为空或超过 4 MiB")
     if not data_path.is_file() or not 0 < data_path.stat().st_size <= MAX_DATA_BYTES:
         raise ValueError("SigMF 数据文件缺失、为空或超过 512 MiB")
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    info = metadata["global"]
+    datatype = info.get("core:datatype")
+    if datatype not in SUPPORTED_TYPES:
+        raise ValueError("SigMF 当前仅支持 cf32/cf64/ci16 的 little/big endian 复数 IQ")
+    if info.get("core:num_channels", 1) != 1:
+        raise ValueError("SigMF 当前仅支持单通道")
+    if info.get("core:dataset", data_path.name) != data_path.name:
+        raise ValueError("SigMF 当前仅支持同名双文件，不支持外部 dataset 引用")
+    if any(info.get(key, 0) for key in ("core:offset", "core:trailing_bytes", "core:metadata_only")):
+        raise ValueError("SigMF 当前仅支持无文件头和尾部附加数据的连续 IQ")
+    if any(capture.get("core:header_bytes", 0) for capture in metadata.get("captures", [])):
+        raise ValueError("SigMF 不支持带分段文件头的数据")
+    if any(ext.get("required", False) for ext in info.get("core:extensions", [])):
+        raise ValueError("SigMF 包含尚未支持的必需扩展")
+    size = data_path.stat().st_size
+    width = SUPPORTED_TYPES[datatype]
+    if size % width or not 1 <= size // width <= MAX_SAMPLES:
+        raise ValueError("SigMF 数据被截断或超过采样点数限制")
+    rate = validate_rate(info.get("core:sample_rate"))
+    return {"sample_rate": rate, "sample_count": size // width,
+            "datatype": datatype, "metadata": metadata}
+
+
+def read_sigmf(path):
+    """Return validated IQ, metadata sample rate, and original metadata.
+
+    Only contiguous, single-channel, same-name file pairs are accepted.
+    Integer scaling and binary decoding are performed by sigmf itself.
+    """
+    path = Path(path).expanduser().resolve()
     try:
         # Preflight before the library opens or maps any referenced dataset.
-        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
-        info = metadata["global"]
-        datatype = info.get("core:datatype")
-        if datatype not in SUPPORTED_TYPES:
-            raise ValueError("SigMF 当前仅支持 cf32/cf64/ci16 的 little/big endian 复数 IQ")
-        if info.get("core:num_channels", 1) != 1:
-            raise ValueError("SigMF 当前仅支持单通道")
-        if info.get("core:dataset", data_path.name) != data_path.name:
-            raise ValueError("SigMF 当前仅支持同名双文件，不支持外部 dataset 引用")
-        if any(info.get(key, 0) for key in ("core:offset", "core:trailing_bytes", "core:metadata_only")):
-            raise ValueError("SigMF 当前仅支持无文件头和尾部附加数据的连续 IQ")
-        if any(capture.get("core:header_bytes", 0) for capture in metadata.get("captures", [])):
-            raise ValueError("SigMF 不支持带分段文件头的数据")
-        if any(ext.get("required", False) for ext in info.get("core:extensions", [])):
-            raise ValueError("SigMF 包含尚未支持的必需扩展")
-        size = data_path.stat().st_size
-        width = SUPPORTED_TYPES[datatype]
-        if size % width or not 1 <= size // width <= MAX_SAMPLES:
-            raise ValueError("SigMF 数据被截断或超过采样点数限制")
-        rate = validate_rate(info.get("core:sample_rate"))
-        recording = sigmf.fromfile(meta_path, autoscale=True)
+        info = read_sigmf_metadata(path)
+        rate = info["sample_rate"]
+        metadata = info["metadata"]
+        recording = sigmf.fromfile(path.with_suffix(".sigmf-meta"), autoscale=True)
         recording.validate()
         samples = validate_samples(recording.read_samples())
         return samples, rate, metadata

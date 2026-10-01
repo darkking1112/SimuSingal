@@ -1,4 +1,5 @@
 """Shared desktop shell and task widgets; no business imports."""
+import inspect
 import threading
 from PySide6 import QtCore, QtWidgets
 import pyqtgraph as pg
@@ -7,6 +8,7 @@ from .reports import export_report
 class JobSignals(QtCore.QObject):
     completed = QtCore.Signal(object)
     failed = QtCore.Signal(str)
+    progress = QtCore.Signal(object)
 
 
 class JobRunner(QtCore.QRunnable):
@@ -20,7 +22,11 @@ class JobRunner(QtCore.QRunnable):
     @QtCore.Slot()
     def run(self):
         try:
-            self.signals.completed.emit(self.executor(self.request, cancel=self.cancelled))
+            kwargs = {"cancel": self.cancelled}
+            # 只有声明了 progress 形参的执行器才收到进度回调（其它项目的执行器签名不变）
+            if "progress" in inspect.signature(self.executor).parameters:
+                kwargs["progress"] = self.signals.progress.emit
+            self.signals.completed.emit(self.executor(self.request, **kwargs))
         except Exception as exc:
             self.signals.failed.emit(str(exc))
 
@@ -131,6 +137,7 @@ class DesktopWindow(QtWidgets.QMainWindow):
         self.active_job = job
         job.signals.completed.connect(self.job_completed)
         job.signals.failed.connect(self.job_failed)
+        job.signals.progress.connect(self.job_progress)
         self.set_busy(True)
         self.status.setText("任务运行中，可取消…")
         self.pool.start(job)
@@ -144,6 +151,18 @@ class DesktopWindow(QtWidgets.QMainWindow):
         if not busy:
             self.progress.setValue(1)
 
+
+    @QtCore.Slot(object)
+    def job_progress(self, info):
+        """带进度的任务：``total`` > 0 时进度条变为确定模式，``message`` 写入状态栏。"""
+        if self.active_job is None or not isinstance(info, dict):
+            return
+        total = int(info.get("total") or 0)
+        if total > 0:
+            self.progress.setRange(0, total)
+            self.progress.setValue(min(int(info.get("done") or 0), total))
+        if info.get("message"):
+            self.status.setText(str(info["message"]))
 
     @QtCore.Slot(str)
     def job_failed(self, message):

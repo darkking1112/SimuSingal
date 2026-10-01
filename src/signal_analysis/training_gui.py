@@ -12,7 +12,7 @@ from PySide6 import QtCore, QtWidgets
 import pyqtgraph as pg
 
 from .annotations import AnnotationDataset, create_dataset
-from .training_jobs import iq_plan, list_experiments, save_record
+from .training_jobs import decode_worker_log, iq_plan, list_experiments, save_record
 
 
 STATUS = {"running": "运行中", "success": "成功", "failed": "失败", "stopped": "已停止",
@@ -20,16 +20,6 @@ STATUS = {"running": "运行中", "success": "成功", "failed": "失败", "stop
 
 #: 强制结束信号；Windows 没有 SIGKILL，None 让 signal_process 直接走 QProcess.kill()
 FORCE_KILL = getattr(signal, "SIGKILL", None)
-
-
-def decode_worker_log(data):
-    """解码 worker.log 字节：新实验为 UTF-8；历史实验由管道默认编码（GBK）写出，逐级回退。"""
-    for encoding in ("utf-8", "gbk"):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", "replace")
 
 
 def metric_text(report):
@@ -165,12 +155,17 @@ class TrainingPage(QtWidgets.QWidget):
         form.addRow("模型", self.arch)
         self.data = self.path_field(form, "训练数据集")
         self.source = QtWidgets.QComboBox()
-        for title, value in (("已有 IQ 数据集", "existing"), ("生成 A09 数据", "generator"),
-                             ("生成 A09 + 混入 TorchSig bundle", "bundle")):
+        for title, value in (("使用所选集合", "collection"), ("已有数据集", "existing")):
             self.source.addItem(title, value)
-        form.addRow("IQ 数据来源", self.source)
-        self.bundle = self.path_field(form, "TorchSig bundle")
-        self.mapping = self.path_field(form, "TorchSig → A09 映射 JSON", kind="file")
+        self.source.setToolTip("训练页不生成数据：选择集合后先“导出训练数据”，或直接指定已有数据集目录")
+        form.addRow("数据来源", self.source)
+        self.collection = QtWidgets.QComboBox()
+        self.refresh_collections()
+        form.addRow("所选集合", self.collection)
+        self.export_button = QtWidgets.QPushButton("导出训练数据…")
+        self.export_button.setToolTip("按集合的检测/AMC 标注集构建数据版本并导出为数据集目录，再开始训练")
+        self.export_button.clicked.connect(self.export_selected_collection)
+        form.addRow(self.export_button)
         self.weights = self.path_field(form, "初始权重（YOLO 空值使用 yolo26s.pt）", kind="file")
         self.framework = self.path_field(form, "RT-DETR rtdetrv2_pytorch 目录")
         self.framework_config = self.path_field(form, "RT-DETRv2 模型 YAML", kind="file")
@@ -185,22 +180,15 @@ class TrainingPage(QtWidgets.QWidget):
         self.lr.setValue(.001)
         form.addRow("学习率", self.lr)
         self.seed = self.spin(form, "随机种子", 7, 0, 2147483647)
-        self.per_class = self.spin(form, "IQ 每类生成数量", 200, 2, 1000000)
-        self.iq_samples = self.spin(form, "IQ 窗口采样点数", 1024, 64, 65536)
-        self.snr_low = self.spin(form, "IQ 生成 SNR 下限（dB）", -5, -100, 100)
-        self.snr_high = self.spin(form, "IQ 生成 SNR 上限（dB）", 30, -100, 100)
-        self.count = self.spin(form, "检测数据生成条数", 64, 2, 1000000)
         self.size = QtWidgets.QComboBox()
         self.size.addItems(["128", "256", "512", "1024"])
         self.size.setCurrentText("1024")
-        form.addRow("新建/生成检测图像边长", self.size)
-        generate = QtWidgets.QWidget()
-        row = QtWidgets.QHBoxLayout(generate)
-        for title, kind in (("用本项目生成器准备检测数据", "generate"), ("用 TorchSig 准备检测数据", "torchsig")):
-            button = QtWidgets.QPushButton(title)
-            button.clicked.connect(lambda checked=False, task=kind: self.start_generation(task))
-            row.addWidget(button)
-        form.addRow(generate)
+        form.addRow("导出图像边长（检测）", self.size)
+        note_data = QtWidgets.QLabel(
+            "数据来源只有两种：所选集合（在“IQ 信号生成 → 信号集合生成”里生成并标注）与已有数据集；"
+            "本页只负责训练与验收。TorchSig 数据在生成页导入为集合同样直接可用。")
+        note_data.setWordWrap(True)
+        form.addRow(note_data)
         self.train_button = QtWidgets.QPushButton("开始训练 → 导出 → 验收")
         self.train_button.clicked.connect(self.start_training)
         form.addRow(self.train_button)
@@ -214,6 +202,7 @@ class TrainingPage(QtWidgets.QWidget):
         self.config_status.setStyleSheet("color: #b00020;")
         form.addRow(self.config_status)
         self.task.currentIndexChanged.connect(self.update_models)
+        self.source.currentIndexChanged.connect(self.update_models)
         self.update_models()
         scroll.setWidget(body)
         return scroll
@@ -223,11 +212,12 @@ class TrainingPage(QtWidgets.QWidget):
         detection = self.task.currentData() == "detection"
         self.arch.addItems((["rtdetr", "yolo26s"] if self.internal_models else ["rtdetr"])
                            if detection else ["cnn", "tcn"])
-        for field in (self.source, self.bundle, self.mapping, self.per_class, self.iq_samples,
-                      self.snr_low, self.snr_high):
-            field.setEnabled(not detection)
+        using_collection = self.source.currentData() == "collection"
+        for field in (self.collection, self.export_button):
+            field.setEnabled(using_collection and self.process is None)
         for field in (self.weights, self.framework, self.framework_config):
             field.setEnabled(detection)
+        self.size.setEnabled(detection and using_collection)
 
     def build_monitor(self):
         widget = QtWidgets.QWidget()
@@ -403,13 +393,54 @@ class TrainingPage(QtWidgets.QWidget):
         return {"repository": self.repository.text().strip(), "python": self.python.text().strip(),
             "task": self.task.currentData(), "arch": self.arch.currentText(),
             "data": self.data.text().strip(), "source": self.source.currentData(),
-            "bundle": self.bundle.text().strip(), "mapping": self.mapping.text().strip(),
+            "collection_id": self.collection.currentData(),
             "weights": self.weights.text().strip(), "framework_path": self.framework.text().strip(),
             "framework_config": self.framework_config.text().strip(), "device": self.device.currentText(),
             "epochs": self.epochs.value(), "batch": self.batch.value(), "lr": self.lr.value(),
-            "seed": self.seed.value(), "per_class": self.per_class.value(), "samples": self.iq_samples.value(),
-            "snr_low": self.snr_low.value(), "snr_high": self.snr_high.value(),
-            "count": self.count.value(), "image_size": int(self.size.currentText())}
+            "seed": self.seed.value()}
+
+    def refresh_collections(self):
+        """刷新“所选集合”下拉（生成页/导入页新建集合后由主窗口一并调用）。"""
+        previous = self.collection.currentData() if hasattr(self, "collection") else None
+        self.collection.blockSignals(True)
+        self.collection.clear()
+        for collection in self.window.workspace.list_collections():
+            self.collection.addItem(f"{collection['name']}（{collection['asset_count']}）",
+                                    collection["id"])
+        index = self.collection.findData(previous) if previous else -1
+        self.collection.setCurrentIndex(index if index >= 0 else
+                                        (self.collection.count() - 1
+                                         if self.collection.count() else -1))
+        self.collection.blockSignals(False)
+
+    def export_selected_collection(self):
+        """把所选集合导出为数据集（后台任务）；完成后路径写回“训练数据集”。"""
+        if self.process is not None:
+            self.report_error("已有训练任务在运行；请等待完成或先停止")
+            return
+        if getattr(self.window, "active_job", None) is not None:
+            self.report_error("已有后台任务在运行；请等待完成")
+            return
+        collection_id = self.collection.currentData()
+        if not collection_id:
+            self.report_error("请先选择一个集合（集合在“IQ 信号生成 → 信号集合生成”里创建）")
+            return
+        request = {"collection_id": collection_id, "task": self.task.currentData(),
+                   "seed": self.seed.value()}
+        if self.task.currentData() == "detection":
+            request["image_size"] = int(self.size.currentText())
+        self.config_status.clear()
+        self.status.setText("正在从所选集合导出训练数据…")
+        self.window.start_job("export_training_data", **request)
+
+    def export_finished(self, result):
+        """主窗口把导出任务的结果转过来：写入路径与状态，并提示下一步。"""
+        self.data.setText(result["path"])
+        name = {"detection": "检测", "iq": "AMC"}.get(result["task"], result["task"])
+        skipped = sum((result.get("skipped") or {}).values())
+        self.status.setText(f"已导出{name}数据集：{result['samples']} 个样本"
+                            + (f"（跳过 {skipped} 条）" if skipped else ""))
+        self.annotation_status.setText(f"导出目录：{result['path']}；现在可以“开始训练 → 导出 → 验收”")
 
     def add_asset(self):
         if self.process or not self.save_if_dirty():
@@ -423,16 +454,17 @@ class TrainingPage(QtWidgets.QWidget):
                       workspace=str(self.window.workspace.root), asset_id=asset["id"])
         self.start(config)
 
-    def start_generation(self, task):
+    def start_training(self):
         if not self.save_if_dirty():
             return
         config = self.configuration()
-        config["task"] = task
+        if config["source"] == "collection":
+            # “使用所选集合”先导出（结果路径已写回），训练进程只消费数据集目录
+            if not config["data"] or not Path(config["data"]).is_dir():
+                self.report_error("请先点“导出训练数据…”把所选集合导出为数据集，再开始训练")
+                return
+            config["source"] = "existing"
         self.start(config)
-
-    def start_training(self):
-        if self.save_if_dirty():
-            self.start(self.configuration())
 
     def start(self, config):
         if self.process:
@@ -488,6 +520,8 @@ class TrainingPage(QtWidgets.QWidget):
             self.train_button.setEnabled(False)
             self.load_button.setEnabled(False)
             self.history.setEnabled(False)
+            self.export_button.setEnabled(False)
+            self.collection.setEnabled(False)
             self.sections.widget(0).setEnabled(False)
             self.sections.setCurrentIndex(2)
             self.progress.setRange(0, 0)
@@ -562,9 +596,10 @@ class TrainingPage(QtWidgets.QWidget):
         self.progress.setValue(int(state == "success"))
         self.status.setText(f"{STATUS[state]} · {self.record['stage']} · {self.directory}")
         config = self.record["config"]
-        if state == "success" and config["task"] in ("generate", "torchsig", "asset"):
-            self.set_dataset(config["data"] if config["task"] == "asset" else self.directory / "data")
+        if state == "success" and config["task"] == "asset":
+            self.set_dataset(config["data"])
             self.sections.setCurrentIndex(0)
+        self.update_models()
         self.refresh_history()
 
     def stop(self):

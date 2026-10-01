@@ -296,6 +296,18 @@ def test_traditional_and_session_baselines_can_be_disabled():
     assert ours["f1"] >= theirs["f1"], "喂入真值框时 AI 逐跳不应弱于传统逐跳"
 
 
+def _assert_truth_close(actual, expected, rel=1e-9):
+    """逐项比较两条真值：数值允许极小相对误差（目标参数由边界派生取整）。"""
+    assert len(actual) == len(expected)
+    for left, right in zip(actual, expected):
+        assert set(left) == set(right)
+        for key, value in right.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                assert left[key] == pytest.approx(value, rel=rel, abs=1e-6), key
+            else:
+                assert left[key] == value, key
+
+
 def test_service_payload_scores_all_three_granularities(tmp_path):
     """服务层：逐跳真值、会话基线、传统逐跳三个口径各评一次，互不混用。"""
     from signal_analysis.services import _attach_hop_truth
@@ -319,7 +331,8 @@ def test_service_payload_scores_all_three_granularities(tmp_path):
                                             "f_high_hz": 100e3}]},
                "traditional": {"hops": hops[:3]}}
     result = _attach_hop_truth(payload, workspace, asset["id"], summary)
-    assert result["truth"] == truth
+    # 真值现读目标参考参数（与生成器摘要同源、经派生取整），逐项等价即可
+    _assert_truth_close(result["truth"], truth)
     assert result["metrics"]["true"] == len(truth)
     assert result["metrics"]["f1"] == pytest.approx(1.0)
     assert result["baseline_metrics"]["true"] == 1

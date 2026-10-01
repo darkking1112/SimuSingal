@@ -11,6 +11,7 @@ pytest.importorskip("pyqtgraph")
 
 from PySide6 import QtCore, QtWidgets
 from signal_analysis.gui import MainWindow, SignalParamsDialog, _mirrored_spectrum
+from signal_analysis.services import execute
 
 
 def wait_job(app, window):
@@ -31,11 +32,9 @@ def test_sigmf_generate_import_gui(tmp_path, monkeypatch):
     try:
         from signal_analysis.dataio import write_samples
         path = write_samples(tmp_path / "reference", np.ones(32), "sigmf", sample_rate=12345)
-        monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
-                            lambda *args: (str(path), ""))
-        window.sample_rate.setValue(48000)
-        window.import_file()
-        wait_job(app, window)
+        execute({"workspace": str(tmp_path), "action": "import", "path": str(path)})
+        window.refresh_assets()
+        window.assets.setCurrentRow(0)
         assert window.selected_asset()["sample_rate"] == 12345
         index = window.gen_export_format.findData("sigmf")
         assert index >= 0
@@ -58,7 +57,7 @@ def test_analysis_gui_workflow(tmp_path, monkeypatch):
     window = MainWindow(tmp_path)
     window.show()
     try:
-        assert window.tabs.count() == 9
+        assert window.tabs.count() == 10
         assert not hasattr(window, "sim_button")
         # 演示入口属于“IQ 信号生成”页，不在数据分析页（与侧栅同一父级）。
         generator = window._page_index("IQ 信号生成")
@@ -76,11 +75,11 @@ def test_analysis_gui_workflow(tmp_path, monkeypatch):
         assert window.last_result["kind"] == "analysis"
         assert window.tf_image.image.ndim == 2
         assert len(window.wave.listDataItems()) == 2
-        window.label.setText("GUI 参考备注")
-        window.save_label()
+        window.workspace.set_label(window.selected_asset()["id"], "GUI 参考备注")
+        window.refresh_assets()
         assert window.selected_asset()["label"] == "GUI 参考备注"
         assert window.history.count() == 1
-        window.tabs.setCurrentIndex(0)
+        window.tabs.setCurrentIndex(window._page_index("IQ 信号生成"))
         output = tmp_path / "analysis.json"
         monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", lambda *args: (str(output), "JSON"))
         window.export_current()
@@ -190,8 +189,8 @@ def test_iq_generation_gui_workflow(tmp_path):
     window = MainWindow(tmp_path)
     window.show()
     try:
-        assert window.tabs.count() == 9
-        window.tabs.setCurrentIndex(1)
+        assert window.tabs.count() == 10
+        window.tabs.setCurrentIndex(window._page_index("IQ 信号生成"))
         assert window.gen_signals.rowCount() == 0
         window.add_iq_signal({"mode": "qpsk", "offset": 100_000.0, "power_dbfs": -10.0,
                               "bandwidth": 100_000.0})
@@ -221,7 +220,7 @@ def test_detection_tab_workflow(tmp_path):
     window = MainWindow(tmp_path)
     window.show()
     try:
-        window.tabs.setCurrentIndex(1)
+        window.tabs.setCurrentIndex(window._page_index("IQ 信号生成"))
         window.gen_duration.setValue(0.5)
         window.gen_rate.setValue(1_000_000.0)
         window.gen_snr.setValue(20.0)
@@ -243,7 +242,7 @@ def test_detection_tab_workflow(tmp_path):
         assert window.detect_band_threshold.value() <= 1.0
         window.detect_threshold.setValue(3.0)
         window.detect_band_auto.setChecked(True)
-        window.tabs.setCurrentIndex(2)
+        window.tabs.setCurrentIndex(window._page_index("信号检测"))
         window.detect_button.click()
         wait_job(app, window)
         result = window.last_result
@@ -332,7 +331,7 @@ def test_detect_page_frequency_display_for_real_record(tmp_path):
         window.workspace.add_samples(samples, rate, "实采记录", "imported:iq16")
         window.refresh_assets()
         window.assets.setCurrentItem(window.assets.item(0))
-        window.tabs.setCurrentIndex(2)
+        window.tabs.setCurrentIndex(window._page_index("信号检测"))
         window.detect_nfft.setCurrentText("256")
         window.detect_button.click()
         wait_job(app, window)
@@ -447,7 +446,7 @@ def test_constellation_and_playback(tmp_path):
     window = MainWindow(tmp_path)
     window.show()
     try:
-        window.tabs.setCurrentIndex(1)
+        window.tabs.setCurrentIndex(window._page_index("IQ 信号生成"))
         window.gen_duration.setValue(1.0)
         window.add_iq_signal({"mode": "qpsk", "offset": 100_000.0, "power_dbfs": -10.0,
                               "bandwidth": 100_000.0})
@@ -759,10 +758,9 @@ def test_asset_status_reports_imported_source_format(tmp_path, monkeypatch):
     try:
         samples = np.exp(2j * np.pi * 0.01 * np.arange(4096)).astype(np.complex64)
         source = write_samples(tmp_path / "reference", samples, "npy", sample_rate=250_000)
-        monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
-                            lambda *args: (str(source), ""))
-        window.import_file()
-        wait_job(app, window)
+        execute({"workspace": str(tmp_path), "action": "import", "path": str(source),
+                 "sample_rate": 250_000})
+        window.refresh_assets()
         window.assets.setCurrentRow(0)
         window.asset_changed()
         asset = window.selected_asset()
@@ -796,10 +794,10 @@ def test_asset_status_reports_export_files(tmp_path, monkeypatch):
         # 先造一个没有导出物的资产
         samples = np.exp(2j * np.pi * 0.01 * np.arange(4096)).astype(np.complex64)
         source = write_samples(tmp_path / "reference", samples, "npy", sample_rate=250_000)
-        monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
-                            lambda *args: (str(source), ""))
-        window.import_file()
-        wait_job(app, window)
+        execute({"workspace": str(tmp_path), "action": "import", "path": str(source),
+                 "sample_rate": 250_000})
+        window.refresh_assets()
+        window.assets.setCurrentRow(0)
         imported = window.selected_asset()
         assert _export_label(window.status_detail.text()) == "无"
 

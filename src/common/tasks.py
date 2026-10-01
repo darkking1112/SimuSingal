@@ -30,7 +30,23 @@ def worker_command(request_path, response_path, worker_module):
     return [sys.executable, "-m", worker_module, "worker", str(request_path), str(response_path)]
 
 
-def run_job(request, *, worker_module, timeout=30.0, cancel=None):
+def _read_progress(path):
+    """读取 worker 写的进度文件；不存在或正在替换时返回 None（下次再读）。"""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def run_job(request, *, worker_module, timeout=30.0, cancel=None, progress=None,
+            cancel_grace=0.0):
+    """在子进程里执行一个任务。
+
+    ``progress(dict)`` 由父进程轮询 ``<job>/progress.json`` 后回调（worker 通过请求里的
+    ``job_dir`` 写入）；``cancel_grace`` > 0 时，取消先写 ``<job>/cancel.flag`` 并最多等待
+    这么多秒让 worker 自行收尾（返回部分结果），超时才强杀。
+    """
     if not 0 < timeout <= 3600:
         raise ValueError("任务超时应在 (0,3600] 秒内")
     workspace_root = Path(request["workspace"]).expanduser().resolve()
@@ -39,7 +55,8 @@ def run_job(request, *, worker_module, timeout=30.0, cancel=None):
     folder = workspace_root / "jobs" / job_id
     folder.mkdir()
     request_path, response_path = folder / "request.json", folder / "response.json"
-    write_json(request_path, {**request, "workspace": str(workspace_root)})
+    write_json(request_path, {**request, "workspace": str(workspace_root),
+                              "job_dir": str(folder)})
     status = {"job_id": job_id, "action": request["action"], "state": "running", "started": utc_now()}
     write_json(folder / "status.json", status)
     env = os.environ.copy()
@@ -55,13 +72,29 @@ def run_job(request, *, worker_module, timeout=30.0, cancel=None):
             process = subprocess.Popen(worker_command(request_path, response_path, worker_module),
                                        stdout=log, stderr=log, env=env)
             deadline = time.monotonic() + timeout
+            next_poll = 0.0
             while process.poll() is None:
                 if cancel is not None and cancel.is_set():
-                    raise JobError("cancelled", "任务已取消")
-                if time.monotonic() >= deadline:
+                    if cancel_grace <= 0:
+                        raise JobError("cancelled", "任务已取消")
+                    # 优雅取消：让 worker 自己封存已写数据并返回部分结果
+                    (folder / "cancel.flag").write_text("1", encoding="utf-8")
+                    grace_end = time.monotonic() + cancel_grace
+                    while process.poll() is None and time.monotonic() < grace_end:
+                        time.sleep(0.03)
+                    if process.poll() is None:
+                        raise JobError("cancelled", "任务已取消")
+                    break
+                now = time.monotonic()
+                if now >= deadline:
                     raise JobError("timeout", "任务超过允许时间")
                 if (folder / "worker.log").stat().st_size > 1024 * 1024:
                     raise JobError("log_limit", "工作进程日志超过 1 MiB，任务已终止")
+                if progress is not None and now >= next_poll:
+                    next_poll = now + 0.2
+                    report = _read_progress(folder / "progress.json")
+                    if report is not None:
+                        progress(report)
                 time.sleep(0.03)
             if process.returncode != 0:
                 raise JobError("worker_crashed", f"工作进程异常退出：{process.returncode}")

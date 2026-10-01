@@ -5,6 +5,16 @@ from pathlib import Path
 import shutil
 
 
+def decode_worker_log(data):
+    """解码 worker.log 字节：新实验为 UTF-8；历史实验由管道默认编码（GBK）写出，逐级回退。"""
+    for encoding in ("utf-8", "gbk"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", "replace")
+
+
 def save_record(directory, record):
     path = Path(directory) / "experiment.json"
     temporary = path.with_suffix(".tmp")
@@ -30,20 +40,23 @@ def list_experiments(root):
 
 
 def iq_plan(config, directory):
-    """Validate inputs before creating any output; return argv lists, never shell text."""
+    """Validate inputs before creating any output; return argv lists, never shell text.
+
+    数据来源只有一个：已存在的 IQ 数据集目录（来自所选集合的导出也先落成这样的目录）；
+    训练阶段不生成任何数据。
+    """
     repo = Path(config["repository"]).expanduser().resolve()
     python = shutil.which(config["python"])
     if not python:
         raise ValueError("训练 Python 不存在，请选择训练环境的解释器")
     scripts = repo / "training"
-    for name in ("build_iq_dataset.py", "train_iq.py", "verify_iq.py"):
+    for name in ("train_iq.py", "verify_iq.py"):
         if not (scripts / name).is_file():
             raise ValueError(f"训练源码目录缺少 training/{name}")
     arch = config["arch"]
     if arch not in ("cnn", "tcn"):
         raise ValueError("IQ 模型只支持 CNN / TCN")
-    for key, minimum, maximum in (("epochs", 1, 10000), ("batch", 1, 65536),
-                                  ("per_class", 2, 1000000), ("samples", 64, 65536)):
+    for key, minimum, maximum in (("epochs", 1, 10000), ("batch", 1, 65536)):
         value = config[key]
         if not isinstance(value, int) or not minimum <= value <= maximum:
             raise ValueError(f"{key} 应为 {minimum}～{maximum} 的整数")
@@ -51,9 +64,6 @@ def iq_plan(config, directory):
         raise ValueError("学习率必须为有限正数")
     if config["device"] not in ("cpu", "cuda"):
         raise ValueError("设备应为 cpu 或 cuda")
-    low, high = config["snr_low"], config["snr_high"]
-    if not all(math.isfinite(x) for x in (low, high)) or low > high:
-        raise ValueError("SNR 下限不能大于上限，且必须为有限数")
     out = Path(directory).resolve()
     stages = []
 
@@ -61,32 +71,12 @@ def iq_plan(config, directory):
         stages.append({"name": name, "argv": [python, "-u", str(scripts / script),
                                                *map(str, args)]})
 
-    source = config["source"]
-    if source == "existing":
-        data = Path(config["data"]).expanduser().resolve()
-        for name in ("iq_dataset.json", "iq_dataset.npz"):
-            if not (data / name).is_file():
-                raise ValueError(f"已有数据集缺少 {name}")
-    elif source in ("generator", "bundle"):
-        data = out / "data"
-        extra = []
-        if source == "bundle":
-            bundle = Path(config["bundle"]).expanduser().resolve()
-            mapping_path = Path(config["mapping"]).expanduser().resolve()
-            if not (bundle / "manifest.json").is_file() or not mapping_path.is_file():
-                raise ValueError("请选择 TorchSig bundle 和显式类别映射 JSON")
-            mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
-            from .ml.amc import AMC_CLASSES
-            if (not isinstance(mapping, dict) or not mapping or
-                    any(not isinstance(k, str) or not k or not isinstance(v, str)
-                        or v not in AMC_CLASSES for k, v in mapping.items())):
-                raise ValueError("本页生成配置要求 TorchSig 映射目标属于 A09 类别字典")
-            extra = ["--torchsig-bundle", bundle, "--torchsig-map", mapping_path]
-        stage("准备数据", "build_iq_dataset.py", "--output", data,
-              "--per-class", config["per_class"], "--samples", config["samples"],
-              "--seed", config["seed"], f"--snr-range={low},{high}", *extra)
-    else:
-        raise ValueError("未知数据来源")
+    if config["source"] != "existing":
+        raise ValueError("训练页不生成数据：请选择已有数据集，或先在“信号集合生成”里生成集合并选用“所选集合”")
+    data = Path(config["data"]).expanduser().resolve()
+    for name in ("iq_dataset.json", "iq_dataset.npz"):
+        if not (data / name).is_file():
+            raise ValueError(f"已有数据集缺少 {name}")
     # Run the existing full data-contract validator in the selected environment first.
     stages.append({"name": "校验环境与数据", "argv": [python, "-u", "-c",
         "import sys; sys.path.insert(0, sys.argv[1]); "

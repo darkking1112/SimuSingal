@@ -32,28 +32,8 @@ def execute(config, output):
     if task == "asset":
         append_asset(config["data"], config["workspace"], config["asset_id"])
         return
-    if task == "generate":
-        command = [sys.executable, "-u", str(ROOT / "training/build_dataset.py"),
-                   "--output", str(output / "data"), "--count", str(config["count"]),
-                   "--image-size", str(config["image_size"]), "--nfft", "512",
-                   "--seed", str(config["seed"]), "--min-bandwidth-ratio", "0.05"]
-        event(stage="生成时频图数据集")
-        subprocess.run(command, check=True)
-        return
-    if task == "torchsig":
-        event(stage="生成 TorchSig bundle")
-        subprocess.run([sys.executable, "-u", str(ROOT / "training/build_torchsig.py"),
-                        "--output", str(output / "bundle"), "--count", str(config["count"]),
-                        "--seed", str(config["seed"])], check=True)
-        event(stage="转换时频图与检测框")
-        # TorchSig 上游偶有 ~1 Hz 带宽的实例（1024px 下不足 1 像素），撞上最小框规则时
-        # 整条记录被拒绝；GUI 由用户驱动、无法"修正 bundle 元数据"，因此显式跳过并
-        # 计数——拒绝统计会打印到日志并写入数据卡片的 ingest.rejected，不是静默丢弃。
-        subprocess.run([sys.executable, "-u", str(ROOT / "training/ingest_torchsig.py"),
-                        "--bundle", str(output / "bundle"), "--output", str(output / "data"),
-                        "--image-size", str(config["image_size"]), "--skip-rejected"],
-                       check=True)
-        return
+    # 训练外部进程只训练：数据由“信号集合生成”在主程序内产出（TorchSig 例外，
+    # 由 signal_analysis.torchsig_support 在 Linux 下单独调用 build_torchsig.py）。
     if task == "iq":
         from signal_analysis.training_jobs import iq_plan
         if config["source"] == "existing":
