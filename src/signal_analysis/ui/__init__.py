@@ -9,11 +9,11 @@
 from .helpers import _asset_exports, _iq_binary_kind, _mirrored_spectrum
 from .main_window import (IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN, IMPORT_COL_FILE,
                           IMPORT_COL_FORMAT, IMPORT_COL_MOD, IMPORT_COL_NAME,
-                          IMPORT_COL_POINTS, IMPORT_COL_RATE, IMPORT_COL_STATUS,
-                          MainWindow, SignalParamsDialog, launch)
+                          IMPORT_COL_POINTS, IMPORT_COL_RATE, IMPORT_COL_SNR,
+                          IMPORT_COL_STATUS, MainWindow, SignalParamsDialog, launch)
 
 __all__ = ["MainWindow", "SignalParamsDialog", "launch",
            "IMPORT_COL_FILE", "IMPORT_COL_FORMAT", "IMPORT_COL_NAME", "IMPORT_COL_RATE",
            "IMPORT_COL_DTYPE", "IMPORT_COL_ENDIAN", "IMPORT_COL_POINTS",
-           "IMPORT_COL_MOD", "IMPORT_COL_STATUS",
+           "IMPORT_COL_MOD", "IMPORT_COL_SNR", "IMPORT_COL_STATUS",
            "_mirrored_spectrum", "_asset_exports", "_iq_binary_kind"]

@@ -2,8 +2,9 @@
 
 2026-10 改版：表格只读，编辑统一经由下方“信号参数编辑”面板（应用到所选信号）；
 清单新增“信号名称”列（显式名 > 调制 · 文件名前 5 字符 > 文件名，自动命名由
-``services.imports.import_signal_name`` 统一提供）；导入仅登记 AMC 目标（调制），
-频率/SNR/射频中心/备注不再由本页编辑或写入。缺参数的行标红、不参与导入。
+``services.imports.import_signal_name`` 统一提供）；导入仅登记 AMC 目标（调制 +
+可选 SNR，写目标参考参数 ``snr_db``，口径 ``declared``），频率/射频中心/备注
+不再由本页编辑或写入。缺参数的行标红、不参与导入。
 """
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from ...services.imports import import_signal_name
 from ..constants import (EXPORT_FORMATS, IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
                          IMPORT_COL_FILE, IMPORT_COL_FORMAT, IMPORT_COL_MOD,
                          IMPORT_COL_NAME, IMPORT_COL_POINTS, IMPORT_COL_RATE,
-                         IMPORT_COL_STATUS, IMPORT_FILE_FILTER,
+                         IMPORT_COL_SNR, IMPORT_COL_STATUS, IMPORT_FILE_FILTER,
                          IMPORT_FORMAT_LABELS, IMPORT_MODULATION_CHOICES,
                          IMPORT_SUFFIXES, MODE_CHOICES, MODE_SHORT, PLAY_MAX_ROWS,
                          PLAY_MAX_ROWS_PER_TICK, PLAY_WAVE_POINTS, _SCOPE_LABELS,
@@ -27,12 +28,35 @@ from ..runner import _run_task
 from ..widgets import UnitSpinBox, _freq_spin, _plain_spin, _unit_row
 
 
+def _canonical_import_paths(paths, existing=()):
+    """导入清单路径归一：SigMF 双文件按一条记录算，只登记元数据文件。
+
+    ``x.sigmf-data`` 在同名 ``x.sigmf-meta`` 存在时归一为该元数据路径——同批
+    既选两个文件、或先后分两次添加，都只留一条记录；``existing``（清单已有
+    路径）参与去重。元数据缺失的数据文件保持原样，由识别阶段给出明确错误。
+    """
+    seen = {str(item) for item in existing}
+    result = []
+    for raw in paths:
+        item = Path(str(raw))
+        if item.suffix.lower() == ".sigmf-data":
+            meta = item.with_suffix(".sigmf-meta")
+            if meta.is_file():
+                item = meta
+        text = str(item)
+        if text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
 class ImportPageMixin:
     def build_import(self):
         """独立导入页（方案 §7.1，2026-10 改版）：以文件清单为中心。
 
         表格只读展示识别结果与已填参数；“信号参数编辑”面板对所选文件统一填
-        信号名称/采样率/调制/类型/字节序，点击“应用到所选信号”写回表格。
+        信号名称/采样率/调制/SNR/类型/字节序，点击“应用到所选信号”写回表格。
         缺参数的单元格标红、状态不为“就绪”的行不参与导入；批量真值用
         “导入标注清单 CSV”（按文件名匹配、支持信号名称，未匹配行原样列出）。
         """
@@ -42,7 +66,7 @@ class ImportPageMixin:
             "批量导入离线 IQ：先添加文件或文件夹，自动识别格式与已知参数；"
             "缺采样率/类型/字节序的行标红、不参与导入。SigMF 自动读采样率，"
             "IQ 二进制需显式给出类型与字节序。在清单中选择文件后，用“信号参数编辑”"
-            "统一填写信号名称与参数；导入仅登记 AMC 标注（调制），多目标请用"
+            "统一填写信号名称与参数（AMC：调制 + 可选 SNR）；多目标请用"
             "“导入标注清单 CSV…”集中申报。")
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -58,7 +82,8 @@ class ImportPageMixin:
         toolbar.addWidget(self.import_add_files_button)
         self.import_add_folder_button = QtWidgets.QPushButton("添加文件夹…")
         self.import_add_folder_button.setToolTip(
-            "递归收集 .npy/.csv/.bin/.raw/.iq 与 SigMF 元数据文件（SigMF 数据文件自动去重）")
+            "递归收集 .npy/.csv/.bin/.raw/.iq 与 SigMF 元数据文件；"
+            "SigMF 双文件按一条记录计（数据文件自动配对，不单独列出）")
         self.import_add_folder_button.clicked.connect(self.choose_import_folder)
         toolbar.addWidget(self.import_add_folder_button)
         self.import_remove_button = QtWidgets.QPushButton("移除选中")
@@ -71,9 +96,6 @@ class ImportPageMixin:
         self.import_csv_button = QtWidgets.QPushButton("导入标注清单 CSV…")
         self.import_csv_button.clicked.connect(self.import_csv_manifest)
         toolbar.addWidget(self.import_csv_button)
-        self.import_csv_template_button = QtWidgets.QPushButton("导出模板")
-        self.import_csv_template_button.clicked.connect(self.export_import_template)
-        toolbar.addWidget(self.import_csv_template_button)
         toolbar.addStretch(1)
         self.import_count_label = QtWidgets.QLabel("清单为空")
         toolbar.addWidget(self.import_count_label)
@@ -81,7 +103,7 @@ class ImportPageMixin:
 
         self.import_table = self._make_table(
             ["文件名", "格式", "信号名称", "采样率", "类型", "字节序", "点数/时长",
-             "调制", "状态"])
+             "调制", "SNR", "状态"])
         self.import_table.setMinimumHeight(220)
         # Windows 资源管理器风格：选中行（含多选整行）浅蓝底、深色字。
         # 注：windows11 原生样式会忽略 selection-background-color，
@@ -138,6 +160,14 @@ class ImportPageMixin:
             "其余值登记为整条 AMC 目标，可自由输入字典外类名")
         self.import_modulation.setCurrentText("")
         params_layout.addWidget(self.import_modulation)
+        params_layout.addWidget(QtWidgets.QLabel("SNR"))
+        self.import_snr = QtWidgets.QLineEdit()
+        self.import_snr.setPlaceholderText("dB（留空不改）")
+        self.import_snr.setMaximumWidth(110)
+        self.import_snr.setToolTip(
+            "AMC 参考参数（可选）：数值写入所有选中行目标的参考参数；\n"
+            "留空不修改；所选行还没有目标时先填写调制")
+        params_layout.addWidget(self.import_snr)
         params_layout.addWidget(QtWidgets.QLabel("类型"))
         self.import_dtype = QtWidgets.QComboBox()
         self.import_dtype.addItem("不修改", None)
@@ -214,10 +244,8 @@ class ImportPageMixin:
             return
         found = sorted(str(item) for item in Path(folder).rglob("*")
                        if item.is_file() and item.suffix.lower() in IMPORT_SUFFIXES)
-        # SigMF 双文件按一条记录算：有同名 .sigmf-meta 时忽略 .sigmf-data
-        metas = {item[:-11] for item in found if item.endswith(".sigmf-meta")}
-        found = [item for item in found
-                 if not (item.endswith(".sigmf-data") and item[:-11] in metas)]
+        # SigMF 双文件按一条记录算：只登记元数据文件（数据文件自动配对）
+        found = _canonical_import_paths(found)
         if len(found) > 2000:
             found = found[:2000]
             self.status.setText("文件夹内文件超过 2000 个，本次只加入前 2000 个")
@@ -226,7 +254,7 @@ class ImportPageMixin:
     def _add_import_paths(self, paths):
         existing = {self._import_row_info(row)["path"]
                     for row in range(self.import_table.rowCount())}
-        new = [str(item) for item in paths if str(item) not in existing]
+        new = _canonical_import_paths(paths, existing)
         if not new:
             self.status.setText("没有新增文件（重复路径已跳过）")
             return
@@ -243,8 +271,19 @@ class ImportPageMixin:
                 self._append_import_row(info)
             else:
                 self._replace_import_row(row, info)
+        self._drop_shadowed_sigmf_rows()
         self._update_import_controls()
         self.status.setText(f"已识别 {len(files)} 个文件")
+
+    def _drop_shadowed_sigmf_rows(self):
+        """SigMF 双文件按一条记录计：元数据行已在清单时，移除同名的数据文件行。"""
+        paths = {str(self._import_row_info(row).get("path") or "")
+                 for row in range(self.import_table.rowCount())}
+        for row in range(self.import_table.rowCount() - 1, -1, -1):
+            item = Path(str(self._import_row_info(row).get("path") or ""))
+            if item.suffix.lower() == ".sigmf-data" and \
+                    str(item.with_suffix(".sigmf-meta")) in paths:
+                self.import_table.removeRow(row)
 
     def _append_import_row(self, info):
         row = self.import_table.rowCount()
@@ -275,7 +314,7 @@ class ImportPageMixin:
                 (IMPORT_COL_FORMAT, IMPORT_FORMAT_LABELS.get(info["format"], "—")),
                 (IMPORT_COL_NAME, ""), (IMPORT_COL_RATE, ""), (IMPORT_COL_DTYPE, ""),
                 (IMPORT_COL_ENDIAN, ""), (IMPORT_COL_POINTS, "—"),
-                (IMPORT_COL_MOD, ""), (IMPORT_COL_STATUS, "")):
+                (IMPORT_COL_MOD, ""), (IMPORT_COL_SNR, ""), (IMPORT_COL_STATUS, "")):
             item = QtWidgets.QTableWidgetItem(text)
             item.setFlags(flags)
             self.import_table.setItem(row, column, item)
@@ -294,6 +333,8 @@ class ImportPageMixin:
             endian_item.setToolTip("IQ 二进制字节序：小端或大端；由“信号参数编辑”选择")
         else:
             endian_item.setToolTip("非二进制格式无需字节序")
+        snr_item = self.import_table.item(row, IMPORT_COL_SNR)
+        snr_item.setToolTip("AMC 参考参数（dB）：由“信号参数编辑”的 SNR 或标注清单写入")
         self._refresh_import_row(row)
 
     def _refresh_import_row(self, row):
@@ -314,8 +355,9 @@ class ImportPageMixin:
             points = f"{count:,} 点"
         self._set_cell(row, IMPORT_COL_POINTS, points)
         self._set_cell(row, IMPORT_COL_MOD, info.get("modulation") or "—")
-        problem = self._import_row_problem(row)
         targets = info.get("targets") or []
+        self._set_cell(row, IMPORT_COL_SNR, self._display_target_snr(targets))
+        problem = self._import_row_problem(row)
         suffix = f" · 目标 {len(targets)} 条" if targets else ""
         status_item = self.import_table.item(row, IMPORT_COL_STATUS)
         if status_item is not None:
@@ -326,8 +368,7 @@ class ImportPageMixin:
             else:
                 status_item.setData(QtCore.Qt.ItemDataRole.ForegroundRole, None)
                 status_item.setToolTip("；".join(
-                    f"{target.get('scope')} · {target.get('modulation') or '调制未知'}"
-                    for target in targets) or "")
+                    self._target_label(target) for target in targets) or "")
         missing = self._import_missing_fields(row)
         highlight = QtGui.QBrush(QtGui.QColor("#ffe0e0"))
         for column, field in ((IMPORT_COL_RATE, "采样率"), (IMPORT_COL_DTYPE, "类型"),
@@ -361,6 +402,43 @@ class ImportPageMixin:
         """清单展示名：显式信号名 > 自动命名（调制 · 文件名前 5 字符）> 文件名。"""
         return info.get("signal_name") or import_signal_name(
             info.get("name") or "", info.get("modulation"))
+
+    @staticmethod
+    def _target_snr_value(target):
+        """目标 SNR 的显示/比较值：兼容清单阶段的字符串数值与空值。"""
+        value = target.get("snr_db")
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _target_common_snr(cls, targets):
+        """目标列表的公共 SNR：全部一致时返回该值（含全空 = None），否则 None。"""
+        values = {cls._target_snr_value(target) for target in (targets or [])}
+        if len(values) == 1:
+            return next(iter(values))
+        return None
+
+    @classmethod
+    def _display_target_snr(cls, targets):
+        """清单 SNR 列：无目标/全未知为空；一致显示数值；参差显示“混合”。"""
+        if not targets:
+            return ""
+        values = {cls._target_snr_value(target) for target in targets}
+        if len(values) == 1:
+            value = next(iter(values))
+            return "" if value is None else f"{value:g}"
+        return "混合"
+
+    @classmethod
+    def _target_label(cls, target):
+        """状态提示里的目标一行文案：粒度 · 调制（· SNR x dB）。"""
+        snr = cls._target_snr_value(target)
+        text = f"{target.get('scope')} · {target.get('modulation') or '调制未知'}"
+        return text + (f" · SNR {snr:g} dB" if snr is not None else "")
 
     def _import_row_info(self, row):
         item = self.import_table.item(row, IMPORT_COL_FILE)
@@ -461,6 +539,9 @@ class ImportPageMixin:
         self.import_rate.setText(f"{next(iter(rates)):g}" if len(rates) == 1 else "")
         mods = {info.get("modulation") or "" for info in infos}
         self.import_modulation.setCurrentText(next(iter(mods)) if len(mods) == 1 else "")
+        snrs = {self._target_common_snr(info.get("targets") or []) for info in infos}
+        common_snr = next(iter(snrs)) if len(snrs) == 1 else None
+        self.import_snr.setText("" if common_snr is None else f"{common_snr:g}")
         binary_all = all(info.get("format") == "binary" for info in infos)
         for combo, key in ((self.import_dtype, "binary_dtype"),
                            (self.import_endian, "endian")):
@@ -475,7 +556,11 @@ class ImportPageMixin:
                 combo.setCurrentIndex(0)
 
     def apply_signal_params(self):
-        """把面板非空字段应用到所选文件；调制非空时替换为一条整条 AMC 目标。"""
+        """把面板非空字段应用到所选文件；调制非空时替换为一条整条 AMC 目标。
+
+        SNR 写入目标的参考参数：有目标则更新，
+        同一次应用里新建的目标直接带上；所选行尚无目标时提示先申报调制。
+        """
         rows = self._selected_import_rows()
         if not rows:
             self.status.setText("请先在文件清单里选择要编辑的文件")
@@ -495,15 +580,28 @@ class ImportPageMixin:
             if not np.isfinite(rate) or rate <= 0:
                 self.status.setText("采样率必须为正数（Hz）")
                 return
+        snr = None
+        snr_text = self.import_snr.text().strip()
+        if snr_text:
+            try:
+                snr = float(snr_text)
+            except ValueError:
+                self.status.setText(f"SNR 应为数值（dB）：{snr_text}")
+                return
+            if not np.isfinite(snr):
+                self.status.setText("SNR 必须为有限数值（dB）")
+                return
         modulation = self.import_modulation.currentText().strip()
         binary_all = all(self._import_row_info(row).get("format") == "binary"
                          for row in rows)
         binary_dtype = self.import_dtype.currentData() if binary_all else None
         endian = self.import_endian.currentData() if binary_all else None
         sigmf_skipped = 0
+        snr_applied = snr_pending = 0
         applied = []
         for row in rows:
             info = self._import_row_info(row)
+            targets = list(info.get("targets") or [])
             changes = {}
             if name:
                 changes["signal_name"] = name
@@ -522,12 +620,25 @@ class ImportPageMixin:
                     changes["targets"] = []
                 else:
                     count, _ = self._import_samples(row)
+                    carried = (snr if snr is not None
+                               else self._target_common_snr(targets))
                     target = {"scope": "whole_record", "modulation": modulation}
+                    if carried is not None:
+                        target["snr_db"] = carried
                     if count:
                         target.update({"start": 0, "end": int(count),
                                        "start_unit": "samples"})
                     changes["modulation"] = modulation
                     changes["targets"] = [target]
+                    if snr is not None:
+                        snr_applied += 1
+            elif snr is not None:
+                if targets:
+                    changes["targets"] = [{**target, "snr_db": snr}
+                                          for target in targets]
+                    snr_applied += 1
+                else:
+                    snr_pending += 1
             if changes:
                 self._set_import_row_info(row, **changes)
         if name:
@@ -536,10 +647,18 @@ class ImportPageMixin:
             applied.append("采样率")
         if modulation:
             applied.append("调制")
+        if snr is not None and snr_applied:
+            applied.append("SNR")
         if binary_dtype or endian:
             applied.append("类型/字节序")
-        text = (f"已应用 {'、'.join(applied)} 到 {len(rows)} 个文件"
-                if applied else "未应用任何字段（留空表示不修改）")
+        if applied:
+            text = f"已应用 {'、'.join(applied)} 到 {len(rows)} 个文件"
+            if snr_pending:
+                text += f"；{snr_pending} 行无目标，SNR 未应用（请先申报调制）"
+        elif snr is not None and snr_pending:
+            text = "SNR 未应用：所选行尚无目标（请先申报调制）"
+        else:
+            text = "未应用任何字段（留空表示不修改）"
         if sigmf_skipped:
             text += f"；{sigmf_skipped} 个 SigMF 行采样率取自元数据，已跳过"
         self.status.setText(text)
@@ -581,33 +700,6 @@ class ImportPageMixin:
         self.start_job("import_manifest", owner="信号导入", label="解析标注清单",
                        cancel_text="取消本次解析", path=path, paths=paths)
 
-    def export_import_template(self):
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "导出标注清单模板", "标注清单模板.csv", "CSV (*.csv)")
-        if not path:
-            return
-        import csv as _csv
-
-        header = ["文件", "信号名称", "粒度", "起止单位", "起始", "结束", "调制",
-                  "采集时间"]
-        examples = [
-            ["record_000.npy", "QPSK 示例", "whole_record", "采样点", "0", "",
-             "QPSK", "2026-09-01T08:30:00Z"],
-            ["record_001.npy", "", "session", "毫秒", "0", "120", "AM",
-             "2026-09-01T09:15:00Z"],
-            ["record_001.npy", "", "session", "毫秒", "130", "260", "2FSK",
-             "2026-09-01T09:15:00Z"],
-        ]
-        try:
-            with Path(path).open("w", encoding="utf-8-sig", newline="") as handle:
-                writer = _csv.writer(handle)
-                writer.writerow(header)
-                writer.writerows(examples)
-        except OSError as exc:
-            self.status.setText(f"模板导出失败：{exc}")
-            return
-        self.status.setText(f"已导出标注清单模板：{path}")
-
     def _apply_import_manifest(self, result):
         files = result.get("files") or {}
         captures = result.get("captures") or {}
@@ -636,7 +728,11 @@ class ImportPageMixin:
             if changes:
                 self._set_import_row_info(row, **changes)
         unmatched = result.get("unmatched") or []
+        with_snr = sum(1 for targets in files.values()
+                       for target in targets if target.get("snr_db") is not None)
         text = f"标注清单：已挂接 {applied_targets} 条目标（{applied_rows} 个文件）"
+        if with_snr:
+            text += f"；{with_snr} 条目标带 SNR"
         if applied_names:
             text += f"；{applied_names} 个文件带信号名称"
         if captures:

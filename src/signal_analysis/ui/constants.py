@@ -26,10 +26,10 @@ IMPORT_FORMAT_LABELS = {"npy": "NPY", "csv": "CSV", "binary": "IQ 二进制",
                         "sigmf": "SigMF", "unknown": "—"}
 #: 调制下拉：AM 置首（常用），其后 A09 五类 + 未知；可自由输入其他类名（保留原名）。
 IMPORT_MODULATION_CHOICES = ("AM", "FM", "SSB", "2ASK", "QPSK", "16QAM", "64QAM", "未知")
-#: 列序（2026-10 改版）：文件名/格式/信号名称/采样率/类型/字节序/点数时长/调制/状态。
+#: 列序（2026-10 改版）：文件名/格式/信号名称/采样率/类型/字节序/点数时长/调制/SNR/状态。
 IMPORT_COL_FILE, IMPORT_COL_FORMAT, IMPORT_COL_NAME, IMPORT_COL_RATE = 0, 1, 2, 3
 IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN, IMPORT_COL_POINTS = 4, 5, 6
-IMPORT_COL_MOD, IMPORT_COL_STATUS = 7, 8
+IMPORT_COL_MOD, IMPORT_COL_SNR, IMPORT_COL_STATUS = 7, 8, 9
 # 滚动瀑布图：时间窗内最多保留的帧数与单次刷新最多计算的帧数。
 PLAY_MAX_ROWS = 360
 PLAY_MAX_ROWS_PER_TICK = 64

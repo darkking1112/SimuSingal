@@ -209,7 +209,8 @@ def _apply_import_targets(workspace, asset, targets):
     """按目标行建立目标与参考参数（导入仅支持 AMC 标注）。
 
     目标必须给出调制；``for_amc`` 恒为 1、``for_detection`` 恒为 0（检测标注
-    不再经导入入口建立）。旧调用传入的频率/SNR 不写入参考参数，由调用方回报。
+    不再经导入入口建立）。可选 SNR 写入参考参数 ``snr_db``（口径 ``declared``：
+    导入申报值，非实测）；旧调用传入的频率不写入参考参数，由调用方回报。
     """
     for index, row in enumerate(targets):
         if not row["modulation"]:
@@ -219,7 +220,8 @@ def _apply_import_targets(workspace, asset, targets):
         workspace.append_target_version(
             target["id"], source="import", note=row["note"],
             sample_start=row["sample_start"], sample_end=row["sample_end"],
-            modulation=row["modulation"])
+            modulation=row["modulation"], snr_db=row["snr_db"],
+            snr_definition="declared" if row["snr_db"] is not None else None)
     return len(targets)
 
 
@@ -275,7 +277,7 @@ _MANIFEST_COLUMNS = {"文件": "file", "文件名": "file", "file": "file", "pat
                      "capture_started_at": "capture"}
 
 #: 旧清单里已被弃用的列（导入仅支持 AMC 标注）：出现时在报告里提示已忽略。
-_MANIFEST_IGNORED_KEYS = ("f_low", "f_high", "snr", "note")
+_MANIFEST_IGNORED_KEYS = ("f_low", "f_high", "note")
 
 
 def import_manifest(request):
@@ -284,8 +286,9 @@ def import_manifest(request):
     只做结构校验（粒度/单位/数值）与匹配，不写任何资产；时间单位换算留给导入时
     按每个文件的采样率完成（``_normalized_target_rows``）。“信号名称”与“采集
     时间”为文件级：同一文件各行必须一致，导入时随资产写入。导入仅支持 AMC
-    标注：目标行必须给出“调制”；旧列（频率下限/上限、SNR、备注）不再解析，
-    出现时记入 ``ignored_columns`` 由调用方提示，不静默丢弃。
+    标注：目标行必须给出“调制”，可选“SNR”随该行目标写入参考参数；旧列
+    （频率下限/上限、备注）不再解析，出现时记入 ``ignored_columns`` 由调用方
+    提示，不静默丢弃。
     """
     path = Path(str(request.get("path") or ""))
     if not path.is_file():
@@ -338,7 +341,7 @@ def import_manifest(request):
             if capture and len(capture) > 64:
                 raise ValueError("采集时间最长 64 个字符")
             has_target = any(cell(row, key) for key in ("scope", "start", "end",
-                                                        "modulation"))
+                                                        "modulation", "snr"))
             if has_target:
                 if not cell(row, "modulation"):
                     raise ValueError("导入仅支持 AMC 标注：目标行必须给出“调制”")
@@ -346,7 +349,8 @@ def import_manifest(request):
                 scope = _target_scope_name(cell(row, "scope"), f"清单第 {line_no} 行")
                 target = {"scope": scope, "start": cell(row, "start"),
                           "end": cell(row, "end"), "start_unit": unit,
-                          "modulation": cell(row, "modulation")}
+                          "modulation": cell(row, "modulation"),
+                          "snr_db": cell(row, "snr") or None}
                 # 结构校验（成对/数值/大小关系）；单位换算与文件采样率绑定，导入时再做
                 _normalized_target_rows([target], rate=None, sample_count=None,
                                         row_label=f"清单第 {line_no} 行")
@@ -377,8 +381,9 @@ def import_files(workspace, request):
     请求优先用 ``files``（GUI 清单：``path/name/sample_rate/binary_dtype/endian/
     capture_started_at/targets``）；``paths`` + 公共参数仍作为回落，命令行与旧调用
     不受影响。``name`` 缺省按 :func:`import_signal_name` 自动命名（有调制时用
-    “调制 · 文件名前 5 字符”）；目标只登记 AMC（调制必填、``for_detection`` 恒为
-    0），行内若带旧检测字段（频率/SNR）则忽略并在结果 ``ignored`` 里回报。
+    “调制 · 文件名前 5 字符”）；目标只登记 AMC（调制必填、SNR 可选、
+    ``for_detection`` 恒为 0），SNR 写入目标参考参数（口径 ``declared``）；
+    行内若带旧检测字段（频率）则忽略并在结果 ``ignored`` 里回报。
     ``rf_center_hz``/``label`` 保留用于 CLI 兼容（页面不再提供入口）；
     ``capture_started_at`` 逐文件优先、其次请求级、缺省记本批导入时间。
     """
@@ -431,8 +436,7 @@ def import_files(workspace, request):
                                if row.get("modulation")), None)
             asset_name = signal_name or import_signal_name(path.name, modulation)
             ignored = [title for field, title in
-                       (("f_low_hz", "频率下限"), ("f_high_hz", "频率上限"),
-                        ("snr_db", "SNR"))
+                       (("f_low_hz", "频率下限"), ("f_high_hz", "频率上限"))
                        if any(row.get(field) is not None for row in targets)]
             common = {
                 "source_kind": "imported",

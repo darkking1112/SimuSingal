@@ -22,7 +22,7 @@ pytest.importorskip("pyqtgraph")
 from PySide6 import QtCore, QtWidgets
 from signal_analysis.data.io import write_samples
 from signal_analysis.ui import (IMPORT_COL_MOD, IMPORT_COL_NAME, IMPORT_COL_POINTS,
-                                IMPORT_COL_STATUS, MainWindow)
+                                IMPORT_COL_SNR, IMPORT_COL_STATUS, MainWindow)
 from signal_analysis.services import execute
 from signal_analysis.data import Workspace
 
@@ -72,6 +72,7 @@ def _apply_params(window, rows, **fields):
     window.import_name.setText(fields.get("name", ""))
     window.import_rate.setText(fields.get("rate", ""))
     window.import_modulation.setCurrentText(fields.get("modulation", ""))
+    window.import_snr.setText(fields.get("snr", ""))
     window.import_dtype.setCurrentIndex(
         window.import_dtype.findData(fields.get("dtype")))
     window.import_endian.setCurrentIndex(
@@ -125,10 +126,11 @@ def test_file_list_edit_and_import_via_panel(tmp_path, monkeypatch):
         assert window.import_dtype.isEnabled()
         assert _status_text(window, bin_row) == "就绪"
 
-        # 面板填写信号名称与调制（自由文本之外的字典内名称）
-        _apply_params(window, [npy_row], name="批次信号", modulation="QPSK")
+        # 面板填写信号名称、调制与 SNR（自由文本之外的字典内名称）
+        _apply_params(window, [npy_row], name="批次信号", modulation="QPSK", snr="15")
         assert _cell_text(window, npy_row, IMPORT_COL_NAME) == "批次信号"
         assert _cell_text(window, npy_row, IMPORT_COL_MOD) == "QPSK"
+        assert _cell_text(window, npy_row, IMPORT_COL_SNR) == "15"
         assert "目标 1 条" in _status_text(window, npy_row)
         assert window.import_start_button.isEnabled()
 
@@ -159,6 +161,8 @@ def test_file_list_edit_and_import_via_panel(tmp_path, monkeypatch):
     target = workspace.list_targets(assets["批次信号"]["id"], with_current=True)[0]
     assert (target["for_detection"], target["for_amc"]) == (0, 1)
     assert target["current"]["modulation"] == "QPSK"
+    assert target["current"]["snr_db"] == pytest.approx(15.0)
+    assert target["current"]["snr_definition"] == "declared"
     assert workspace.list_targets(assets["record_b.bin"]["id"]) == []
     collection = next(item for item in workspace.list_collections()
                       if item["name"] == "清单批次集合")
@@ -306,6 +310,7 @@ def test_csv_manifest_attaches_amc_targets_and_names(tmp_path, monkeypatch):
         assert "当前文件清单中没有该文件" in report and "终点必须大于起点" in report
         assert "目标行必须给出“调制”" in report
         assert "已忽略列" in report and "频率下限Hz" in report and "备注" in report
+        assert "1 条目标带 SNR" in report
         row = window._import_row_by_path(str(first))
         assert "目标 2 条" in _status_text(window, row)
         assert _cell_text(window, row, IMPORT_COL_NAME) == "C 信号"
@@ -329,12 +334,14 @@ def test_csv_manifest_attaches_amc_targets_and_names(tmp_path, monkeypatch):
     assert whole["current"]["sample_start"] == 0
     assert whole["current"]["sample_end"] == 48   # 1 ms × 48000 / 1000
     assert whole["current"]["modulation"] == "QPSK"
-    # 旧检测列（频率/SNR）不再写入参考参数
+    # 频率列仍被忽略；SNR 列写入参考参数（口径 declared）
     assert whole["current"]["f_low_hz"] is None
-    assert whole["current"]["snr_db"] is None
+    assert whole["current"]["snr_db"] == pytest.approx(15.0)
+    assert whole["current"]["snr_definition"] == "declared"
     session = targets["session"]
     assert (session["for_detection"], session["for_amc"]) == (0, 1)
     assert session["current"]["modulation"] == "AM"
+    assert session["current"]["snr_db"] is None
     untouched = next(item for item in workspace.list_assets()
                      if item["name"] == "record_d.npy")
     assert workspace.list_targets(untouched["id"]) == []
@@ -429,6 +436,46 @@ def test_panel_free_text_modulation_and_amc_only(tmp_path, monkeypatch):
 
 
 @pytest.mark.gui
+def test_panel_snr_requires_target_and_updates_existing(tmp_path, monkeypatch):
+    """面板 SNR：无目标时不应用并提示；有目标时新建/更新目标的参考参数；清目标同步清空。"""
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    source = _make_npy(tmp_path, "snr_a.npy", 64)
+    window = MainWindow(tmp_path)
+    window.show()
+    try:
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileNames",
+                            lambda *args: ([str(source)], "数据"))
+        window.choose_import_files()
+        wait_job(app, window)
+        _apply_params(window, [0], rate="48000")
+
+        # 尚无目标：SNR 不落库，提示先申报调制
+        _apply_params(window, [0], snr="12")
+        assert "SNR 未应用" in window.status.text()
+        assert "目标" not in _status_text(window, 0)
+        assert _cell_text(window, 0, IMPORT_COL_SNR) == ""
+
+        # 调制 + SNR 一次应用：目标带上参考参数，清单列显示数值
+        _apply_params(window, [0], modulation="QPSK", snr="12")
+        assert _cell_text(window, 0, IMPORT_COL_SNR) == "12"
+        # 单独改 SNR：面板载入公共值，应用后更新已有目标
+        _select_rows(window.import_table, [0])
+        assert window.import_snr.text() == "12"
+        _apply_params(window, [0], snr="18.5")
+        assert _cell_text(window, 0, IMPORT_COL_SNR) == "18.5"
+        # 调制“未知”= 清除目标，SNR 列随之清空
+        _apply_params(window, [0], modulation="未知")
+        assert _cell_text(window, 0, IMPORT_COL_SNR) == ""
+        # 非法 SNR：就地提示且不生效
+        _apply_params(window, [0], modulation="QPSK", snr="abc")
+        assert "SNR 应为数值" in window.status.text()
+        assert _cell_text(window, 0, IMPORT_COL_SNR) == ""
+    finally:
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.gui
 def test_new_collection_requires_a_name(tmp_path, monkeypatch):
     """选“新建集合…”但没填名称：就地提示，不启动导入任务。"""
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -472,6 +519,57 @@ def test_import_inspect_reads_headers(tmp_path):
     assert "文件不存在" in files["missing.npy"]["error"]
 
 
+@pytest.mark.gui
+def test_sigmf_pair_only_registers_metadata_row(tmp_path, monkeypatch):
+    """SigMF 双文件按一条记录计：数据文件归一为元数据行；先后添加/补配不产生重复。"""
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    meta = write_samples(tmp_path / "incoming" / "pair_a",
+                         np.ones(32, dtype=np.complex64), "sigmf", sample_rate=48000)
+    data = meta.with_suffix(".sigmf-data")
+    meta_text = meta.read_text(encoding="utf-8")
+    meta.unlink()  # 先制造“只有数据文件”的场景
+    window = MainWindow(tmp_path)
+    window.show()
+    try:
+        # 元数据缺失：数据文件保持原样并明确报错，不静默
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileNames",
+                            lambda *args: ([str(data)], "数据"))
+        window.choose_import_files()
+        wait_job(app, window)
+        assert window.import_table.rowCount() == 1
+        assert window._import_row_info(0)["path"] == str(data)
+        assert "SigMF 元数据文件缺失" in _status_text(window, 0)
+
+        # 补回元数据后再添加：只保留元数据行，数据行被覆盖移除
+        meta.write_text(meta_text, encoding="utf-8")
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileNames",
+                            lambda *args: ([str(meta)], "数据"))
+        window.choose_import_files()
+        wait_job(app, window)
+        assert window.import_table.rowCount() == 1
+        assert window._import_row_info(0)["path"] == str(meta)
+
+        # 两个文件一起选（或只选数据）：均视为已有，不新增
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileNames",
+                            lambda *args: ([str(meta), str(data)], "数据"))
+        window.choose_import_files()
+        assert window.import_table.rowCount() == 1
+        assert "没有新增文件" in window.status.text()
+
+        assert _status_text(window, 0) == "就绪"
+        window.start_import_batch()
+        wait_job(app, window)
+        assert window.import_table.rowCount() == 0
+    finally:
+        window.close()
+        app.processEvents()
+
+    workspace = Workspace(tmp_path)
+    assets = workspace.list_assets()
+    assert len(assets) == 1
+    assert assets[0]["sample_count"] == 32
+
+
 def test_import_files_per_file_payload_and_legacy(tmp_path):
     """import_files：逐文件名称/采样率/AMC 目标（分片），旧 paths 请求与旧检测字段兼容规则。"""
     first = _make_npy(tmp_path, "payload_a.npy", 32)
@@ -482,7 +580,8 @@ def test_import_files_per_file_payload_and_legacy(tmp_path):
                            "rf_center_hz": 433e6, "name": "甲信号",
                            "capture_started_at": "2026-09-01T04:05:06Z",
                            "targets": [{"scope": "whole_record", "start": 0, "end": 32,
-                                        "start_unit": "samples", "modulation": "QPSK"}]},
+                                        "start_unit": "samples", "modulation": "QPSK",
+                                        "snr_db": 12.5}]},
                           {"path": str(second), "sample_rate": 2000.0,
                            "targets": [{"scope": "whole_record", "start": 0, "end": 48,
                                         "start_unit": "samples", "modulation": "AM",
@@ -507,6 +606,8 @@ def test_import_files_per_file_payload_and_legacy(tmp_path):
     target = workspace.list_targets(assets["甲信号"]["id"], with_current=True)[0]
     assert (target["for_detection"], target["for_amc"]) == (0, 1)
     assert target["current"]["modulation"] == "QPSK"
+    assert target["current"]["snr_db"] == pytest.approx(12.5)
+    assert target["current"]["snr_definition"] == "declared"
     second_target = workspace.list_targets(assets["AM · paylo"]["id"],
                                            with_current=True)[0]
     assert second_target["current"]["modulation"] == "AM"
