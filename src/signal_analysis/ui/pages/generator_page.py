@@ -10,13 +10,13 @@ import pyqtgraph as pg
 from ...core_api import MAX_SAMPLES, plan_signal, spectrum_row
 from ..constants import (EXPORT_FORMATS, IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
                          IMPORT_COL_FILE, IMPORT_COL_FORMAT, IMPORT_COL_MOD,
-                         IMPORT_COL_NOTE, IMPORT_COL_POINTS, IMPORT_COL_RATE,
-                         IMPORT_COL_RF_CENTER, IMPORT_COL_STATUS, IMPORT_FILE_FILTER,
+                         IMPORT_COL_NAME, IMPORT_COL_POINTS, IMPORT_COL_RATE,
+                         IMPORT_COL_STATUS, IMPORT_FILE_FILTER,
                          IMPORT_FORMAT_LABELS, IMPORT_MODULATION_CHOICES,
                          IMPORT_SUFFIXES, MODE_CHOICES, MODE_SHORT, PLAY_MAX_ROWS,
                          PLAY_MAX_ROWS_PER_TICK, PLAY_WAVE_POINTS, _SCOPE_LABELS,
                          _SOURCE_KIND_LABELS, _VERSION_SOURCE_LABELS)
-from ..dialogs import ImportBatchDialog, SignalParamsDialog
+from ..dialogs import SignalParamsDialog
 from ..helpers import (_AMC_SOURCE_TEXT, _asset_exports, _asset_format, _comparison_line,
                        _fmt_hz, _fmt_metric, _fmt_span, _iq_binary_kind, _mirrored_spectrum)
 from ..runner import _run_task
@@ -130,7 +130,7 @@ class GeneratorPageMixin:
         row.addWidget(hint, 1)
         self.demo_button = QtWidgets.QPushButton("生成数学双音演示")
         self.demo_button.setToolTip("点数 = 上方采样率 × 持续时间，与“预计 N 个复采样”一致；"
-                                    "生成独立资产并在左侧资产列表选中，可到“数据分析”页分析")
+                                    "生成独立资产并在左侧资产列表选中，可到“态势显示”页分析")
         self.demo_button.clicked.connect(self.generate_demo_clicked)
         row.addWidget(self.demo_button)
         return group
@@ -196,7 +196,7 @@ class GeneratorPageMixin:
     def _build_export_row(self):
         group = QtWidgets.QGroupBox("资产与导出")
         row = QtWidgets.QHBoxLayout(group)
-        row.addWidget(QtWidgets.QLabel("资产名称"))
+        row.addWidget(QtWidgets.QLabel("信号名称"))
         self.gen_name = QtWidgets.QLineEdit()
         self.gen_name.setPlaceholderText("留空自动命名，如：IQ 生成 · QPSK + AM")
         row.addWidget(self.gen_name, 1)

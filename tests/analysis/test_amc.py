@@ -352,7 +352,7 @@ def test_gui_amc_tab_renders_result(tmp_path):
         assert window.tabs.count() == 10
         labels = [window.tabs.tabText(index) for index in range(window.tabs.count())]
         # 页序由 signal_analysis.ui.MainWindow.__init__ 的页面注册表决定，此处钉住以免误改
-        assert labels == ["信号导入", "IQ 信号生成", "数据分析", "信号检测", "调制识别", "跳频参数",
+        assert labels == ["信号导入", "IQ 信号生成", "态势显示", "信号检测", "调制识别", "跳频参数",
                           "模型训练", "数据管理", "算法对比", "运行记录"]
         assert window.amc_button.text() and window.amc_from_detect.text()
         assert "内置" in window.amc_model_status.text()  # 内置模型随包分发时应给出可用的提示

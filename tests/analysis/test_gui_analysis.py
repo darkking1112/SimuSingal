@@ -59,9 +59,9 @@ def test_analysis_gui_workflow(tmp_path, monkeypatch):
     try:
         assert window.tabs.count() == 10
         assert not hasattr(window, "sim_button")
-        # 演示入口属于“IQ 信号生成”页，不在数据分析页（与侧栅同一父级）。
+        # 演示入口属于“IQ 信号生成”页，不在态势显示页（与侧栅同一父级）。
         generator = window._page_index("IQ 信号生成")
-        analysis = window._page_index("数据分析")
+        analysis = window._page_index("态势显示")
         assert window.tabs.widget(generator).isAncestorOf(window.demo_button)
         assert not window.tabs.widget(analysis).isAncestorOf(window.demo_button)
         window.demo_button.click()
@@ -516,8 +516,8 @@ def test_constellation_and_playback(tmp_path):
         window.spec_db_span.setValue(80.0)
         assert not window.range_follow.isChecked()
         # 实时播放：进度推进、暂停冻结、停止复位
-        # 结果不再自动切页：显式进入“数据分析”页（页内控件可见性依赖当前标签页）
-        window.tabs.setCurrentIndex(window._page_index("数据分析"))
+        # 结果不再自动切页：显式进入“态势显示”页（页内控件可见性依赖当前标签页）
+        window.tabs.setCurrentIndex(window._page_index("态势显示"))
         window.analyze_mode.setCurrentText("实时播放")
         assert window.play_bar.isVisible()
         assert window.play_window.currentText() == "200 ms"

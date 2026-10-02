@@ -12,11 +12,26 @@ from ..data.sigmf import SIGMF_EXTENSIONS, read_sigmf, read_sigmf_metadata
 from .progress import Reporter
 
 
+def import_signal_name(file_name, modulation):
+    """导入资产的自动命名（GUI 预览与服务落库共用同一条规则）。
+
+    显式填写的名称优先（调用方自行传入）；本函数只算回退名：
+    有调制 → ``调制 · 文件名主体前 5 字符``；无调制（或“未知”）→ 文件名。
+    """
+    text = str(file_name or "")
+    mod = str(modulation or "").strip()
+    if not mod or mod == "未知":
+        return text
+    stem = Path(text).stem or text
+    return f"{mod} · {stem[:5]}"
+
+
 def import_file(workspace, request):
-    """单文件导入（单信号表单之外的“旧版”入口）。"""
+    """单文件导入（旧版入口）：可选 ``name`` 覆盖资产名，缺省用文件名。"""
     path = Path(request["path"])
     samples, rate, metadata = _parse_import_file(path, request)
-    return workspace.add_samples(samples, rate, path.name, str(path.resolve()),
+    name = _optional_text_value(request.get("name")) or path.name
+    return workspace.add_samples(samples, rate, name, str(path.resolve()),
                                  metadata=metadata,
                                  capture_started_at=request.get("capture_started_at")
                                  or utc_now())
@@ -191,24 +206,20 @@ def _optional_float(value, name):
 
 
 def _apply_import_targets(workspace, asset, targets):
-    """按目标行建立目标与参考参数（资料不足 = 未知待标注，不建目标）。
+    """按目标行建立目标与参考参数（导入仅支持 AMC 标注）。
 
-    适用标记按方案 §12.3：``for_detection`` 只在给出频带时置 1；``for_amc``
-    只在给出调制时置 1（字典外的规范名如 AM 同样置 1，类别映射在 AMC 侧记
-    ``out_of_taxonomy`` 并保留原名）。
+    目标必须给出调制；``for_amc`` 恒为 1、``for_detection`` 恒为 0（检测标注
+    不再经导入入口建立）。旧调用传入的频率/SNR 不写入参考参数，由调用方回报。
     """
     for index, row in enumerate(targets):
-        snr = row.get("snr_db")
-        target = workspace.add_target(
-            asset["id"], f"s{index}", row["scope"],
-            for_detection=1 if row["f_low_hz"] is not None else 0,
-            for_amc=1 if row["modulation"] else 0)
+        if not row["modulation"]:
+            raise ValueError("导入仅支持 AMC 标注：目标行必须给出调制")
+        target = workspace.add_target(asset["id"], f"s{index}", row["scope"],
+                                      for_detection=0, for_amc=1)
         workspace.append_target_version(
             target["id"], source="import", note=row["note"],
             sample_start=row["sample_start"], sample_end=row["sample_end"],
-            f_low_hz=row["f_low_hz"], f_high_hz=row["f_high_hz"],
-            modulation=row["modulation"], snr_db=snr,
-            snr_definition="inband_snr_v1" if snr is not None else None)
+            modulation=row["modulation"])
     return len(targets)
 
 
@@ -250,6 +261,7 @@ def _inspect_import_file(path):
 
 #: 标注清单 CSV 的列名（中文与英文）→ 内部名。
 _MANIFEST_COLUMNS = {"文件": "file", "文件名": "file", "file": "file", "path": "file",
+                     "信号名称": "name", "name": "name", "signal_name": "name",
                      "粒度": "scope", "scope": "scope",
                      "起止单位": "unit", "单位": "unit", "unit": "unit",
                      "起始": "start", "start": "start",
@@ -262,14 +274,18 @@ _MANIFEST_COLUMNS = {"文件": "file", "文件名": "file", "file": "file", "pat
                      "采集时间": "capture", "capture": "capture",
                      "capture_started_at": "capture"}
 
+#: 旧清单里已被弃用的列（导入仅支持 AMC 标注）：出现时在报告里提示已忽略。
+_MANIFEST_IGNORED_KEYS = ("f_low", "f_high", "snr", "note")
+
 
 def import_manifest(request):
     """解析标注清单 CSV：按文件名（或完整路径）匹配当前清单，未匹配行原样退回。
 
-    只做结构校验（粒度/单位/成对/数值）与匹配，不写任何资产；时间单位换算留给
-    导入时按每个文件的采样率完成（``_normalized_target_rows``）。“采集时间”列
-    为文件级：同一文件各行必须一致，导入时随资产写入；目标列全空的行只申报
-    采集时间，不建目标。
+    只做结构校验（粒度/单位/数值）与匹配，不写任何资产；时间单位换算留给导入时
+    按每个文件的采样率完成（``_normalized_target_rows``）。“信号名称”与“采集
+    时间”为文件级：同一文件各行必须一致，导入时随资产写入。导入仅支持 AMC
+    标注：目标行必须给出“调制”；旧列（频率下限/上限、SNR、备注）不再解析，
+    出现时记入 ``ignored_columns`` 由调用方提示，不静默丢弃。
     """
     path = Path(str(request.get("path") or ""))
     if not path.is_file():
@@ -281,17 +297,20 @@ def import_manifest(request):
     lines = list(csv.reader(text.splitlines()))
     if not lines:
         raise ValueError("标注清单为空")
-    header = [_MANIFEST_COLUMNS.get(str(item).strip().lower(), "") for item in lines[0]]
+    raw_header = [str(item).strip() for item in lines[0]]
+    header = [_MANIFEST_COLUMNS.get(item.lower(), "") for item in raw_header]
     if "file" not in header:
         raise ValueError("标注清单缺少“文件”列")
     index_of = {name: index for index, name in enumerate(header) if name}
+    ignored_columns = [label for label, key in zip(raw_header, header)
+                       if key in _MANIFEST_IGNORED_KEYS]
     paths = [Path(str(item)) for item in (request.get("paths") or [])]
     by_name = {}
     for item in paths:
         by_name.setdefault(item.name, []).append(str(item))
     ambiguous = {name for name, items in by_name.items() if len(items) > 1}
     known_paths = {str(item) for item in paths}
-    files, captures, unmatched = {}, {}, []
+    files, captures, names, unmatched = {}, {}, {}, []
 
     def cell(row, key):
         index = index_of.get(key)
@@ -312,20 +331,22 @@ def import_manifest(request):
                 matched = by_name[key][0]
             else:
                 raise ValueError("当前文件清单中没有该文件")
+            name = cell(row, "name")
+            if name and len(name) > 200:
+                raise ValueError("信号名称最多 200 个字符")
             capture = cell(row, "capture")
             if capture and len(capture) > 64:
                 raise ValueError("采集时间最长 64 个字符")
-            has_target = any(cell(row, key) for key in
-                             ("scope", "start", "end", "f_low", "f_high",
-                              "modulation", "snr", "note"))
+            has_target = any(cell(row, key) for key in ("scope", "start", "end",
+                                                        "modulation"))
             if has_target:
+                if not cell(row, "modulation"):
+                    raise ValueError("导入仅支持 AMC 标注：目标行必须给出“调制”")
                 unit = _target_unit_name(cell(row, "unit") or "samples")
                 scope = _target_scope_name(cell(row, "scope"), f"清单第 {line_no} 行")
                 target = {"scope": scope, "start": cell(row, "start"),
                           "end": cell(row, "end"), "start_unit": unit,
-                          "f_low_hz": cell(row, "f_low"), "f_high_hz": cell(row, "f_high"),
-                          "modulation": cell(row, "modulation"),
-                          "snr_db": cell(row, "snr"), "note": cell(row, "note")}
+                          "modulation": cell(row, "modulation")}
                 # 结构校验（成对/数值/大小关系）；单位换算与文件采样率绑定，导入时再做
                 _normalized_target_rows([target], rate=None, sample_count=None,
                                         row_label=f"清单第 {line_no} 行")
@@ -335,22 +356,31 @@ def import_manifest(request):
                 if previous is not None and previous != capture:
                     raise ValueError(f"采集时间与同一文件的其他行不一致（已填 {previous}）")
                 captures[matched] = capture
-            if not has_target and not capture:
-                raise ValueError("行内没有可申报的内容（目标列与采集时间都为空）")
+            if name:
+                previous = names.get(matched)
+                if previous is not None and previous != name:
+                    raise ValueError(f"信号名称与同一文件的其他行不一致（已填 {previous}）")
+                names[matched] = name
+            if not has_target and not capture and not name:
+                raise ValueError("行内没有可申报的内容（目标列与采集时间/信号名称都为空）")
         except ValueError as exc:
             unmatched.append({"line": line_no, "file": key, "error": str(exc)})
     return {"kind": "import_manifest", "path": str(path),
             "matched": sum(len(items) for items in files.values()),
-            "files": files, "captures": captures, "unmatched": unmatched}
+            "files": files, "captures": captures, "names": names,
+            "ignored_columns": ignored_columns, "unmatched": unmatched}
 
 
 def import_files(workspace, request):
-    """批量导入：逐文件可覆盖参数与目标行，可写分片/加入集合/写备注与初始标注。
+    """批量导入：逐文件可覆盖参数与 AMC 目标行，可写分片/加入集合与初始标注。
 
-    请求优先用 ``files``（GUI 清单：``path/sample_rate/binary_dtype/endian/label/
-    rf_center_hz/capture_started_at/targets``）；``paths`` + 公共参数仍作为回落，
-    命令行与旧调用不受影响。``rf_center_hz`` 缺省回落请求级；``capture_started_at``
-    逐文件优先、其次请求级，都没有时记本批导入时间（页面不提供手填入口）。
+    请求优先用 ``files``（GUI 清单：``path/name/sample_rate/binary_dtype/endian/
+    capture_started_at/targets``）；``paths`` + 公共参数仍作为回落，命令行与旧调用
+    不受影响。``name`` 缺省按 :func:`import_signal_name` 自动命名（有调制时用
+    “调制 · 文件名前 5 字符”）；目标只登记 AMC（调制必填、``for_detection`` 恒为
+    0），行内若带旧检测字段（频率/SNR）则忽略并在结果 ``ignored`` 里回报。
+    ``rf_center_hz``/``label`` 保留用于 CLI 兼容（页面不再提供入口）；
+    ``capture_started_at`` 逐文件优先、其次请求级、缺省记本批导入时间。
     """
     entries = [dict(item) for item in (request.get("files") or [])]
     if not entries:
@@ -382,6 +412,9 @@ def import_files(workspace, request):
             label = _optional_text_value(entry.get("label"))
             if label and len(label) > 200:
                 raise ValueError("备注最多 200 个字符")
+            signal_name = _optional_text_value(entry.get("name"))
+            if signal_name and len(signal_name) > 200:
+                raise ValueError("信号名称最多 200 个字符")
             file_request = {
                 "sample_rate": entry.get("sample_rate", request.get("sample_rate")),
                 "binary_dtype": entry.get("binary_dtype") or request.get("binary_dtype"),
@@ -390,6 +423,17 @@ def import_files(workspace, request):
             samples, rate, metadata = _parse_import_file(path, file_request)
             targets = _normalized_target_rows(entry.get("targets") or [], rate=rate,
                                               sample_count=int(samples.size))
+            for row in targets:
+                # 先校验再落盘：避免“资产已入库但目标非法”的半写状态
+                if not row["modulation"]:
+                    raise ValueError("导入仅支持 AMC 标注：目标行必须给出调制")
+            modulation = next((row.get("modulation") for row in targets
+                               if row.get("modulation")), None)
+            asset_name = signal_name or import_signal_name(path.name, modulation)
+            ignored = [title for field, title in
+                       (("f_low_hz", "频率下限"), ("f_high_hz", "频率上限"),
+                        ("snr_db", "SNR"))
+                       if any(row.get(field) is not None for row in targets)]
             common = {
                 "source_kind": "imported",
                 "rf_center_hz": entry.get("rf_center_hz", request.get("rf_center_hz")),
@@ -398,10 +442,10 @@ def import_files(workspace, request):
                                        or imported_at),
             }
             if writer is not None:
-                asset = writer.append(samples, rate, path.name, str(path.resolve()),
+                asset = writer.append(samples, rate, asset_name, str(path.resolve()),
                                       metadata=metadata, **common)
             else:
-                asset = workspace.add_samples(samples, rate, path.name,
+                asset = workspace.add_samples(samples, rate, asset_name,
                                               str(path.resolve()), metadata=metadata,
                                               created_by=request.get("created_by"),
                                               **common)
@@ -411,8 +455,9 @@ def import_files(workspace, request):
             if collection is not None:
                 workspace.add_collection_member(collection["id"], asset["id"])
             imported_ids.append(asset["id"])
-            results.append({"path": str(path), "name": path.name, "ok": True,
-                            "asset_id": asset["id"], "targets": len(targets)})
+            results.append({"path": str(path), "name": asset_name, "ok": True,
+                            "asset_id": asset["id"], "targets": len(targets),
+                            "ignored": ignored})
         except (ValueError, OSError) as exc:
             results.append({"path": str(path), "name": path.name or f"第 {index + 1} 项",
                             "ok": False, "error": str(exc)})

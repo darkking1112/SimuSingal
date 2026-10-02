@@ -13,13 +13,13 @@ from ...data import Workspace
 from ...tasks import run_job
 from ..constants import (EXPORT_FORMATS, IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
                          IMPORT_COL_FILE, IMPORT_COL_FORMAT, IMPORT_COL_MOD,
-                         IMPORT_COL_NOTE, IMPORT_COL_POINTS, IMPORT_COL_RATE,
-                         IMPORT_COL_RF_CENTER, IMPORT_COL_STATUS, IMPORT_FILE_FILTER,
+                         IMPORT_COL_NAME, IMPORT_COL_POINTS, IMPORT_COL_RATE,
+                         IMPORT_COL_STATUS, IMPORT_FILE_FILTER,
                          IMPORT_FORMAT_LABELS, IMPORT_MODULATION_CHOICES,
                          IMPORT_SUFFIXES, MODE_CHOICES, MODE_SHORT, PLAY_MAX_ROWS,
                          PLAY_MAX_ROWS_PER_TICK, PLAY_WAVE_POINTS, _SCOPE_LABELS,
                          _SOURCE_KIND_LABELS, _VERSION_SOURCE_LABELS)
-from ..dialogs import ImportBatchDialog, SignalParamsDialog
+from ..dialogs import SignalParamsDialog
 from ..helpers import (_AMC_SOURCE_TEXT, _asset_exports, _asset_format, _comparison_line,
                        _fmt_hz, _fmt_metric, _fmt_span, _iq_binary_kind, _mirrored_spectrum)
 from ..runner import _run_task

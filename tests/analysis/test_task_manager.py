@@ -162,13 +162,13 @@ def test_banners_show_concurrent_tasks_and_cancel_in_page(tmp_path):
     try:
         detect_task, _ = window.start_job("fake", owner="信号检测",
                                           label="能量检测 · A", name="D")
-        analysis_task, _ = window.start_job("fake", owner="数据分析",
-                                            label="数据分析 · B", name="A")
+        analysis_task, _ = window.start_job("fake", owner="态势显示",
+                                            label="态势显示 · B", name="A")
         assert _wait(app, lambda: {"D", "A"} <= set(holder.get("started", [])))
         detect_banner = window._task_banners["信号检测"]
-        analysis_banner = window._task_banners["数据分析"]
+        analysis_banner = window._task_banners["态势显示"]
         assert "能量检测" in detect_banner.label.text()
-        assert "数据分析" in analysis_banner.label.text()
+        assert "态势显示" in analysis_banner.label.text()
 
         # 页内横幅在各自页面可见（切到该页查看；未切到的页不抢焦点）
         window.tabs.setCurrentIndex(window._page_index("信号检测"))
@@ -183,13 +183,13 @@ def test_banners_show_concurrent_tasks_and_cancel_in_page(tmp_path):
         assert analysis_task.state == "running"
         assert _wait(app, lambda: "已取消" in detect_banner.label.text())
 
-        # 切到“数据分析”页：另一任务仍在运行且横幅可见；切页往返状态保留
-        window.tabs.setCurrentIndex(window._page_index("数据分析"))
+        # 切到“态势显示”页：另一任务仍在运行且横幅可见；切页往返状态保留
+        window.tabs.setCurrentIndex(window._page_index("态势显示"))
         assert analysis_banner.isVisible()
         window.tabs.setCurrentIndex(window._page_index("数据管理"))
-        window.tabs.setCurrentIndex(window._page_index("数据分析"))
+        window.tabs.setCurrentIndex(window._page_index("态势显示"))
         assert analysis_banner.isVisible()
-        assert "数据分析" in analysis_banner.label.text()
+        assert "态势显示" in analysis_banner.label.text()
 
         window.tasks.cancel(analysis_task.id)
         assert _wait(app, lambda: analysis_task.state == "cancelled")

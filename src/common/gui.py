@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from .reports import export_report
@@ -369,8 +369,68 @@ class TaskBanner(QtWidgets.QFrame):
             self._task.cancel()
 
 
+class BlackCheckboxStyle(QtWidgets.QProxyStyle):
+    """复选框统一黑框样式：白底黑框，选中画黑色对勾，部分选中画短横。
+
+    同时覆盖普通 QCheckBox 与表格/列表项内的复选态
+    （``PE_IndicatorCheckBox`` / ``PE_IndicatorItemViewItemCheck``），
+    不依赖任何图片资源；禁用时改用浅灰框，避免读成可点。
+    """
+
+    def drawPrimitive(self, element, option, painter, widget=None):
+        if element in (QtWidgets.QStyle.PrimitiveElement.PE_IndicatorCheckBox,
+                       QtWidgets.QStyle.PrimitiveElement.PE_IndicatorItemViewItemCheck):
+            self._draw_checkbox(option, painter)
+            return
+        super().drawPrimitive(element, option, painter, widget)
+
+    @staticmethod
+    def _draw_checkbox(option, painter):
+        state = option.state
+        enabled = bool(state & QtWidgets.QStyle.StateFlag.State_Enabled)
+        checked = bool(state & QtWidgets.QStyle.StateFlag.State_On)
+        partial = bool(state & QtWidgets.QStyle.StateFlag.State_NoChange)
+        border = QtGui.QColor("#000000" if enabled else "#9aa7b4")
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        box = QtCore.QRectF(option.rect).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(QtGui.QPen(border, 1))
+        painter.setBrush(QtGui.QColor("#ffffff" if enabled else "#f3f6fa"))
+        painter.drawRoundedRect(box, 2.5, 2.5)
+        if checked or partial:
+            rect = option.rect
+            pen = QtGui.QPen(border, max(1.6, rect.width() * 0.11))
+            pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            if checked:
+                painter.drawPolyline(QtGui.QPolygonF([
+                    QtCore.QPointF(rect.x() + rect.width() * 0.24,
+                                   rect.y() + rect.height() * 0.52),
+                    QtCore.QPointF(rect.x() + rect.width() * 0.43,
+                                   rect.y() + rect.height() * 0.72),
+                    QtCore.QPointF(rect.x() + rect.width() * 0.77,
+                                   rect.y() + rect.height() * 0.28)]))
+            else:
+                painter.drawLine(
+                    QtCore.QPointF(rect.x() + rect.width() * 0.25,
+                                   rect.y() + rect.height() * 0.5),
+                    QtCore.QPointF(rect.x() + rect.width() * 0.75,
+                                   rect.y() + rect.height() * 0.5))
+        painter.restore()
+
+
+def _install_black_checkbox_style():
+    """把应用样式包一层黑框复选框绘制（幂等；两个桌面应用共用）。"""
+    app = QtWidgets.QApplication.instance()
+    if app is None or isinstance(app.style(), BlackCheckboxStyle):
+        return
+    app.setStyle(BlackCheckboxStyle(app.style()))
+
+
 class DesktopWindow(QtWidgets.QMainWindow):
     def __init__(self, workspace, title, subtitle):
+        _install_black_checkbox_style()
         super().__init__()
         self.workspace = workspace
         self.last_result = None
@@ -390,6 +450,10 @@ class DesktopWindow(QtWidgets.QMainWindow):
             QMainWindow,QWidget {background:#f3f6fa;color:#23374d;font-size:13px;}
             QLineEdit,QDoubleSpinBox,QSpinBox,QListWidget,QPlainTextEdit,QTableWidget {
                 background:white;border:1px solid #d8e1ec;border-radius:5px;padding:5px;}
+            QComboBox {background:white;border:1px solid #000000;border-radius:5px;padding:5px 6px;}
+            QComboBox:disabled {border-color:#9aa7b4;}
+            QComboBox QLineEdit {border:0;padding:0;background:transparent;}
+            QComboBox QAbstractItemView {background:white;border:1px solid #000000;padding:2px;}
             QPushButton {background:#e4edf8;border:0;border-radius:5px;padding:9px 14px;}
             QPushButton:hover {background:#cddff3;} QPushButton:disabled {color:#97a6b7;}
             QPushButton#primary {background:#2365b3;color:white;}

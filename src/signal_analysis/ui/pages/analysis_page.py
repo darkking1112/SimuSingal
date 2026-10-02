@@ -1,4 +1,4 @@
-"""数据分析页（mixin）：统计/时频渲染、频率与幅度显示范围、实时播放与滚动瀑布图。"""
+"""态势显示页（mixin）：统计/时频渲染、频率与幅度显示范围、实时播放与滚动瀑布图。"""
 import time
 from pathlib import Path
 
@@ -11,13 +11,13 @@ from ...data import Workspace
 from ...tasks import run_job
 from ..constants import (EXPORT_FORMATS, IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
                          IMPORT_COL_FILE, IMPORT_COL_FORMAT, IMPORT_COL_MOD,
-                         IMPORT_COL_NOTE, IMPORT_COL_POINTS, IMPORT_COL_RATE,
-                         IMPORT_COL_RF_CENTER, IMPORT_COL_STATUS, IMPORT_FILE_FILTER,
+                         IMPORT_COL_NAME, IMPORT_COL_POINTS, IMPORT_COL_RATE,
+                         IMPORT_COL_STATUS, IMPORT_FILE_FILTER,
                          IMPORT_FORMAT_LABELS, IMPORT_MODULATION_CHOICES,
                          IMPORT_SUFFIXES, MODE_CHOICES, MODE_SHORT, PLAY_MAX_ROWS,
                          PLAY_MAX_ROWS_PER_TICK, PLAY_WAVE_POINTS, _SCOPE_LABELS,
                          _SOURCE_KIND_LABELS, _VERSION_SOURCE_LABELS)
-from ..dialogs import ImportBatchDialog, SignalParamsDialog
+from ..dialogs import SignalParamsDialog
 from ..helpers import (_AMC_SOURCE_TEXT, _asset_exports, _asset_format, _comparison_line,
                        _fmt_hz, _fmt_metric, _fmt_span, _iq_binary_kind, _mirrored_spectrum)
 from ..runner import _run_task
@@ -56,8 +56,8 @@ class AnalysisPageMixin:
         bar.addWidget(self.analyze_button)
         layout.addLayout(bar)
         from common.gui import TaskBanner
-        self.analysis_banner = TaskBanner("数据分析", "取消本次分析")
-        self.register_task_banner("数据分析", self.analysis_banner)
+        self.analysis_banner = TaskBanner("态势显示", "取消本次分析")
+        self.register_task_banner("态势显示", self.analysis_banner)
         layout.addWidget(self.analysis_banner)
         span_bar = QtWidgets.QHBoxLayout()
         span_bar.addWidget(QtWidgets.QLabel("显示范围"))
@@ -185,7 +185,7 @@ class AnalysisPageMixin:
             return
         asset = self.selected_asset()
         if asset:
-            self.start_job("analyze", owner="数据分析", label=f"数据分析 · {asset['name']}",
+            self.start_job("analyze", owner="态势显示", label=f"态势显示 · {asset['name']}",
                            cancel_text="取消本次分析",
                            asset_id=asset["id"], nfft=int(self.nfft.currentText()))
         else:
@@ -199,7 +199,7 @@ class AnalysisPageMixin:
             return
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "选择并运行原生复制插件", "", "插件清单 (*.json)")
         if path:
-            self.start_job("native", owner="数据分析",
+            self.start_job("native", owner="态势显示",
                            label=f"原生插件复制 · {asset['name']}",
                            cancel_text="取消本次复制",
                            asset_id=asset["id"], manifest=path)

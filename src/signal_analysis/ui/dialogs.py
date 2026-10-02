@@ -1,4 +1,4 @@
-"""对话框：批量导入参数（ImportBatchDialog）与“信号与采样”配置弹框（SignalParamsDialog）。"""
+"""对话框：“信号与采样”配置弹框（SignalParamsDialog，生成页使用）。"""
 
 from PySide6 import QtWidgets
 
@@ -6,38 +6,6 @@ from ..core_api import plan_signal
 from .constants import MODE_SHORT
 from .helpers import _fmt_hz
 from .widgets import UnitSpinBox, _freq_spin, _plain_spin, _unit_row
-
-
-class ImportBatchDialog(QtWidgets.QDialog):
-    """对所选文件统一填采样率/类型/字节序；留空或“不修改”表示保持原值。"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("批量设置解析参数")
-        layout = QtWidgets.QFormLayout(self)
-        self.sample_rate = QtWidgets.QLineEdit()
-        self.sample_rate.setPlaceholderText("Hz，留空 = 不修改；SigMF 行自动忽略")
-        layout.addRow("采样率", self.sample_rate)
-        self.dtype = QtWidgets.QComboBox()
-        self.dtype.addItem("不修改", None)
-        self.dtype.addItem("int16", "int16")
-        self.dtype.addItem("float32", "float32")
-        layout.addRow("二进制类型", self.dtype)
-        self.endian = QtWidgets.QComboBox()
-        self.endian.addItem("不修改", None)
-        self.endian.addItem("小端（little）", "little")
-        self.endian.addItem("大端（big）", "big")
-        layout.addRow("字节序", self.endian)
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
-
-    def values(self):
-        return {"sample_rate": self.sample_rate.text().strip(),
-                "binary_dtype": self.dtype.currentData(),
-                "endian": self.endian.currentData()}
 
 
 class SignalParamsDialog(QtWidgets.QDialog):

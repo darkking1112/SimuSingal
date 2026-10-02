@@ -10,7 +10,7 @@ import html
 import json
 from pathlib import Path
 
-_KIND_LABELS = {"analysis": "数据分析", "detect": "信号检测", "ml_detect": "AI 信号检测",
+_KIND_LABELS = {"analysis": "态势显示", "detect": "信号检测", "ml_detect": "AI 信号检测",
                 "detect_hops": "跳频参数估计", "ml_detect_hops": "AI 跳频参数估计",
                 "amc_classify": "调制识别", "amc_iq_classify": "原始 IQ 调制识别",
                 "generate": "IQ 生成", "native": "原生插件"}

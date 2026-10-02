@@ -14,7 +14,7 @@ from ..storage.maintenance import RUN_KIND_LABELS, format_bytes, read_settings, 
 from ..data import Workspace
 from ..tasks import run_job
 
-from .dialogs import ImportBatchDialog, SignalParamsDialog  # noqa: F401  两个对话框（保持 ui.main_window 旧导入面）
+from .dialogs import SignalParamsDialog  # noqa: F401  对话框（保持 ui.main_window 旧导入面）
 from .pages.import_page import ImportPageMixin
 from .pages.generator_page import GeneratorPageMixin
 from .pages.compare_page import ComparePageMixin
@@ -26,8 +26,8 @@ from .pages.history_page import HistoryPageMixin
 from .pages.data_page import DataPageMixin
 from .constants import (EXPORT_FORMATS, IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
                         IMPORT_COL_FILE, IMPORT_COL_FORMAT, IMPORT_COL_MOD,
-                        IMPORT_COL_NOTE, IMPORT_COL_POINTS, IMPORT_COL_RATE,
-                        IMPORT_COL_RF_CENTER, IMPORT_COL_STATUS, IMPORT_FILE_FILTER,
+                        IMPORT_COL_NAME, IMPORT_COL_POINTS, IMPORT_COL_RATE,
+                        IMPORT_COL_STATUS, IMPORT_FILE_FILTER,
                         IMPORT_FORMAT_LABELS, IMPORT_MODULATION_CHOICES,
                         IMPORT_SUFFIXES, MODE_CHOICES, MODE_SHORT, PLAY_MAX_ROWS,
                         PLAY_MAX_ROWS_PER_TICK, PLAY_WAVE_POINTS, _SCOPE_LABELS,
@@ -56,7 +56,7 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
         pages = {
             "信号导入": self.build_import,
             "IQ 信号生成": self.build_generator,
-            "数据分析": self.build_analysis,
+            "态势显示": self.build_analysis,
             "信号检测": self.build_detect,
             "调制识别": self.build_amc,
             "跳频参数": self.build_hops,
@@ -116,14 +116,13 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
         adopt = self._adopt_buttons()
         mapping = {
             "信号导入": (self.import_add_files_button, self.import_add_folder_button,
-                        self.import_remove_button, self.import_batch_set_button,
-                        self.import_recheck_button, self.import_csv_button,
-                        self.import_csv_template_button, self.import_apply_single_button,
-                        self.import_start_button),
+                        self.import_remove_button, self.import_recheck_button,
+                        self.import_csv_button, self.import_csv_template_button,
+                        self.import_apply_button, self.import_start_button),
             "IQ 信号生成": (self.demo_button, self.generate_button,
                            *self.gen_panel.action_buttons()),
             "信号集合生成": tuple(self.gen_panel.action_buttons()),
-            "数据分析": (self.analyze_button, self.native_button),
+            "态势显示": (self.analyze_button, self.native_button),
             "信号检测": (self.detect_button, self.ml_button, adopt["信号检测"]),
             "跳频参数": (self.hops_button, self.hops_ml_button, adopt["跳频参数"]),
             "调制识别": (self.amc_button, adopt["调制识别"]),
@@ -286,7 +285,7 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
         layout.addWidget(self.collection_combo)
         layout.addWidget(QtWidgets.QLabel("数据资产"))
         self.search = QtWidgets.QLineEdit()
-        self.search.setPlaceholderText("按文件名查找")
+        self.search.setPlaceholderText("按信号名称查找")
         self.search.textChanged.connect(self.refresh_assets)
         layout.addWidget(self.search)
         self.assets = QtWidgets.QListWidget()
@@ -516,7 +515,7 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
         """按结果类型写回对应页面并切过去；页面名与下标一律经由页面注册表解析。"""
         self.last_result = result
         if result["kind"] == "analysis":
-            self.tab_results["数据分析"] = result
+            self.tab_results["态势显示"] = result
             with np.load(self.workspace.root / result["plots_path"], allow_pickle=False) as arrays:
                 self._render_analysis(result, arrays)
         elif result["kind"] in ("detect", "ml_detect"):
@@ -542,7 +541,7 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             self._render_compare()
             self._set_adopt_run("调制识别", result)
         elif result["kind"] == "native":
-            self.tab_results["数据分析"] = result
+            self.tab_results["态势显示"] = result
             self.wave.clear()
             self.spectrum.clear()
             self.tf_image.clear()
