@@ -367,8 +367,9 @@ def test_gui_amc_tab_renders_result(tmp_path):
         result = run_job({"workspace": str(workspace), "action": "amc_classify",
                           "asset_id": asset["id"],
                           "config": {"offset_hz": 40_000.0, "bandwidth_hz": 30_000.0}})
+        before = window.tabs.currentIndex()
         window.display_result(result)
-        assert window.tabs.currentIndex() == window._page_index("调制识别")
+        assert window.tabs.currentIndex() == before  # 结果渲染不自动抢标签页
         summary = window.amc_summary.toPlainText()
         assert "QPSK" in summary and "amc-linear-default" in summary
         assert "命中" in summary  # 生成数据带真值：命中/未命中必须显示
@@ -385,7 +386,7 @@ def test_gui_amc_tab_renders_result(tmp_path):
         if tick_levels is not None:  # 私有属性仅在可用时核对；版本变化不应阻断测试
             assert "FM" in "".join(str(text) for _, text in tick_levels[0])
         # “算法对比”页同步记录识别结果与真值命中（不切页，避免打断当前视图）
-        assert window.tabs.currentIndex() == window._page_index("调制识别")
+        assert window.tabs.currentIndex() == before
         window.compare_from_detect()
         assert window.tabs.currentIndex() == window._page_index("算法对比")
         table = window.compare_table

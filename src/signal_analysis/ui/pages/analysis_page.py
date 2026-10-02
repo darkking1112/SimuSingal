@@ -55,6 +55,10 @@ class AnalysisPageMixin:
         self.analyze_button.clicked.connect(self.analyze_selected)
         bar.addWidget(self.analyze_button)
         layout.addLayout(bar)
+        from common.gui import TaskBanner
+        self.analysis_banner = TaskBanner("数据分析", "取消本次分析")
+        self.register_task_banner("数据分析", self.analysis_banner)
+        layout.addWidget(self.analysis_banner)
         span_bar = QtWidgets.QHBoxLayout()
         span_bar.addWidget(QtWidgets.QLabel("显示范围"))
         self.range_follow = QtWidgets.QCheckBox("范围随数据")
@@ -181,7 +185,9 @@ class AnalysisPageMixin:
             return
         asset = self.selected_asset()
         if asset:
-            self.start_job("analyze", asset_id=asset["id"], nfft=int(self.nfft.currentText()))
+            self.start_job("analyze", owner="数据分析", label=f"数据分析 · {asset['name']}",
+                           cancel_text="取消本次分析",
+                           asset_id=asset["id"], nfft=int(self.nfft.currentText()))
         else:
             self.status.setText("请先导入并选择数据")
 
@@ -193,7 +199,10 @@ class AnalysisPageMixin:
             return
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "选择并运行原生复制插件", "", "插件清单 (*.json)")
         if path:
-            self.start_job("native", asset_id=asset["id"], manifest=path)
+            self.start_job("native", owner="数据分析",
+                           label=f"原生插件复制 · {asset['name']}",
+                           cancel_text="取消本次复制",
+                           asset_id=asset["id"], manifest=path)
 
 
     def _effective_classification(self, summary):

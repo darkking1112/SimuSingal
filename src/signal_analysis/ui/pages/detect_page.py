@@ -39,6 +39,10 @@ class DetectPageMixin:
             "IQ 为复基带记录：中心频率指基带频率偏移，不是射频载频。")
         intro.setWordWrap(True)
         layout.addWidget(intro)
+        from common.gui import TaskBanner
+        self.detect_banner = TaskBanner("信号检测", "取消本次检测")
+        self.register_task_banner("信号检测", self.detect_banner)
+        layout.addWidget(self.detect_banner)
         bar = QtWidgets.QHBoxLayout()
         bar.addWidget(QtWidgets.QLabel("STFT 点数"))
         self.detect_nfft = QtWidgets.QComboBox()
@@ -237,7 +241,9 @@ class DetectPageMixin:
         if self.detect_min_duration.value() > 0:
             config["min_duration_s"] = float(self.detect_min_duration.value())
         # nfft 与图像尺寸由清单声明，界面不覆盖，避免训练/推理口径分叉
-        self.start_job("ml_detect", asset_id=asset["id"], manifest=manifest,
+        self.start_job("ml_detect", owner="信号检测",
+                       label=f"AI 检测 · {asset['name']}", cancel_text="取消本次检测",
+                       asset_id=asset["id"], manifest=manifest,
                        config=config, with_baseline=bool(self.ml_compare.isChecked()))
 
 
@@ -256,7 +262,9 @@ class DetectPageMixin:
             config["min_duration_s"] = float(self.detect_min_duration.value())
         if self.detect_merge.currentText() != "自动":
             config["merge_bins"] = int(self.detect_merge.currentText())
-        self.start_job("detect", asset_id=asset["id"], config=config)
+        self.start_job("detect", owner="信号检测",
+                       label=f"能量检测 · {asset['name']}", cancel_text="取消本次检测",
+                       asset_id=asset["id"], config=config)
 
 
     def _frequency_mask(self, choice, frequencies, spectrum_db):

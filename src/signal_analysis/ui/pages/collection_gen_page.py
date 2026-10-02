@@ -236,7 +236,9 @@ class TorchSigEnvDialog(QtWidgets.QDialog):
             return
         self.status.setText("正在测试…")
         self.test_button.setEnabled(False)
-        self.panel.window.start_job("torchsig_probe", torchsig_env=self.environment())
+        self.panel.window.start_job("torchsig_probe", owner="信号集合生成",
+                                    label="TorchSig 环境检查", cancel_text="取消本次检查",
+                                    torchsig_env=self.environment())
 
     def show_probe(self, result):
         self.test_button.setEnabled(True)
@@ -275,6 +277,10 @@ class CollectionGenPanel(QtWidgets.QWidget):
             "检测框在构建数据版本时才算）。")
         intro.setWordWrap(True)
         layout.addWidget(intro)
+        from common.gui import TaskBanner
+        self.collection_banner = TaskBanner("信号集合生成", "取消本次生成")
+        self.window.register_task_banner("信号集合生成", self.collection_banner)
+        layout.addWidget(self.collection_banner)
         layout.addWidget(self._build_basic_group())
         layout.addWidget(self._build_signal_group())
         layout.addWidget(self._build_labels_group())
@@ -563,7 +569,9 @@ class CollectionGenPanel(QtWidgets.QWidget):
         except ValueError as exc:
             self.status.setText(f"生成参数无效：{exc}")
             return
-        self.window.start_job("recipe_preview", recipe=recipe,
+        self.window.start_job("recipe_preview", owner="信号集合生成",
+                              label="生成参数预览", cancel_text="取消本次预览",
+                              recipe=recipe,
                               samples=min(int(recipe["count"]), 10_000))
 
     def start_generation(self):
@@ -579,7 +587,8 @@ class CollectionGenPanel(QtWidgets.QWidget):
             mapping = load_mapping(self.settings["torchsig"]["mapping"])
             request["mapping"] = mapping
             request["torchsig_env"] = read_env(self.window.workspace)
-        self.window.start_job("generate_collection", **request)
+        self.window.start_job("generate_collection", owner="信号集合生成",
+                              label="集合生成", cancel_text="取消本次生成", **request)
 
     def show_preview(self, result):
         lines = [f"样本数 {result['count']} · 引擎 {result['engine']} · "
@@ -719,7 +728,9 @@ class CollectionGenPanel(QtWidgets.QWidget):
         except ValueError as exc:
             self.status.setText(f"无法导入：{exc}")
             return
-        self.window.start_job("torchsig_import", **request)
+        self.window.start_job("torchsig_import", owner="信号集合生成",
+                              label="导入 TorchSig bundle", cancel_text="取消本次导入",
+                              **request)
 
 
 class _BundleImportDialog(QtWidgets.QDialog):

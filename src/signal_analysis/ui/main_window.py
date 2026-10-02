@@ -82,6 +82,7 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
         self.play_timer = QtCore.QTimer(self)
         self.play_timer.setInterval(33)
         self.play_timer.timeout.connect(self._on_playback_tick)
+        self.tasks.finished.connect(self._refresh_task_controls)
         self.refresh_history()
         self.refresh_collections()
         self.refresh_assets()
@@ -110,13 +111,44 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
                 self.migrate_button, self.import_start_button,
                 *self.gen_panel.action_buttons())
 
-    def set_busy(self, busy):
-        """输入控件的启停由父类处理；采纳按钮与导入按钮的可用性由页面状态决定。"""
-        super().set_busy(busy)
+    def owner_buttons(self, owner):
+        """按页面返回任务期间要禁用的按钮；未登记的 owner 回退为整窗按钮集合。"""
+        adopt = self._adopt_buttons()
+        mapping = {
+            "信号导入": (self.import_add_files_button, self.import_add_folder_button,
+                        self.import_remove_button, self.import_batch_set_button,
+                        self.import_recheck_button, self.import_csv_button,
+                        self.import_csv_template_button, self.import_apply_single_button,
+                        self.import_start_button),
+            "IQ 信号生成": (self.demo_button, self.generate_button,
+                           *self.gen_panel.action_buttons()),
+            "信号集合生成": tuple(self.gen_panel.action_buttons()),
+            "数据分析": (self.analyze_button, self.native_button),
+            "信号检测": (self.detect_button, self.ml_button, adopt["信号检测"]),
+            "跳频参数": (self.hops_button, self.hops_ml_button, adopt["跳频参数"]),
+            "调制识别": (self.amc_button, adopt["调制识别"]),
+            "数据管理": (self.storage_scan_button, self.storage_preview_button,
+                        self.storage_cleanup_button, self.migrate_button),
+            "模型训练": (self.training_page.export_button,),
+        }
+        return mapping.get(owner, tuple(self.job_buttons()))
+
+    def task_finished_text(self, task):
+        """任务结束文案：有结果的任务复用 result_status 的统计文案。"""
+        if task.result is not None:
+            try:
+                return self.result_status(task.result)
+            except Exception:
+                pass
+        return super().task_finished_text(task)
+
+    def _refresh_task_controls(self, *_):
+        """任务收尾后重算采纳按钮与导入按钮的可用性（任务期间由 owner 按钮集合禁用）。"""
         for page, button in self._adopt_buttons().items():
-            button.setEnabled(not busy and page in self.adopt_run_ids)
+            if button is not None:
+                button.setEnabled(page in self.adopt_run_ids)
         if hasattr(self, "import_start_button"):
-            self.import_start_button.setEnabled(not busy and self._import_has_ready())
+            self._update_import_controls()
 
     def _adopt_buttons(self):
         return {"信号检测": getattr(self, "adopt_detect_button", None),
@@ -161,12 +193,26 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             name = {"detection": "检测", "iq": "AMC"}.get(result.get("task"))
             return f"{name}训练数据导出完成：{result.get('samples', 0)} 个样本"
         if kind == "import_inspect":
+            if result.get("cancelled"):
+                return (f"识别已取消：已完成 {len(result.get('files', []))}"
+                        f" · 未处理 {result.get('unprocessed', 0)}")
             return f"已识别 {len(result.get('files', []))} 个文件（只读头部，未写入资产）"
         if kind == "import_manifest":
             return (f"标注清单解析完成：挂接 {result.get('matched', 0)} 条 · "
                     f"未匹配 {len(result.get('unmatched', []))} 行（未写入资产）")
         if kind == "import_files":
-            storage = "分片" if result.get("shard_id") else "独立文件"
+            if result.get("cancelled"):
+                text = (f"导入已取消：成功 {result.get('created', 0)}"
+                        f" · 失败 {result.get('failed', 0)}"
+                        f" · 未处理 {result.get('unprocessed', 0)}")
+                if result.get("collection_name"):
+                    text += f" · 集合「{result['collection_name']}」"
+                return text
+            shard_ids = result.get("shard_ids") or []
+            if shard_ids:
+                storage = f"分片 ×{len(shard_ids)}"
+            else:
+                storage = "分片" if result.get("shard_id") else "独立文件"
             text = (f"导入完成：成功 {result.get('created', 0)} · 失败 {result.get('failed', 0)}"
                     f" · 目标 {result.get('targets_total', 0)} 条 · {storage}")
             if result.get("collection_name"):
@@ -195,7 +241,6 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             self.gen_panel.show_probe(result)
         elif result.get("kind") == "training_export":
             self.training_page.export_finished(result)
-            self.tabs.setCurrentIndex(self._page_index("模型训练"))
         elif result.get("kind") == "adopt_result":
             # 目标参考参数与标签已变：刷新侧栏只读详情与集合面板进度
             self.asset_changed()
@@ -451,7 +496,8 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
         if run_id is None:
             self.status.setText("当前页还没有可采纳的结果")
             return
-        self.start_job("adopt_result", run_id=run_id)
+        self.start_job("adopt_result", owner=page, label="采纳为参数标注",
+                       cancel_text="取消本次采纳", run_id=run_id)
 
     def _set_adopt_run(self, page, result):
         """更新某页的采纳按钮可用状态；不可采纳的结果类型保持禁用。"""
@@ -473,33 +519,28 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             self.tab_results["数据分析"] = result
             with np.load(self.workspace.root / result["plots_path"], allow_pickle=False) as arrays:
                 self._render_analysis(result, arrays)
-            self.tabs.setCurrentIndex(self._page_index("数据分析"))
         elif result["kind"] in ("detect", "ml_detect"):
             self.tab_results["信号检测"] = result
             with np.load(self.workspace.root / result["plots_path"], allow_pickle=False) as arrays:
                 self._render_detect(result, arrays)
             self._render_compare()
             self._set_adopt_run("信号检测", result)
-            self.tabs.setCurrentIndex(self._page_index("信号检测"))
         elif result["kind"] in ("detect_hops", "ml_detect_hops"):
             self.tab_results["跳频参数"] = result
             with np.load(self.workspace.root / result["plots_path"], allow_pickle=False) as arrays:
                 self._render_hops(result, arrays)
             self._render_compare()
             self._set_adopt_run("跳频参数", result)
-            self.tabs.setCurrentIndex(self._page_index("跳频参数"))
         elif result["kind"] == "amc_classify":
             self.tab_results["调制识别"] = result
             self._render_amc(result)
             self._render_compare()
             self._set_adopt_run("调制识别", result)
-            self.tabs.setCurrentIndex(self._page_index("调制识别"))
         elif result["kind"] == "amc_iq_classify":
             self.tab_results["调制识别"] = result
             self._render_amc_iq(result)
             self._render_compare()
             self._set_adopt_run("调制识别", result)
-            self.tabs.setCurrentIndex(self._page_index("调制识别"))
         elif result["kind"] == "native":
             self.tab_results["数据分析"] = result
             self.wave.clear()
@@ -510,7 +551,6 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             self.tf_stack.setCurrentWidget(self.time_frequency)
             self.summary.setPlainText(f"原生复制完成：{result['plugin']['id']}\n"
                                       f"输出资产：{result['derived_asset_id']}\n请选择输出资产进行分析。")
-            self.tabs.setCurrentIndex(self._page_index("数据分析"))
 
 
 def launch(workspace):

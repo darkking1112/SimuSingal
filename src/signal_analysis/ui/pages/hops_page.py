@@ -43,6 +43,10 @@ class HopsPageMixin:
             "IQ 为复基带记录：中心频率指基带频率偏移，不是射频载频。")
         intro.setWordWrap(True)
         layout.addWidget(intro)
+        from common.gui import TaskBanner
+        self.hops_banner = TaskBanner("跳频参数", "取消本次逐跳估计")
+        self.register_task_banner("跳频参数", self.hops_banner)
+        layout.addWidget(self.hops_banner)
         bar = QtWidgets.QHBoxLayout()
         bar.addWidget(QtWidgets.QLabel("STFT 点数"))
         self.hops_nfft = QtWidgets.QComboBox()
@@ -210,7 +214,9 @@ class HopsPageMixin:
         if self.hops_gap.currentText() != "自动":
             config["max_gap_frames"] = int(self.hops_gap.currentText())
         # nfft 与图像尺寸由清单声明，界面不覆盖：模型输入口径必须与训练时一致
-        self.start_job("ml_detect_hops", asset_id=asset["id"], manifest=manifest,
+        self.start_job("ml_detect_hops", owner="跳频参数",
+                       label=f"AI 逐跳估计 · {asset['name']}", cancel_text="取消本次逐跳估计",
+                       asset_id=asset["id"], manifest=manifest,
                        config=config, with_sessions=bool(self.hops_sessions.isChecked()),
                        with_traditional=bool(self.hops_ml_traditional.isChecked()))
 
@@ -235,7 +241,9 @@ class HopsPageMixin:
             config["min_dwell_s"] = float(self.hops_min_dwell.value())
         if self.hops_gap.currentText() != "自动":
             config["max_gap_frames"] = int(self.hops_gap.currentText())
-        self.start_job("detect_hops", asset_id=asset["id"], config=config,
+        self.start_job("detect_hops", owner="跳频参数",
+                       label=f"逐跳估计 · {asset['name']}", cancel_text="取消本次逐跳估计",
+                       asset_id=asset["id"], config=config,
                        with_sessions=bool(self.hops_sessions.isChecked()))
 
 

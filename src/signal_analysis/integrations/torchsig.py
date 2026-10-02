@@ -27,7 +27,8 @@ from pathlib import Path
 
 import numpy as np
 
-from ..services.collection_gen import SHARD_BYTES, Reporter, annotate_assets, prepare_task_sets
+from ..services.collection_gen import SHARD_BYTES, annotate_assets, prepare_task_sets
+from ..services.progress import Reporter
 from ..data.datasets import CLASS_TO_MODULATION
 from ..algorithms.generation.recipes import distribution_bounds, literal_values
 

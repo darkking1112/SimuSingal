@@ -734,8 +734,9 @@ def test_gui_renders_iq_result_without_fake_feature_columns(tmp_path, tiny_model
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = MainWindow(workspace)
     try:
+        before = window.tabs.currentIndex()
         window.display_result(run)
-        assert window.tabs.currentIndex() == window._page_index("调制识别")
+        assert window.tabs.currentIndex() == before  # 结果渲染不自动抢标签页
         headers = [window.amc_table.horizontalHeaderItem(column).text()
                    for column in range(window.amc_table.columnCount())]
         assert headers == ["输入口径", "取值"]

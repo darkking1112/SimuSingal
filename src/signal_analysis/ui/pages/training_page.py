@@ -167,6 +167,10 @@ class TrainingPage(QtWidgets.QWidget):
         self.export_button.setToolTip("按集合的检测/AMC 标注集构建数据版本并导出为数据集目录，再开始训练")
         self.export_button.clicked.connect(self.export_selected_collection)
         form.addRow(self.export_button)
+        from common.gui import TaskBanner
+        self.export_banner = TaskBanner("模型训练", "取消本次导出")
+        self.window.register_task_banner("模型训练", self.export_banner)
+        form.addRow(self.export_banner)
         self.weights = self.path_field(form, "初始权重（YOLO 空值使用 yolo26s.pt）", kind="file")
         self.framework = self.path_field(form, "RT-DETR rtdetrv2_pytorch 目录")
         self.framework_config = self.path_field(form, "RT-DETRv2 模型 YAML", kind="file")
@@ -432,7 +436,8 @@ class TrainingPage(QtWidgets.QWidget):
             request["image_size"] = int(self.size.currentText())
         self.config_status.clear()
         self.status.setText("正在从所选集合导出训练数据…")
-        self.window.start_job("export_training_data", **request)
+        self.window.start_job("export_training_data", owner="模型训练",
+                              label="训练数据导出", cancel_text="取消本次导出", **request)
 
     def export_finished(self, result):
         """主窗口把导出任务的结果转过来：写入路径与状态，并提示下一步。"""

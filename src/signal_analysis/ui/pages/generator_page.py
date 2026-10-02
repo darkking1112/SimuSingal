@@ -41,6 +41,10 @@ class GeneratorPageMixin:
                                  "生成一对可复现的复基带双音，供快速试跑分析流程。")
         intro.setWordWrap(True)
         single_layout.addWidget(intro)
+        from common.gui import TaskBanner
+        self.generator_banner = TaskBanner("IQ 信号生成", "取消本次生成")
+        self.register_task_banner("IQ 信号生成", self.generator_banner)
+        single_layout.addWidget(self.generator_banner)
         single_layout.addWidget(self._build_global_row())
         single_layout.addWidget(self._build_collection_row())
         single_layout.addWidget(self._build_demo_row())
@@ -348,7 +352,9 @@ class GeneratorPageMixin:
         except ValueError as exc:
             self.status.setText(str(exc))
             return
-        self.start_job("generate", sample_rate=rate, duration=duration,
+        self.start_job("generate", owner="IQ 信号生成", label="生成信号",
+                       cancel_text="取消本次生成",
+                       sample_rate=rate, duration=duration,
                        seed=int(self.gen_seed.value()), signals=self.iq_signals,
                        noise=noise, name=self.gen_name.text().strip() or None,
                        export=export, **collection)
@@ -362,7 +368,8 @@ class GeneratorPageMixin:
             self.status.setText(f"演示采样点数 {count:,} 超出 1～{MAX_SAMPLES:,} 范围，"
                                 "请调整采样率或持续时间")
             return
-        self.start_job("demo", sample_rate=rate, count=count)
+        self.start_job("demo", owner="IQ 信号生成", label="数学双音演示",
+                       cancel_text="取消本次生成", sample_rate=rate, count=count)
 
 
     def show_generation_result(self, result):

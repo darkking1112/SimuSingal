@@ -23,7 +23,7 @@ import numpy as np
 from ..algorithms.amc.iq_model import iq_waveform
 from ..algorithms.dsp.image import detection_image, spectral_context
 from ..data.annotations import AnnotationDataset, atomic_json, create_dataset, validate_boxes
-from .collection_gen import Reporter
+from .progress import Reporter
 from ..contracts.image import band_to_box
 from ..contracts.iq import (CLASS_SET_A09, DEFAULT_IQ_SAMPLES, IQ_INPUT_CHANNELS, IQ_LAYOUT,
                             IQ_NORMALIZATION, IQ_WAVEFORM_CONTRACT)

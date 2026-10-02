@@ -30,6 +30,8 @@ from ..data.datasets import bootstrap_labels_from_versions
 from ..evaluation import hop_truth, signal_truth
 from ..algorithms.generation.recipes import check_generator_support, draw_record, sample_seed, validate_recipe
 
+from .progress import Reporter  # noqa: F401  兼容：旧代码仍可从本模块导入 Reporter
+
 #: 单个分片封存前的目标字节数；分片越小，中途取消时未封存的部分越少。
 SHARD_BYTES = 256 * 1024 * 1024
 #: 信号频带之间、频带与奈奎斯特边缘之间的保护间隔（占采样率的比例）。
@@ -38,30 +40,6 @@ GUARD_RATIO = 0.01
 HOPPING_MODES = ("fh_rc", "fh_video")
 #: 同一条录制放置信号的最大重试次数。
 PLACEMENT_TRIES = 64
-
-
-class Reporter:
-    """进度与取消通道：worker 写 ``progress.json``，父进程写 ``cancel.flag``。"""
-
-    def __init__(self, job_dir):
-        self.directory = Path(job_dir) if job_dir else None
-        self._last = 0.0
-
-    def emit(self, done, total, message, *, force=False, **extra):
-        if self.directory is None:
-            return
-        now = time.monotonic()
-        if not force and now - self._last < 0.25:
-            return
-        self._last = now
-        path = self.directory / "progress.json"
-        temporary = path.with_suffix(".tmp")
-        payload = {"done": int(done), "total": int(total), "message": message, **extra}
-        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(path)
-
-    def cancelled(self):
-        return self.directory is not None and (self.directory / "cancel.flag").exists()
 
 
 # ---------------------------------------------------------------------------

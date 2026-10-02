@@ -472,3 +472,167 @@ def test_hop_targets_are_rejected_with_guidance(tmp_path):
     message = result["results"][0]["error"]
     assert "逐跳目标" in message and "采纳为参数标注" in message
     assert Workspace(tmp_path).list_assets() == []
+
+
+def _import_candidates(tmp_path, count, prefix="cancel"):
+    files = []
+    for index in range(count):
+        path = _make_npy(tmp_path, f"{prefix}_{index}.npy", 32)
+        files.append({"path": str(path), "sample_rate": 1000.0})
+    return files
+
+
+def test_import_files_cooperative_cancel_before_start(tmp_path):
+    """预置 cancel.flag：导入在文件边界直接停止，返回成功/失败/未处理计数。"""
+    import json
+
+    files = _import_candidates(tmp_path, 5)
+    job_dir = tmp_path / "job_pre"
+    job_dir.mkdir()
+    (job_dir / "cancel.flag").write_text("1", encoding="utf-8")
+    result = execute({"workspace": str(tmp_path), "action": "import_files",
+                      "batch_shard": True, "files": files, "job_dir": str(job_dir)})
+    assert result["cancelled"] is True
+    assert (result["created"], result["failed"], result["unprocessed"]) == (0, 0, 5)
+    assert result["results"] == [] and result["shard_id"] is None
+    progress = json.loads((job_dir / "progress.json").read_text(encoding="utf-8"))
+    assert (progress["done"], progress["total"]) == (0, 5)
+    assert progress["message"] == "已取消"
+    assert Workspace(tmp_path).list_assets() == []
+
+
+def test_import_files_cancel_stops_at_file_boundary(tmp_path, monkeypatch):
+    """块内取消：已完成文件保留（分片封存），未处理计数正确。"""
+    from signal_analysis.services import imports as imports_service
+
+    files = _import_candidates(tmp_path, 4)
+    state = {"checks": 0}
+
+    class _Reporter:
+        def __init__(self, job_dir=None):
+            self.directory = None
+
+        def emit(self, *args, **kwargs):
+            pass
+
+        def cancelled(self):
+            state["checks"] += 1
+            return state["checks"] > 1
+
+    monkeypatch.setattr(imports_service, "Reporter", _Reporter)
+    result = execute({"workspace": str(tmp_path), "action": "import_files",
+                      "batch_shard": True, "files": files})
+    assert result["cancelled"] is True
+    assert result["created"] == 1
+    assert result["unprocessed"] == 3
+    assert result["shard_id"]  # 已写数据封存为分片而不是丢弃
+    assert [item["name"] for item in Workspace(tmp_path).list_assets()] == ["cancel_0.npy"]
+
+
+def test_import_inspect_cooperative_cancel(tmp_path):
+    """识别链同样在文件边界响应取消，并回报未处理数量。"""
+    first = _make_npy(tmp_path, "inspect_x.npy", 16)
+    second = _make_npy(tmp_path, "inspect_y.npy", 16)
+    job_dir = tmp_path / "job_inspect"
+    job_dir.mkdir()
+    (job_dir / "cancel.flag").write_text("1", encoding="utf-8")
+    result = execute({"workspace": str(tmp_path), "action": "import_inspect",
+                      "paths": [str(first), str(second)], "job_dir": str(job_dir)})
+    assert result["cancelled"] is True
+    assert result["files"] == []
+    assert result["unprocessed"] == 2
+
+
+def test_import_files_chunk_orchestration(monkeypatch):
+    """900 个文件拆成 500+400 两块：进度换算整批口径、分片带块号、结果合并。"""
+    from signal_analysis.ui import runner as runner_module
+
+    calls, names, reports = [], [], []
+
+    def fake_run_job(request, **kwargs):
+        calls.append(len(request["files"]))
+        names.append(request.get("shard_name"))
+        progress = kwargs.get("progress")
+        if progress is not None:
+            progress({"done": 0, "total": len(request["files"]),
+                      "message": "正在导入 x.npy"})
+        results = [{"path": item["path"], "ok": True} for item in request["files"]]
+        return {"kind": "import_files", "results": results, "created": len(results),
+                "failed": 0, "collection_id": "col-1", "collection_name": "批次集合",
+                "shard_id": f"shard-{len(calls)}", "targets_total": 0,
+                "initial_labels": 0}
+
+    monkeypatch.setattr(runner_module, "run_job", fake_run_job)
+    files = [{"path": f"/x/{index}.npy", "sample_rate": 1000.0} for index in range(900)]
+    merged = runner_module._run_task({"action": "import_files", "batch_shard": True,
+                                      "files": files}, progress=reports.append)
+    assert calls == [500, 400]
+    assert names == ["导入批次 1/2（500 个文件）", "导入批次 2/2（400 个文件）"]
+    assert reports == [{"done": 0, "total": 900, "message": "第 1/2 块 · 正在导入 x.npy"},
+                       {"done": 500, "total": 900, "message": "第 2/2 块 · 正在导入 x.npy"}]
+    assert merged["created"] == 900 and merged["unprocessed"] == 0
+    assert merged["cancelled"] is False
+    assert merged["shard_ids"] == ["shard-1", "shard-2"]
+    assert merged["shard_id"] == "shard-1"
+    assert merged["collection_name"] == "批次集合" and len(merged["results"]) == 900
+
+
+def test_import_files_chunk_cancel_between_blocks(monkeypatch):
+    """块边界发现取消：后续块不再启动，未处理按整批口径汇总。"""
+    import threading
+
+    from signal_analysis.ui import runner as runner_module
+
+    cancel = threading.Event()
+    calls = []
+
+    def fake_run_job(request, **kwargs):
+        calls.append(len(request["files"]))
+        kwargs["cancel"].set()  # 模拟体在第一块执行期间收到取消
+        results = [{"path": item["path"], "ok": True} for item in request["files"]]
+        return {"kind": "import_files", "results": results, "created": len(results),
+                "failed": 0, "collection_id": None, "collection_name": None,
+                "shard_id": f"shard-{len(calls)}", "targets_total": 0,
+                "initial_labels": 0, "cancelled": False}
+
+    monkeypatch.setattr(runner_module, "run_job", fake_run_job)
+    files = [{"path": f"/x/{index}.npy"} for index in range(900)]
+    merged = runner_module._run_task({"action": "import_files", "files": files},
+                                     cancel=cancel)
+    assert calls == [500]
+    assert merged["cancelled"] is True
+    assert merged["created"] == 500 and merged["unprocessed"] == 400
+
+
+def test_import_files_cancel_before_first_block_raises(monkeypatch):
+    """启动即取消（第一块未执行）：以取消而不是空结果收场。"""
+    import threading
+
+    from signal_analysis.ui import runner as runner_module
+
+    cancel = threading.Event()
+    cancel.set()
+    calls = []
+    monkeypatch.setattr(runner_module, "run_job",
+                        lambda request, **kwargs: calls.append(request) or {})
+    with pytest.raises(RuntimeError, match="任务已取消"):
+        runner_module._run_task({"action": "import_files",
+                                 "files": [{"path": f"/x/{i}"} for i in range(600)]},
+                                cancel=cancel)
+    assert calls == []
+
+
+@pytest.mark.gui
+def test_import_cancel_status_text(tmp_path):
+    """取消后的状态文案：成功 / 失败 / 未处理 一目了然。"""
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(tmp_path)
+    try:
+        text = window.result_status({"kind": "import_files", "cancelled": True,
+                                     "created": 3, "failed": 1, "unprocessed": 96,
+                                     "collection_name": "大集合"})
+        assert "导入已取消" in text
+        assert "成功 3" in text and "失败 1" in text and "未处理 96" in text
+        assert "大集合" in text
+    finally:
+        window.close()

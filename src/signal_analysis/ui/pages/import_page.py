@@ -39,6 +39,11 @@ class ImportPageMixin:
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
+        from common.gui import TaskBanner
+        self.import_banner = TaskBanner("信号导入", "取消本次导入")
+        self.register_task_banner("信号导入", self.import_banner)
+        layout.addWidget(self.import_banner)
+
         toolbar = QtWidgets.QHBoxLayout()
         self.import_add_files_button = QtWidgets.QPushButton("添加文件…")
         self.import_add_files_button.clicked.connect(self.choose_import_files)
@@ -210,7 +215,9 @@ class ImportPageMixin:
             return
         if len(new) > 2000:
             new = new[:2000]
-        self.start_job("import_inspect", paths=new)
+        self.start_job("import_inspect", owner="信号导入",
+                       label=f"识别 {len(new)} 个文件", cancel_text="取消本次识别",
+                       paths=new)
 
     def _apply_import_inspection(self, files):
         for info in files:
@@ -488,7 +495,7 @@ class ImportPageMixin:
         ready = sum(1 for row in range(total) if self._import_row_ready(row))
         self.import_count_label.setText(
             "清单为空" if not total else f"清单 {total} 个文件 · 就绪 {ready} 个")
-        self.import_start_button.setEnabled(ready > 0 and self.active_job is None)
+        self.import_start_button.setEnabled(ready > 0 and not self.task_running("信号导入"))
 
     def _import_item_changed(self, item):
         if self._import_filling or item.column() not in (IMPORT_COL_RATE,
@@ -501,7 +508,8 @@ class ImportPageMixin:
         if not rows:
             self.status.setText("请先在文件清单里选择要重新识别的行")
             return
-        self.start_job("import_inspect",
+        self.start_job("import_inspect", owner="信号导入",
+                       label=f"重新识别 {len(rows)} 个文件", cancel_text="取消本次识别",
                        paths=[self._import_row_info(row)["path"] for row in rows])
 
     def remove_import_rows(self):
@@ -610,7 +618,8 @@ class ImportPageMixin:
             return
         paths = [self._import_row_info(row)["path"]
                  for row in range(self.import_table.rowCount())]
-        self.start_job("import_manifest", path=path, paths=paths)
+        self.start_job("import_manifest", owner="信号导入", label="解析标注清单",
+                       cancel_text="取消本次解析", path=path, paths=paths)
 
     def export_import_template(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -676,7 +685,8 @@ class ImportPageMixin:
         return file_count >= self.import_shard_threshold.value()
 
     def start_import_batch(self):
-        if self.active_job is not None:
+        if self.task_running("信号导入"):
+            self.status.setText("“信号导入”已有任务在运行；请等待完成或先取消")
             return
         rows = [row for row in range(self.import_table.rowCount())
                 if self._import_row_ready(row)]
@@ -709,7 +719,9 @@ class ImportPageMixin:
                 entry["capture_started_at"] = capture  # 来自标注清单；缺省由服务记导入时间
             files.append(entry)
         self.import_manage_button.setVisible(False)
-        self.start_job("import_files", files=files,
+        self.start_job("import_files", owner="信号导入",
+                       label=f"导入 {len(files)} 个文件", cancel_text="取消本次导入",
+                       files=files,
                        batch_shard=self._resolve_batch_shard(len(files)),
                        rf_center_hz=self.import_rf_center.text().strip() or None,
                        collection_id=scope if scope not in (None, "__new__") else None,

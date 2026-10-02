@@ -9,6 +9,7 @@ from common.storage import utc_now
 
 from ..data.io import read_samples
 from ..data.sigmf import SIGMF_EXTENSIONS, read_sigmf, read_sigmf_metadata
+from .progress import Reporter
 
 
 def import_file(workspace, request):
@@ -27,8 +28,18 @@ def import_inspect(request):
         raise ValueError("未选择任何文件")
     if len(paths) > 2000:
         raise ValueError("单次识别最多 2000 个文件")
-    return {"kind": "import_inspect",
-            "files": [_inspect_import_file(item) for item in paths]}
+    reporter = Reporter(request.get("job_dir"))
+    files = []
+    cancelled = False
+    for index, item in enumerate(paths):
+        if reporter.cancelled():
+            cancelled = True
+            break
+        reporter.emit(index, len(paths), f"正在识别 {Path(item).name or item}")
+        files.append(_inspect_import_file(item))
+    reporter.emit(len(files), len(paths), "已取消" if cancelled else "识别完成", force=True)
+    return {"kind": "import_inspect", "files": files,
+            "cancelled": cancelled, "unprocessed": len(paths) - len(files)}
 
 
 def _parse_import_file(path, request):
@@ -356,8 +367,15 @@ def import_files(workspace, request):
               if request.get("batch_shard") else None)
     results, imported_ids, total_targets = [], [], 0
     imported_at = utc_now()  # 未提供采集时间的文件统一记本批导入时间
+    reporter = Reporter(request.get("job_dir"))
+    stopped = False
     for index, entry in enumerate(entries):
         path = Path(str(entry.get("path") or ""))
+        if reporter.cancelled():
+            # 文件边界协作取消：下方照常封存已写分片，未处理项计数返回
+            stopped = True
+            break
+        reporter.emit(index, len(entries), f"正在导入 {path.name or path}")
         try:
             if not path.name:
                 raise ValueError("文件路径为空")
@@ -398,6 +416,7 @@ def import_files(workspace, request):
         except (ValueError, OSError) as exc:
             results.append({"path": str(path), "name": path.name or f"第 {index + 1} 项",
                             "ok": False, "error": str(exc)})
+    reporter.emit(len(results), len(entries), "已取消" if stopped else "导入完成", force=True)
     shard = None
     if writer is not None:
         shard = writer.seal() if writer.count else None
@@ -412,7 +431,8 @@ def import_files(workspace, request):
             "collection_id": collection["id"] if collection else None,
             "collection_name": collection["name"] if collection else None,
             "shard_id": shard["id"] if shard else None,
-            "targets_total": total_targets, "initial_labels": labels}
+            "targets_total": total_targets, "initial_labels": labels,
+            "cancelled": stopped, "unprocessed": len(entries) - len(results)}
 
 
 def _ensure_initial_labels(workspace, collection, asset_ids):

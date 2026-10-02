@@ -87,6 +87,11 @@ class DataPageMixin:
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
+        from common.gui import TaskBanner
+        self.data_banner = TaskBanner("数据管理", "取消本次任务")
+        self.register_task_banner("数据管理", self.data_banner)
+        layout.addWidget(self.data_banner)
+
         bar = QtWidgets.QHBoxLayout()
         self.storage_scan_button = QtWidgets.QPushButton("扫描 / 刷新")
         self.storage_scan_button.setObjectName("primary")
@@ -353,12 +358,15 @@ class DataPageMixin:
 
     def migrate_legacy(self):
         """把旧标注数据集与旧实验登记进新索引（幂等，可重复点击）。"""
-        self.start_job("migrate_legacy")
+        self.start_job("migrate_legacy", owner="数据管理", label="历史数据登记",
+                       cancel_text="取消本次登记")
 
     def scan_storage(self, preview=False):
         """扫描工作区；``preview=True`` 时视为一次显式清理预览（解锁删除按钮）。"""
         self._pending_preview = bool(preview)
-        self.start_job("storage_report", extra_dirs=list(self._extra_dirs),
+        self.start_job("storage_report", owner="数据管理", label="数据盘点",
+                       cancel_text="取消本次盘点",
+                       extra_dirs=list(self._extra_dirs),
                        job_retention_days=int(self.storage_retention.value()))
 
     def _retention_changed(self, _value):
@@ -570,7 +578,9 @@ class DataPageMixin:
             return
         self._cleanup_ready = False
         self._sync_cleanup_button()
-        self.start_job("storage_cleanup", targets=paths,
+        self.start_job("storage_cleanup", owner="数据管理", label="数据清理",
+                       cancel_text="取消本次清理",
+                       targets=paths,
                        job_retention_days=int(self.storage_retention.value()))
 
     def _render_storage_cleanup(self, result):

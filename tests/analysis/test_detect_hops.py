@@ -553,6 +553,7 @@ def test_gui_hops_tab_renders_result(tmp_path):
         window.assets.setCurrentRow(0)
         asset = window.selected_asset()
         assert asset is not None and asset["source"] == "generated:iq_fh_video_v1"
+        before = window.tabs.currentIndex()
         window.hops_button.click()
         deadline = time.monotonic() + 30
         while window.active_job is not None and time.monotonic() < deadline:
@@ -562,7 +563,10 @@ def test_gui_hops_tab_renders_result(tmp_path):
         assert window.active_job is None, window.status.text()
         assert "失败" not in window.status.text(), window.status.text()
         assert window.last_result["kind"] == "detect_hops"
-        assert window.tabs.currentIndex() == window._page_index("跳频参数")
+        assert window.tabs.currentIndex() == before  # 结果渲染不自动抢标签页
+        # 几何相关的绘制断言需要页面真实布局：显式切到“跳频参数”页后再继续
+        window.tabs.setCurrentIndex(window._page_index("跳频参数"))
+        app.processEvents()
         assert window.hops_table.rowCount() == len(window.last_result["hops"])
         assert window.hops_session_table.rowCount() == len(window.last_result["sessions"])
         text = window.hops_summary.toPlainText()

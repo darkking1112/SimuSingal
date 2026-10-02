@@ -43,6 +43,10 @@ class AmcPageMixin:
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
+        from common.gui import TaskBanner
+        self.amc_banner = TaskBanner("调制识别", "取消本次识别")
+        self.register_task_banner("调制识别", self.amc_banner)
+        layout.addWidget(self.amc_banner)
         bar = QtWidgets.QHBoxLayout()
         bar.addWidget(QtWidgets.QLabel("分析中心"))
         center_row, self.amc_offset = _freq_spin(-1e9, 1e9, 0.0, 1)
@@ -184,7 +188,9 @@ class AmcPageMixin:
             config["bandwidth_hz"] = bandwidth
         model = self.amc_model.text().strip() or None
         action = "amc_iq_classify" if self._use_iq_branch() else "amc_classify"
-        self.start_job(action, asset_id=asset["id"], config=config, model=model)
+        self.start_job(action, owner="调制识别", label=f"调制识别 · {asset['name']}",
+                       cancel_text="取消本次识别",
+                       asset_id=asset["id"], config=config, model=model)
 
 
     def _plot_amc_scores(self, classes, labels, scores, title):
