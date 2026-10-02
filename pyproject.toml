@@ -31,7 +31,7 @@ where = ["src"]
 
 # 随包分发的模型文件：内置调制识别基线（合成数据训练，可复核、可重训）
 [tool.setuptools.package-data]
-"signal_analysis.ml" = ["*.json"]
+"signal_analysis.algorithms.amc" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

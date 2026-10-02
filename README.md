@@ -18,8 +18,8 @@
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-# 核心依赖 + gui + dev 
-python -m pip install -e '.[gui,dev]' 
+# 核心依赖 + gui + dev
+python -m pip install -e '.[gui,dev]'
 # 完整训练环境（含固定版本 TorchSig 数据生成及 ONNX 验收）
 python -m pip install -e '.[gui,dev,ml,train]'
 python -m signal_analysis gui
@@ -234,7 +234,7 @@ python scripts/build_wheels.py analysis --compile-core
 python scripts/build_wheels.py simulation
 ```
 
-分析 wheel 包含 `common + signal_analysis`，按 `packaging/numeric_core.json` 将七个职责模块及 `_numeric.py` 兼容入口编译为八个扩展并排除核心明文；仿真 wheel 包含 `common + communication_sim`，不依赖 SimPy 以外的业务计算库。GUI 依赖单独声明。建议在独立虚拟环境安装和升级各项目的 wheel；共用源码随各自 wheel 分发。
+分析 wheel 包含 `common + signal_analysis`，按 `packaging/numeric_core.json` 将八个算法模块（`algorithms.*`，语义命名）编译为扩展并排除核心明文；仿真 wheel 包含 `common + communication_sim`，不依赖 SimPy 以外的业务计算库。GUI 依赖单独声明。建议在独立虚拟环境安装和升级各项目的 wheel；共用源码随各自 wheel 分发。
 
 在 Linux CPython 3.12 上，使用生成的文件名分别构建目录式桌面程序：
 
@@ -274,4 +274,4 @@ A09 调制识别的两条路径共用同一份
 它不共用 34 维特征，而是让网络直接学波形，因此**不与特征通路做同口径对比**，只与自己的基线比。
 识别准确率的合格门限仍为**待确认项**，文档只给原始指标与局限，不作通过判定。
 
-数值实现按[模块拆分与回归说明](docs/数值算法模块拆分与回归说明.md)维护；算法函数使用统一中文说明，旧 `_numeric` 与 `ml.amc` 特征接口继续兼容。
+数值实现按[模块拆分与回归说明](docs/数值算法模块拆分与回归说明.md)维护；算法函数使用统一中文说明，算法模块按 `algorithms.*` 语义命名（旧 `_numeric*` 与 `ml.*` 兼容层已删除，`core_api` 为稳定接口）。

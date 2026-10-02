@@ -20,7 +20,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT / "src") not in sys.path:  # 与 train_yolox.py 的引导保持一致
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from signal_analysis.ml import IMAGE_LAYOUT, INPUT_CONTRACT, OUTPUT_LAYOUT  # noqa: E402
+from signal_analysis.contracts import IMAGE_LAYOUT, INPUT_CONTRACT, OUTPUT_LAYOUT  # noqa: E402
 
 #: 标签语义：``session_v1`` = 一段传输一个框；``per_hop_v1`` = ``fh*`` 一跳一个框。
 #: 旧数据集没有该字段，按 ``session_v1`` 处理（向后兼容）。
@@ -212,7 +212,7 @@ def contract_of(card):
 
 
 def scene_meta(record, card):
-    """单个样本的坐标映射元数据（供 :func:`signal_analysis.ml.band_to_box` 使用）。
+    """单个样本的坐标映射元数据（供 :func:`signal_analysis.contracts.image.band_to_box` 使用）。
 
     只重建 ``band_to_box`` 真正用到的三个字段；其余字段（本底、动态范围）与
     标签几何无关，不需要从数据集里回读。

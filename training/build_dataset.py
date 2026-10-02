@@ -3,8 +3,8 @@
 
 设计要点（与推理端共用同一份契约，见 ``training/README.md``）：
 
-* 图像由 :func:`signal_analysis.ml.detection_image` 生成、标签由
-  :func:`signal_analysis.ml.band_to_box` 生成——训练与推理的坐标定义、
+* 图像由 :func:`signal_analysis.algorithms.dsp.image.detection_image` 生成、标签由
+  :func:`signal_analysis.contracts.image.band_to_box` 生成——训练与推理的坐标定义、
   归一化范围与图像排布因此不可能不一致（这是本项目最重要的一条约定）；
 * 场景参数（调制样式、频点、带宽、带内信噪比、持续时间）随机采样，标签取
   :func:`signal_analysis.evaluation.signal_truth`：跳频信号按"一次会话一个
@@ -69,14 +69,13 @@ from detectors.dataset import (  # noqa: E402
 )
 from signal_analysis.core_api import generate_iq  # noqa: E402
 from signal_analysis.evaluation import hop_truth, signal_truth  # noqa: E402
-from signal_analysis.ml import (  # noqa: E402
+from signal_analysis.algorithms.dsp.image import detection_image, spectral_context  # noqa: E402
+from signal_analysis.contracts import (  # noqa: E402
     BOX_COLUMNS,
     IMAGE_LAYOUT,
     INPUT_CONTRACT,
     OUTPUT_LAYOUT,
     band_to_box,
-    detection_image,
-    spectral_context,
 )
 
 DEFAULT_MODES = ("am", "fm", "ssb", "ask2", "qpsk", "qam16", "qam64", "fh_rc", "fh_video")

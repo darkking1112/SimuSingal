@@ -2,7 +2,8 @@
 import numpy as np
 import pytest
 
-from signal_analysis._numeric import MAX_SAMPLES, generate_iq, plan_signal
+from signal_analysis.algorithms.dsp.base import MAX_SAMPLES
+from signal_analysis.algorithms.generation.iqgen import generate_iq, plan_signal
 
 RATE = 1_000_000.0
 BASE = {"offset": 100_000.0, "bandwidth": 100_000.0, "power_dbfs": -10.0}

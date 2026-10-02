@@ -15,7 +15,7 @@
 
 ``dataset`` / ``labels``
     数据集读取与**原生标注格式**导出（Ultralytics YOLO、YOLOX）。标签一律由
-    :func:`signal_analysis.ml.tensor.band_to_box` 生成，绝不另写一份 y 公式。
+    :func:`signal_analysis.contracts.image.band_to_box` 生成，绝不另写一份 y 公式。
 ``contract`` / ``torch_export`` / ``onnx_contract``
     布局说明表（无依赖）→ torch 侧包装（把缩放/归一化/通道复制写进图）→
     ONNX 图改写（给只能用自己的导出器的框架用）。

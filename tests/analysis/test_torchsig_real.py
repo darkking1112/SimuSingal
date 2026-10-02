@@ -43,7 +43,7 @@ def test_real_qpsk_generation_reproducible_and_ingested(tmp_path):
     assert card["ingest"]["rejected_total"] == 0
     records = [json.loads(line) for line in (tmp_path / "detection/samples.jsonl").read_text(encoding="utf-8").splitlines()]
     assert len(records) == 4 and all(len(r["boxes"]) == 1 for r in records)
-    from signal_analysis.annotations import validate_boxes
+    from signal_analysis.data.annotations import validate_boxes
     for record in records:
         validate_boxes(record["boxes"])
         image = np.load(tmp_path / "detection" / record["image"])

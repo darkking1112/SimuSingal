@@ -27,14 +27,13 @@ if str(REPO_ROOT / "src") not in sys.path:
 
 from signal_analysis.core_api import generate_iq  # noqa: E402
 from signal_analysis.evaluation import signal_truth  # noqa: E402
-from signal_analysis.ml import (  # noqa: E402
+from signal_analysis.algorithms.dsp.image import detection_image, spectral_context  # noqa: E402
+from signal_analysis.contracts import (  # noqa: E402
     BOX_COLUMNS,
     IMAGE_LAYOUT,
     INPUT_CONTRACT,
     OUTPUT_LAYOUT,
     band_to_box,
-    detection_image,
-    spectral_context,
 )
 
 

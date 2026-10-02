@@ -4,12 +4,12 @@ import json
 import numpy as np
 import pytest
 
-from signal_analysis.datasets import verify_dataset_version
-from signal_analysis.maintenance import (build_report, register_legacy_dataset,
-                                         register_legacy_experiments,
-                                         scan_legacy_datasets)
+from signal_analysis.data.datasets import verify_dataset_version
+from signal_analysis.storage.maintenance import (build_report, register_legacy_dataset,
+                                                 register_legacy_experiments,
+                                                 scan_legacy_datasets)
 from signal_analysis.services import execute
-from signal_analysis.storage import Workspace
+from signal_analysis.data import Workspace
 
 
 def make_legacy_dataset(directory, source_asset_ids=()):

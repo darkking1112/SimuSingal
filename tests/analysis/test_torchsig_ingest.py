@@ -44,14 +44,13 @@ for _extra in (REPO_ROOT / "src", TRAINING):
         sys.path.insert(0, str(_extra))
 
 from signal_analysis.core_api import generate_iq  # noqa: E402
-from signal_analysis.ml import (  # noqa: E402
+from signal_analysis.algorithms.dsp.image import measure_band, spectral_context  # noqa: E402
+from signal_analysis.contracts import (  # noqa: E402
     BOX_COLUMNS,
     IMAGE_LAYOUT,
     INPUT_CONTRACT,
     OUTPUT_LAYOUT,
     box_to_band,
-    measure_band,
-    spectral_context,
 )
 
 #: 场景参数（与训练脚本默认一致的量级：1 MSps / 32.8 ms / nfft 512 / 1024² 图像）

@@ -13,23 +13,24 @@ import pytest
 
 from signal_analysis.core_api import generate_iq
 from signal_analysis.evaluation import evaluate_detections, signal_truth
-from signal_analysis.ml import (
+from signal_analysis.algorithms.detection.ai import ml_detect
+from signal_analysis.algorithms.dsp.image import detection_image, measure_band, spectral_context
+from signal_analysis.contracts import (
     ManifestError,
-    RuntimeUnavailable,
     band_to_box,
     box_to_band,
     boxes_to_bands,
-    detection_image,
-    measure_band,
-    ml_detect,
     non_max_suppression,
     parse_model_output,
     read_model_manifest,
-    spectral_context,
     write_model_manifest,
 )
-from signal_analysis.ml.runtime import load_runner, runtime_version
-from signal_analysis.storage import Workspace
+from signal_analysis.inference.runtime import (
+    RuntimeUnavailable,
+    load_runner,
+    runtime_version,
+)
+from signal_analysis.data import Workspace
 
 RATE = 1_000_000.0
 SIZE = 1024
@@ -261,7 +262,7 @@ def test_image_rows_start_at_positive_frequency():
     expected = (rate / 2 - 250_000.0) / rate * SIZE
     assert abs(peak_row - expected) < 0.05 * SIZE
     # 反归一化后的取值始终落在清单声明的动态范围内
-    from signal_analysis.ml import image_db
+    from signal_analysis.algorithms.dsp.image import image_db
 
     db = image_db(image, meta)
     assert float(db.min()) >= meta["db_floor"] - 1e-6

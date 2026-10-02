@@ -14,7 +14,7 @@
 
 约定
 ----
-* 训练与推理共用 :func:`signal_analysis.ml.iq.iq_waveform` 产出的窗口——数据集里存的
+* 训练与推理共用 :func:`signal_analysis.algorithms.amc.iq_model.iq_waveform` 产出的窗口——数据集里存的
   就是推理端会拿到的**同一种** ``(2, N)`` 单位 RMS 张量，窗口长度由数据集契约给出；
 * 类别顺序即模型输出下标顺序，写进清单的 ``output.classes``，推理端按同一顺序解读；
 * 报告里的指标一律区分"训练集内"与"独立验证集"；本仓库**没有**约定的识别准确率
@@ -36,7 +36,7 @@ for _extra in (REPO_ROOT / "src", Path(__file__).resolve().parent):
         sys.path.insert(0, str(_extra))
 
 from signal_analysis.evaluation import classification_metrics  # noqa: E402
-from signal_analysis.ml.iq import (  # noqa: E402
+from signal_analysis.contracts.iq import (  # noqa: E402
     IQ_DEFAULT_MODEL_NAME,
     IQ_INPUT_CHANNELS,
     IQ_WAVEFORM_CONTRACT,
@@ -288,7 +288,7 @@ def main(argv=None):
         classes=classes, samples=samples, opset=args.opset,
         default_offset_hz=args.default_offset_hz, default_bandwidth_hz=args.default_bandwidth_hz,
         training=training_info,
-        notes="输入为单位 RMS 的 (2, N) 复基带窗口（signal_analysis.ml.iq.iq_waveform 产出）；"
+        notes="输入为单位 RMS 的 (2, N) 复基带窗口（signal_analysis.algorithms.amc.iq_model.iq_waveform 产出）；"
               "softmax 已写入导出图")
     print(f"\nONNX 分类器 {library}\n清单 {manifest_path}（sha256 {manifest['sha256'][:12]}…）")
 
@@ -301,7 +301,7 @@ def main(argv=None):
         ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
 
     # 用推理端入口再评一次：确认"训练用的模型"和"清单指向的模型"是同一个
-    from signal_analysis.ml.iq import iq_scores
+    from signal_analysis.algorithms.amc.iq_model import iq_scores
 
     truth, predicted = [], []
     for waveform, label in zip(val_x, val_labels):

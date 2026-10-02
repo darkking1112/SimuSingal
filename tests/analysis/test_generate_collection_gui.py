@@ -14,9 +14,9 @@ pytest.importorskip("pyqtgraph")
 
 from PySide6 import QtWidgets
 
-from signal_analysis.collection_gen_gui import _BundleImportDialog
-from signal_analysis.gui import MainWindow
-from signal_analysis.storage import Workspace
+from signal_analysis.ui import MainWindow
+from signal_analysis.ui.pages.collection_gen_page import _BundleImportDialog
+from signal_analysis.data import Workspace
 from signal_analysis.tasks import run_job
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "training"))
@@ -174,7 +174,7 @@ def test_torchsig_environment_dialog_and_bundle_import(tmp_path):
             assert "只能在 Linux" in dialog.status.text()
         dialog.repository.setText(str(tmp_path / "missing"))
         dialog.save()
-        from signal_analysis.torchsig_support import read_env
+        from signal_analysis.integrations.torchsig import read_env
 
         assert read_env(window.workspace)["repository"] == str(tmp_path / "missing")
         dialog.close()

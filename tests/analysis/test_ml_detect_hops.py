@@ -31,8 +31,9 @@ if str(REPO_ROOT / "src") not in sys.path:
 from signal_analysis.core_api import detect_hops, generate_iq  # noqa: E402
 from signal_analysis.evaluation import (HOP_CONTRACT, evaluate_detections,  # noqa: E402
                                         hop_truth)
-from signal_analysis.ml import (HOP_KEYS, band_to_box, detection_image,  # noqa: E402
-                                ml_detect_hops, spectral_context)
+from signal_analysis.algorithms.detection.ai import HOP_KEYS, ml_detect_hops  # noqa: E402
+from signal_analysis.algorithms.dsp.image import detection_image, spectral_context  # noqa: E402
+from signal_analysis.contracts import band_to_box  # noqa: E402
 
 RATE = 1_000_000.0
 NFFT = 512
@@ -311,7 +312,7 @@ def _assert_truth_close(actual, expected, rel=1e-9):
 def test_service_payload_scores_all_three_granularities(tmp_path):
     """服务层：逐跳真值、会话基线、传统逐跳三个口径各评一次，互不混用。"""
     from signal_analysis.services import _attach_hop_truth
-    from signal_analysis.storage import Workspace
+    from signal_analysis.data import Workspace
 
     workspace = Workspace(tmp_path / "ws")
     samples, generation = scene()
@@ -435,7 +436,7 @@ def test_gui_ml_hops_entry_builds_per_hop_request(tmp_path):
     pytest.importorskip("pyqtgraph")
     from PySide6 import QtWidgets
 
-    from signal_analysis.gui import MainWindow
+    from signal_analysis.ui import MainWindow
     from signal_analysis.tasks import run_job
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])

@@ -6,7 +6,7 @@
 
 口径声明（报告里也会原样写进 JSON，避免数字脱离口径被引用）：
 
-* **检测路径**：全部经过 :func:`signal_analysis.ml.detector.ml_detect`，
+* **检测路径**：全部经过 :func:`signal_analysis.algorithms.detection.ai.ml_detect`，
   即「网络判决 + 传统口径测辐射量」，结果契约 ``detect_result_v1``；
   参数误差与 per-SNR 召回用 :func:`signal_analysis.evaluation.evaluate_detections`
   与 :func:`signal_analysis.evaluation.signal_truth` 计算——**没有任何第二套匹配或误差公式**。
@@ -69,15 +69,16 @@ from signal_analysis.evaluation import (  # noqa: E402
     match_detections,
     signal_truth,
 )
-from signal_analysis.ml.decode import boxes_to_bands  # noqa: E402
-from signal_analysis.ml.detector import ml_detect  # noqa: E402
-from signal_analysis.ml.manifest import (  # noqa: E402
+from signal_analysis.algorithms.detection.ai import ml_detect  # noqa: E402
+from signal_analysis.algorithms.dsp.image import detection_image  # noqa: E402
+from signal_analysis.contracts import box_to_band  # noqa: E402
+from signal_analysis.contracts.decode import boxes_to_bands  # noqa: E402
+from signal_analysis.contracts.manifest import (  # noqa: E402
     DEFAULT_LABEL_SEMANTICS,
     LABEL_SEMANTICS,
     LABEL_SEMANTICS_FIELD,
 )
-from signal_analysis.ml.runtime import runtime_version  # noqa: E402
-from signal_analysis.ml.tensor import box_to_band, detection_image  # noqa: E402
+from signal_analysis.inference.runtime import runtime_version  # noqa: E402
 
 SCHEMA = "ai_detect_sweep_v1"
 RATE_HZ = 1e6
@@ -540,7 +541,7 @@ def amc_report(directory, split, model_path=None):
         return None
     import train_amc  # 训练侧脚本（已在 import 时把 src 加入 sys.path）
 
-    from signal_analysis.ml import amc
+    from signal_analysis.algorithms.amc import feature_model as amc
 
     card, records = train_amc.load_dataset(directory)
     subset = [record for record in records
@@ -874,7 +875,7 @@ def main(argv=None):
     if args.seeds < 1 or args.noise_trials < 1:
         raise SystemExit("--seeds 与 --noise-trials 都必须 ≥ 1")
 
-    from signal_analysis.ml.runtime import load_runner
+    from signal_analysis.inference.runtime import load_runner
 
     runner, manifest, library = load_runner(args.manifest, threads=args.threads)
     print(f"清单 {args.manifest}\n模型 {library}\n"

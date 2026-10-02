@@ -10,7 +10,7 @@
    输出必须是 ``(1, C)``（``C`` = 类别数），且节点名与清单一致——这一条只能从图上
    验证，清单里看不出来；
 4. **端到端**：用确定性场景（单载波、跳频会话、双信号、纯噪声）跑
-   :func:`signal_analysis.ml.iq.amc_iq_classify`，检查结果契约字段齐全、JSON 安全；
+   :func:`signal_analysis.algorithms.amc.iq_model.amc_iq_classify`，检查结果契约字段齐全、JSON 安全；
 5. **可复现**：同一批样本重复推理，除 ``timing`` 外必须逐字节一致；
 6. **数据集指标**（``--data``）：在数据集的独立验证划分上算准确率/宏平均 F1 与
    分信噪比表现，用 :func:`classification_metrics` 的口径，**不设合格门限**。
@@ -40,12 +40,16 @@ for _extra in (REPO_ROOT / "src", Path(__file__).resolve().parent):
 
 from signal_analysis.core_api import generate_iq  # noqa: E402
 from signal_analysis.evaluation import classification_metrics  # noqa: E402
-from signal_analysis.ml import RuntimeUnavailable, runtime_module, runtime_version  # noqa: E402
-from signal_analysis.ml.iq import (  # noqa: E402
+from signal_analysis.algorithms.amc.iq_model import amc_iq_classify  # noqa: E402
+from signal_analysis.contracts.iq import (  # noqa: E402
     IQ_INPUT_CHANNELS,
     IQ_RESULT_CONTRACT,
-    amc_iq_classify,
     read_iq_manifest,
+)
+from signal_analysis.inference import (  # noqa: E402
+    RuntimeUnavailable,
+    runtime_module,
+    runtime_version,
 )
 
 #: 结果契约字段（少一个都算验收失败）
@@ -142,7 +146,7 @@ def _dataset_metrics(directory, manifest_path, classes, threads):
     张量，因此这里把落盘波形**直接喂给分类器**，不必再走一遍混频/抽取；分析窗口另存
     在 ``offset_hz``/``bandwidth_hz`` 字段里供回溯。
     """
-    from signal_analysis.ml.iq import iq_scores
+    from signal_analysis.algorithms.amc.iq_model import iq_scores
 
     directory = Path(directory)
     card_path, store_path = directory / "iq_dataset.json", directory / "iq_dataset.npz"

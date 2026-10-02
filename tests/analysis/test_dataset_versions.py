@@ -5,11 +5,11 @@ import numpy as np
 import pytest
 
 from signal_analysis.core_api import generate_iq
-from signal_analysis.datasets import (bootstrap_labels_from_versions,
-                                      build_dataset_version, read_manifest,
-                                      verify_dataset_version)
+from signal_analysis.data.datasets import (bootstrap_labels_from_versions,
+                                           build_dataset_version, read_manifest,
+                                           verify_dataset_version)
 from signal_analysis.services import execute
-from signal_analysis.storage import Workspace
+from signal_analysis.data import Workspace
 
 
 def add_generated(workspace, mode="fm", seed=1, name=None, snr=15.0, signals=None):

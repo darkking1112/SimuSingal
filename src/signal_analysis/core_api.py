@@ -1,25 +1,25 @@
 """源码与二进制构建共用的稳定接口；按职责导入数值实现，不引入 GUI。"""
 
-from ._numeric_analysis import (
+from .algorithms.dsp.spectrum import (
     analyze,
     spectrum_row,
 )
 
-from ._numeric_common import (
+from .algorithms.dsp.base import (
     MAX_SAMPLES,
     validate_rate,
     validate_samples,
 )
 
-from ._numeric_energy import (
+from .algorithms.detection.energy import (
     detect_signals,
 )
 
-from ._numeric_hops import (
+from .algorithms.detection.hops import (
     detect_hops,
 )
 
-from ._numeric_iqgen import (
+from .algorithms.generation.iqgen import (
     MODE_NAMES,
     generate_iq,
     make_demo,
@@ -27,7 +27,7 @@ from ._numeric_iqgen import (
     plan_signal,
 )
 
-from ._numeric_modulation import (
+from .algorithms.amc.heuristic import (
     classify_modulation,
 )
 

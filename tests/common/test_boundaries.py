@@ -36,7 +36,7 @@ def test_cli_does_not_load_other_project(package, forbidden, tmp_path):
 
 
 def test_workspaces_and_tables_are_separate(tmp_path):
-    from signal_analysis.storage import Workspace as AnalysisWorkspace
+    from signal_analysis.data import Workspace as AnalysisWorkspace
     from communication_sim.storage import Workspace as SimulationWorkspace
     analysis = AnalysisWorkspace(tmp_path / "analysis")
     simulation = SimulationWorkspace(tmp_path / "simulation")
@@ -50,7 +50,7 @@ def test_workspaces_and_tables_are_separate(tmp_path):
 
 
 def test_legacy_database_not_overwritten(tmp_path):
-    from signal_analysis.storage import Workspace
+    from signal_analysis.data import Workspace
     database = tmp_path / "catalog.sqlite3"
     database.write_bytes(b"legacy test data")
     with pytest.raises(ValueError, match="旧版"):

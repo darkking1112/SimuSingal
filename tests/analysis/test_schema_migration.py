@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from signal_analysis.core_api import generate_iq
-from signal_analysis.storage import Workspace
+from signal_analysis.data import Workspace
 
 
 LEGACY_SCHEMA = """

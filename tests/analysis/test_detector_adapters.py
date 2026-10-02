@@ -32,7 +32,7 @@ for extra in (REPO_ROOT / "src", TRAINING):
         sys.path.insert(0, str(extra))
 
 from detectors import contract, labels, registry  # noqa: E402
-from signal_analysis.ml import band_to_box  # noqa: E402
+from signal_analysis.contracts import band_to_box  # noqa: E402
 
 ADAPTER_NAMES = ("rtdetr", "tiny", "ultralytics", "yolox")
 

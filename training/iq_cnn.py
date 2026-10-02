@@ -3,7 +3,7 @@
 
 定位
 ----
-本文件与 :mod:`signal_analysis.ml.iq` 的 ``iq_waveform_v1`` 契约配套：
+本文件与 :mod:`signal_analysis.algorithms.amc.iq_model` 的 ``iq_waveform_v1`` 契约配套：
 
 * **输入**：``(B, 2, N)`` 的**单位 RMS** 复基带窗口，通道 0 = I、通道 1 = Q，
   N 由模型清单的 ``input.samples`` 决定（默认 1024）；
@@ -31,7 +31,7 @@
 * :class:`IQTCN`：膨胀因果卷积残差块（dilation 1,2,4,8,16），适合捕捉符号级
   周期结构，时间维池化方式相同。
 
-两者都**不含任何归一化层**：窗口归一化由 :func:`signal_analysis.ml.iq.iq_waveform`
+两者都**不含任何归一化层**：窗口归一化由 :func:`signal_analysis.algorithms.amc.iq_model.iq_waveform`
 在推理前统一完成，训练数据也是同一个函数产出的，不给"训练-推理口径分叉"留口子。
 本文件不下载任何预训练权重，训练数据全部来自本项目生成器与显式映射后的 TorchSig
 导入结果。
@@ -56,7 +56,7 @@ DEFAULT_TCN_CHANNELS = 64
 #: 默认 TCN 膨胀层数与核长
 DEFAULT_TCN_LEVELS = 5
 DEFAULT_TCN_KERNEL = 3
-#: ONNX 必填的输入/输出节点名（与 ``signal_analysis.ml.iq`` 的常量一致）
+#: ONNX 必填的输入/输出节点名（与 ``signal_analysis.algorithms.amc.iq_model`` 的常量一致）
 INPUT_NAME = "iq"
 OUTPUT_NAME = "scores"
 #: PyTorch 与 ONNX 的输出偏差上限

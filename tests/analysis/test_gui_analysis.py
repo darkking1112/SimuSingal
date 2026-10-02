@@ -10,7 +10,7 @@ pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 
 from PySide6 import QtCore, QtWidgets
-from signal_analysis.gui import MainWindow, SignalParamsDialog, _mirrored_spectrum
+from signal_analysis.ui import MainWindow, SignalParamsDialog, _mirrored_spectrum
 from signal_analysis.services import execute
 
 
@@ -30,7 +30,7 @@ def test_sigmf_generate_import_gui(tmp_path, monkeypatch):
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = MainWindow(tmp_path)
     try:
-        from signal_analysis.dataio import write_samples
+        from signal_analysis.data.io import write_samples
         path = write_samples(tmp_path / "reference", np.ones(32), "sigmf", sample_rate=12345)
         execute({"workspace": str(tmp_path), "action": "import", "path": str(path)})
         window.refresh_assets()
@@ -611,7 +611,7 @@ def test_constellation_and_playback(tmp_path):
 @pytest.mark.gui
 def test_ml_controls_follow_runtime_availability(tmp_path, monkeypatch):
     """推理运行时缺失时禁用 AI 入口并给出安装提示，传统检测路径不受影响。"""
-    from signal_analysis.ml import runtime as ml_runtime
+    from signal_analysis.inference import runtime as ml_runtime
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = MainWindow(tmp_path)
@@ -703,7 +703,7 @@ def test_data_management_scan_and_export_never_write_runs(tmp_path, monkeypatch)
 @pytest.mark.gui
 def test_asset_selection_reports_file_in_status_bar(tmp_path):
     """选中数据资产时状态栏第二行给出文件名/位置/大小/资产/导出；文件缺失时明示而不报错。"""
-    from signal_analysis.maintenance import format_bytes
+    from signal_analysis.storage.maintenance import format_bytes
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = MainWindow(tmp_path)
@@ -750,7 +750,7 @@ def test_asset_selection_reports_file_in_status_bar(tmp_path):
 @pytest.mark.gui
 def test_asset_status_reports_imported_source_format(tmp_path, monkeypatch):
     """导入的资产要把原始来源格式一并写进状态栏（source 记录的是原始绝对路径）。"""
-    from signal_analysis.dataio import write_samples
+    from signal_analysis.data.io import write_samples
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = MainWindow(tmp_path)
@@ -785,7 +785,7 @@ def test_asset_status_reports_export_files(tmp_path, monkeypatch):
 
     没有导出物写“无”，且重启后（无内存状态）依然能显示。
     """
-    from signal_analysis.dataio import write_samples
+    from signal_analysis.data.io import write_samples
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = MainWindow(tmp_path)
@@ -835,7 +835,7 @@ def test_asset_status_reports_export_files(tmp_path, monkeypatch):
 
 def test_asset_exports_helper_reads_disk_state(tmp_path):
     """_asset_exports 只看磁盘：目录缺失、无匹配、成对 SigMF、无宿主名字段都安全。"""
-    from signal_analysis.gui import _asset_exports, _iq_binary_kind
+    from signal_analysis.ui import _asset_exports, _iq_binary_kind
 
     root = tmp_path / "exports"
     asset = {"id": "a" * 32, "sample_count": 100}

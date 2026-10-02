@@ -6,7 +6,7 @@
 * 类别字典**按技术方案 A09 原文主体**固定为六类：FM、SSB、2ASK、QPSK、16QAM、64QAM；
   生成器里的 ``am`` 与跳频样式不在其中（跳频是会话级检测对象，AM 只出现在原文
   数据库示例里），因此不进入本数据集。
-* 特征由 :func:`signal_analysis.ml.amc.extract_features` 提取——训练与推理走**同一个
+* 特征由 :func:`signal_analysis.algorithms.amc.features.extract_features` 提取——训练与推理走**同一个
   函数**，不可能出现"训练-推理口径分叉"；特征顺序由 ``AMC_FEATURES`` 冻结。
 * 每个场景都是**单信号**：AMC 的输入是检测器切分出来的一个占用频带。分析窗口
   （中心频率 + 带宽）按"检测估计值"模拟：在真值上叠加可配置的相对抖动，
@@ -40,13 +40,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from signal_analysis._numeric import (  # noqa: E402
+from signal_analysis.algorithms.generation.iqgen import (  # noqa: E402
     _check_band,
     occupied_interval,
     plan_signal,
 )
 from signal_analysis.core_api import generate_iq  # noqa: E402
-from signal_analysis.ml import amc  # noqa: E402
+from signal_analysis.algorithms.amc import feature_model as amc  # noqa: E402
 
 #: A09 六类（`am` 与跳频不在字典内）
 DEFAULT_MODES = tuple(amc.AMC_CLASSES)
@@ -109,7 +109,7 @@ def _signal_spec(rng, args, mode, bandwidth, power_dbfs):
 def _place_offset(rng, args, spec):
     """按 ``plan_signal`` 得到的**实际占用区间**把信号摆进采样带宽内。
 
-    SSB 的频带校验口径是"两侧各留一个带宽"（见 ``_numeric._check_band``），
+    SSB 的频带校验口径是"两侧各留一个带宽"（见 ``algorithms.generation.iqgen._check_band``），
     因此这里统一按一个**外包箱**摆放：非 SSB 为占用区间本身，SSB 为
     ``[offset - w, offset + w]``，保证 ``plan_signal`` 不会越界。
     """
@@ -259,7 +259,7 @@ def main(argv=None):
             "features": list(amc.AMC_FEATURES),
             "feature_count": len(amc.AMC_FEATURES),
             "mode_to_class": {mode: amc.mode_to_class(mode) for mode in DEFAULT_MODES},
-            "note": "特征由 signal_analysis.ml.amc.extract_features 生成，训练与推理同源",
+            "note": "特征由 signal_analysis.algorithms.amc.features.extract_features 生成，训练与推理同源",
         },
         "scene": {
             "sample_rate_hz": float(args.rate),

@@ -3,9 +3,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from signal_analysis.dataio import read_samples
+from signal_analysis.data.io import read_samples
 from common.reports import export_report
-from signal_analysis.storage import Workspace
+from signal_analysis.data import Workspace
 
 
 def test_import_complex_csv_and_npy(tmp_path):

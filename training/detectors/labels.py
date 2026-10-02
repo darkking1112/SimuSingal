@@ -4,11 +4,11 @@
 ----------
 
 1. **标签只能来自数据集里已经算好的 ``record["boxes"]``**
-   （即 :func:`signal_analysis.ml.tensor.band_to_box` 的结果），
+   （即 :func:`signal_analysis.contracts.image.band_to_box` 的结果），
    本模块不允许再写第二份"真值 → 框"的公式。历史教训：一旦在转换脚本里
    顺手写 ``y = 1 - y``，框会整体上下翻转，而形状校验完全查不出来。
 2. **图像是 8 位灰度 PNG**。数据集里存的是 ``float32`` 且取值 ``[0, 1]``
-   （:func:`signal_analysis.ml.tensor.detection_image` 的"本底 + 动态范围"
+   （:func:`signal_analysis.algorithms.dsp.image.detection_image` 的"本底 + 动态范围"
    归一化），而 YOLO 系 / COCO 生态只吃常规图片格式。量化误差上限为
    ``0.5 / 255``，在 60 dB 动态范围下折合 **约 0.118 dB**——远小于本底起伏，
    但**必须写进模型清单的 notes**，否则"训练看到的图"与"推理看到的图"

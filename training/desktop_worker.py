@@ -16,7 +16,7 @@ def event(**values):
 
 
 def execute(config, output):
-    from signal_analysis.annotations import AnnotationDataset, append_asset
+    from signal_analysis.data.annotations import AnnotationDataset, append_asset
     output = Path(output).resolve()
     import importlib.metadata
     packages = {}
@@ -33,9 +33,9 @@ def execute(config, output):
         append_asset(config["data"], config["workspace"], config["asset_id"])
         return
     # 训练外部进程只训练：数据由“信号集合生成”在主程序内产出（TorchSig 例外，
-    # 由 signal_analysis.torchsig_support 在 Linux 下单独调用 build_torchsig.py）。
+    # 由 signal_analysis.integrations.torchsig 在 Linux 下单独调用 build_torchsig.py）。
     if task == "iq":
-        from signal_analysis.training_jobs import iq_plan
+        from signal_analysis.services.training_jobs import iq_plan
         if config["source"] == "existing":
             # Snapshot before validation/training; later edits cannot change this experiment.
             import shutil

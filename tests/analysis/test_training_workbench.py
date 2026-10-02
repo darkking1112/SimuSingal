@@ -8,7 +8,7 @@ import time
 import numpy as np
 import pytest
 
-from signal_analysis.annotations import AnnotationDataset, create_dataset, validate_boxes
+from signal_analysis.data.annotations import AnnotationDataset, create_dataset, validate_boxes
 
 
 def sample_dataset(root):
@@ -114,7 +114,7 @@ def window(tmp_path):
     pytest.importorskip("PySide6")
     pytest.importorskip("pyqtgraph")
     from PySide6.QtWidgets import QApplication
-    from signal_analysis.gui import MainWindow
+    from signal_analysis.ui import MainWindow
     app = QApplication.instance() or QApplication([])
     widget = MainWindow(tmp_path / "workspace")
     yield app, widget
@@ -232,7 +232,7 @@ def test_worker_output_is_decoded_as_utf8(window, tmp_path):
 def test_worker_log_decoder_handles_legacy_gbk():
     pytest.importorskip("PySide6")
     pytest.importorskip("pyqtgraph")
-    from signal_analysis.training_gui import decode_worker_log
+    from signal_analysis.ui.pages.training_page import decode_worker_log
 
     text = "清单：中文输出"
     assert decode_worker_log(text.encode("utf-8")) == text

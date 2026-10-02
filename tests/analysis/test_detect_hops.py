@@ -454,7 +454,7 @@ def test_evaluate_detections_accepts_a_contract_override():
 
 def test_service_detect_hops_carries_truth_and_metrics(tmp_path):
     from signal_analysis.services import execute
-    from signal_analysis.storage import Workspace
+    from signal_analysis.data import Workspace
 
     generated = execute({"workspace": str(tmp_path), "action": "generate",
                          "sample_rate": RATE, "duration": DURATION, "seed": 3,
@@ -488,7 +488,7 @@ def test_service_detect_hops_without_generator_truth(tmp_path):
 
 def test_cli_detect_hops_prints_contract(tmp_path, capsys):
     from signal_analysis.cli import main
-    from signal_analysis.storage import Workspace
+    from signal_analysis.data import Workspace
 
     root = tmp_path / "store"
     spec = tmp_path / "scene.json"
@@ -529,7 +529,7 @@ def test_gui_hops_tab_renders_result(tmp_path):
     pytest.importorskip("pyqtgraph")
     from PySide6 import QtCore, QtWidgets
 
-    from signal_analysis.gui import MainWindow
+    from signal_analysis.ui import MainWindow
     from signal_analysis.tasks import run_job
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -539,7 +539,7 @@ def test_gui_hops_tab_renders_result(tmp_path):
     try:
         assert window.tabs.count() == 10
         labels = [window.tabs.tabText(index) for index in range(window.tabs.count())]
-        # 页序由 signal_analysis.gui.MainWindow.__init__ 的页面注册表决定，此处钉住以免误改
+        # 页序由 signal_analysis.ui.MainWindow.__init__ 的页面注册表决定，此处钉住以免误改
         assert labels == ["信号导入", "IQ 信号生成", "数据分析", "信号检测", "调制识别", "跳频参数",
                           "模型训练", "数据管理", "算法对比", "运行记录"]
         assert window.hops_button.text() == "估计逐跳参数"

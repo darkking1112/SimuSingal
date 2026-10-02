@@ -5,10 +5,10 @@ import numpy as np
 import pytest
 import sigmf
 
-from signal_analysis.dataio import read_samples, write_samples
-from signal_analysis.sigmf_io import read_sigmf
+from signal_analysis.data.io import read_samples, write_samples
+from signal_analysis.data.sigmf import read_sigmf
 from signal_analysis.services import execute
-from signal_analysis.storage import Workspace
+from signal_analysis.data import Workspace
 
 
 def test_official_roundtrip(tmp_path):
@@ -127,7 +127,7 @@ def test_checksum_and_invalid_values(tmp_path):
 
 
 def test_failed_pair_publication_cleans_up(tmp_path, monkeypatch):
-    import signal_analysis.sigmf_io as adapter
+    import signal_analysis.data.sigmf as adapter
     original = adapter.shutil.copyfileobj
     def fail_metadata(source, destination):
         if str(destination.name).endswith(".sigmf-meta"):

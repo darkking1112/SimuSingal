@@ -7,11 +7,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from signal_analysis import collection_gen, impairments, torchsig_support
-from signal_analysis.datasets import build_dataset_version
-from signal_analysis.recipes import (check_generator_support, draw_record, preview_recipe,
-                                     sample_seed, validate_recipe)
-from signal_analysis.storage import Workspace
+from signal_analysis.integrations import torchsig
+from signal_analysis.services import collection_gen
+from signal_analysis.algorithms.generation import impairments
+from signal_analysis.data.datasets import build_dataset_version
+from signal_analysis.algorithms.generation.recipes import (
+    check_generator_support, draw_record, preview_recipe, sample_seed, validate_recipe)
+from signal_analysis.data import Workspace
 from signal_analysis.tasks import run_job
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "training"))
@@ -217,19 +219,19 @@ def test_torchsig_engine_is_linux_only(tmp_path, monkeypatch):
     recipe.pop("hopping")
     recipe["signals"] = {"count": {"choice": [0, 3]}, "snr_db": {"uniform": [0, 20]}}
     check_generator_support(recipe)
-    monkeypatch.setattr(torchsig_support, "is_linux", lambda: False)
+    monkeypatch.setattr(torchsig, "is_linux", lambda: False)
     with pytest.raises(ValueError, match="只能在 Linux"):
-        torchsig_support.preflight(workspace, {})
-    assert torchsig_support.probe(workspace, {})["ok"] is False
+        torchsig.preflight(workspace, {})
+    assert torchsig.probe(workspace, {})["ok"] is False
     # 配方压成的命令行参数：分布 → 区间，扰动档位可选
-    arguments = torchsig_support.build_arguments(
+    arguments = torchsig.build_arguments(
         {**recipe, "torchsig": {"signal_generators": {"fixed": "qpsk,ook"},
                                 "impairment_level": {"fixed": 1}}}, tmp_path / "bundle")
     text = " ".join(arguments)
     assert "--signals-range 0,3" in text and "--snr-range 0.0,20.0" in text
     assert "--signal-generators qpsk,ook" in text and "--impairment-level 1" in text
     assert "--impairment-level" not in " ".join(
-        torchsig_support.build_arguments(recipe, tmp_path / "bundle"))
+        torchsig.build_arguments(recipe, tmp_path / "bundle"))
 
 
 def test_torchsig_bundle_import_writes_targets_with_a09_mapping(tmp_path):
@@ -268,10 +270,10 @@ def test_torchsig_bundle_import_writes_targets_with_a09_mapping(tmp_path):
 
 def test_torchsig_mapping_rejects_non_a09_targets(tmp_path):
     with pytest.raises(ValueError, match="A09"):
-        torchsig_support.load_mapping({"qpsk": "bpsk"})
+        torchsig.load_mapping({"qpsk": "bpsk"})
     bundle = write_bundle(tmp_path / "bundle")
     manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
     manifest["bundle_version"] = "v0"
     (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="格式版本"):
-        torchsig_support.read_bundle_manifest(bundle)
+        torchsig.read_bundle_manifest(bundle)

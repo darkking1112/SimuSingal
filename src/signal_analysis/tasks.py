@@ -1,6 +1,6 @@
 """Bind common task machinery to this project's worker entry."""
 from common.tasks import JobError, run_job as run_process, worker_main as run_worker
-from .storage import Workspace
+from .data import Workspace
 
 def run_job(request, timeout=30.0, cancel=None, progress=None, cancel_grace=0.0):
     Workspace(request["workspace"])

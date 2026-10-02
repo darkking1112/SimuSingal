@@ -8,10 +8,10 @@ import numpy as np
 import pytest
 
 from common.storage import utc_now
-from signal_analysis.maintenance import (DEFAULT_JOB_RETENTION_DAYS, SETTINGS_NAME,
-                                         apply_cleanup, build_report, format_bytes,
-                                         preview_cleanup, read_settings, write_settings)
-from signal_analysis.storage import Workspace
+from signal_analysis.storage.maintenance import (DEFAULT_JOB_RETENTION_DAYS, SETTINGS_NAME,
+                                                 apply_cleanup, build_report, format_bytes,
+                                                 preview_cleanup, read_settings, write_settings)
+from signal_analysis.data import Workspace
 
 
 def make_asset(workspace, name="参考样本", source="generated:test"):

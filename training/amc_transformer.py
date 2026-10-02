@@ -3,7 +3,7 @@
 
 定位
 ----
-本文件是 :mod:`signal_analysis.ml.amc` 里**同一个特征向量契约**的深度模型分支：
+本文件是 :mod:`signal_analysis.algorithms.amc.feature_model` 里**同一个特征向量契约**的深度模型分支：
 输入仍是 ``extract_features`` 产出的定长特征向量（未标准化），输出仍是六类概率。
 因此它与线性基线可以**同口径对比**（同样的特征、同样的数据集、同样的验证划分），
 差别只在于判别函数从"线性 + softmax"换成"小型 Transformer 编码器"。

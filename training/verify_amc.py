@@ -39,7 +39,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from signal_analysis.ml import amc  # noqa: E402
+from signal_analysis.algorithms.amc import feature_model as amc  # noqa: E402
 from signal_analysis.evaluation import classification_metrics  # noqa: E402
 
 
@@ -158,7 +158,8 @@ def _check_linear(report, records, args):
 
 
 def _check_onnx(report, manifest_path, val, model, args):
-    from signal_analysis.ml import RuntimeUnavailable, read_amc_manifest, runtime_module
+    from signal_analysis.contracts import read_amc_manifest
+    from signal_analysis.inference import RuntimeUnavailable, runtime_module
 
     try:
         runtime = runtime_module()
@@ -261,7 +262,7 @@ def main(argv=None):
 
 
 def _runtime_version_text():
-    from signal_analysis.ml import runtime_version
+    from signal_analysis.inference import runtime_version
 
     version = runtime_version()
     return version if version else "未安装（ONNX 检查会被跳过，提示 pip install .[ml]）"

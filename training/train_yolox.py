@@ -2,7 +2,7 @@
 """信号检测模型训练 + ONNX 导出（P3）。
 
 流程：读取 :mod:`build_dataset` 生成的数据集 → 训练 → **用项目自身的评测口径**
-在验证集上打分 → ``torch.onnx.export`` → :func:`signal_analysis.ml.write_model_manifest`
+在验证集上打分 → ``torch.onnx.export`` → :func:`signal_analysis.contracts.manifest.write_model_manifest`
 生成模型清单。
 
 ``--arch tiny`` 使用 ``training/tiny_detector.py`` 中自研的最小无锚框检测头，
@@ -59,12 +59,8 @@ from signal_analysis.evaluation import (  # noqa: E402
     hop_truth,
     signal_truth,
 )
-from signal_analysis.ml import (  # noqa: E402
-    DEFAULT_LABEL_SEMANTICS,
-    ml_detect,
-    ml_detect_hops,
-    write_model_manifest,
-)
+from signal_analysis.algorithms.detection.ai import ml_detect, ml_detect_hops  # noqa: E402
+from signal_analysis.contracts import DEFAULT_LABEL_SEMANTICS, write_model_manifest  # noqa: E402
 
 
 def _arch_choices():

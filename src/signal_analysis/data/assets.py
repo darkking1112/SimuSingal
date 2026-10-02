@@ -1,0 +1,341 @@
+"""资产分片写入器：批量生成/导入连续写入分片，封存后不可变。"""
+
+import hashlib
+import json
+import uuid
+
+import numpy as np
+
+from common.storage import file_digest, utc_now
+from ..core_api import validate_rate, validate_samples
+from ..storage.schema import SOURCE_KINDS
+from ..storage.utils import _classify_source, _enum, _number, _optional_text
+
+
+class ShardWriter:
+    """把多条录制连续写入一个分片文件；封存后不可再写、不可改。
+
+    生成或批量导入的产物：每个资产在 ``assets`` 里仍是一行，物理数据位于
+    ``assets/shards/<id>.bin`` 的 ``[offset, offset+length)`` 采样点区间，
+    读取时按 complex64 内存映射定位。单条导入仍用独立 NPY（保持现状）。
+    """
+
+    def __init__(self, workspace, *, name="", created_by=None):
+        self.workspace = workspace
+        self.id = uuid.uuid4().hex
+        self.name = str(name or "")
+        folder = workspace.root / "assets" / "shards"
+        folder.mkdir(parents=True, exist_ok=True)
+        self.path = folder / f"{self.id}.bin"
+        self.relative = self.path.relative_to(workspace.root).as_posix()
+        self.stream = self.path.open("wb")
+        self.offset = 0
+        self.count = 0
+        self.sealed = False
+        self.created_by = created_by
+        with workspace.connect() as conn:
+            conn.execute("INSERT INTO asset_shards (id, name, path, sha256, record_count, "
+                         "size_bytes, created_at, sealed_at) VALUES (?,?,?,'',0,0,?,NULL)",
+                         (self.id, self.name, self.relative, utc_now()))
+
+    def append(self, samples, sample_rate, name, source="generated", *, metadata=None,
+               source_kind=None, origin_group_id=None, parent_asset_id=None,
+               rf_center_hz=None, capture_started_at=None):
+        if self.sealed:
+            raise ValueError("分片已封存，不能继续写入")
+        data = validate_samples(samples)
+        rate = validate_rate(sample_rate)
+        if not isinstance(name, str) or not name.strip() or len(name) > 200:
+            raise ValueError("名称应为 1～200 个字符")
+        inferred_kind, inferred_parent = _classify_source(source)
+        kind = _enum(source_kind or inferred_kind, SOURCE_KINDS, "来源分类")
+        payload = data.tobytes()
+        digest = hashlib.sha256(payload).hexdigest()
+        asset_id = uuid.uuid4().hex
+        self.stream.write(payload)
+        self.stream.flush()  # 资产一经登记就必须可读：不把数据留在写缓冲里
+        with self.workspace.connect() as conn:
+            self.workspace._insert_asset(
+                conn, asset_id=asset_id, name=name, relative=self.relative, digest=digest,
+                rate=rate, count=data.size, source=source, source_kind=kind,
+                sample_kind="complex", dtype="complex64", storage_kind="shard",
+                shard_id=self.id, shard_offset=self.offset, shard_length=data.size,
+                origin_group_id=origin_group_id,
+                parent_asset_id=parent_asset_id or inferred_parent,
+                rf_center_hz=_number(rf_center_hz, "射频中心"),
+                capture_started_at=_optional_text(capture_started_at, "采集时间", 64),
+                created_by=_optional_text(self.created_by, "创建者", 100))
+            if metadata is not None:
+                conn.execute("INSERT INTO asset_metadata VALUES (?,?)",
+                             (asset_id, json.dumps(metadata, ensure_ascii=False,
+                                                   allow_nan=False)))
+                generation = metadata.get("generation") if isinstance(metadata, dict) else None
+                if isinstance(generation, dict):
+                    self.workspace._register_generation_targets(
+                        conn, asset_id, generation, int(data.size), float(rate))
+        self.offset += int(data.size)
+        self.count += 1
+        return self.workspace.get_asset(asset_id)
+
+    def seal(self):
+        """封存分片：写入总体哈希与统计，之后可读不可写。"""
+        if self.sealed:
+            return self.workspace.get_shard(self.id)
+        self.stream.flush()
+        self.stream.close()
+        self.sealed = True
+        digest = file_digest(self.path)
+        size = self.path.stat().st_size
+        with self.workspace.connect() as conn:
+            conn.execute("UPDATE asset_shards SET sha256=?, record_count=?, size_bytes=?, "
+                         "sealed_at=? WHERE id=?",
+                         (digest, self.count, size, utc_now(), self.id))
+        return self.workspace.get_shard(self.id)
+
+    def abort(self):
+        """放弃空分片；已写入资产的分片不允许放弃（先导出或保留）。"""
+        if self.sealed:
+            raise ValueError("分片已封存，无法放弃")
+        self.stream.close()
+        self.sealed = True
+        if self.count:
+            raise ValueError("分片内已有资产记录，不能直接放弃；请保留并封存")
+        self.path.unlink(missing_ok=True)
+        with self.workspace.connect() as conn:
+            conn.execute("DELETE FROM asset_shards WHERE id=?", (self.id,))
+
+
+class AssetMixin:
+    """资产（独立 NPY / 分片）的登记、检索、读取与备注。"""
+
+    def _insert_asset(self, conn, *, asset_id, name, relative, digest, rate, count,
+                      source, source_kind, sample_kind, dtype, storage_kind,
+                      shard_id=None, shard_offset=None, shard_length=None,
+                      origin_group_id=None, parent_asset_id=None, rf_center_hz=None,
+                      capture_started_at=None, created_by=None):
+        now = utc_now()
+        conn.execute(
+            "INSERT INTO assets (id, name, path, sha256, sample_rate, sample_count, "
+            "created_at, source, label, source_kind, sample_kind, dtype, storage_kind, "
+            "shard_id, shard_offset, shard_length, origin_group_id, parent_asset_id, "
+            "rf_center_hz, capture_started_at, created_by, updated_at, archived_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+            (asset_id, name, relative, digest, rate, count, now, str(source), "",
+             source_kind, sample_kind, dtype, storage_kind, shard_id, shard_offset,
+             shard_length, origin_group_id or asset_id, parent_asset_id, rf_center_hz,
+             capture_started_at, created_by, now))
+
+    def add_samples(self, samples, sample_rate, name, source="generated", *, metadata=None,
+                    source_kind=None, origin_group_id=None, parent_asset_id=None,
+                    rf_center_hz=None, capture_started_at=None, created_by=None):
+        """新增一条独立 NPY 资产；带生成摘要时同时登记目标与参考参数版本。"""
+        data = validate_samples(samples)
+        rate = validate_rate(sample_rate)
+        if not isinstance(name, str) or not name.strip() or len(name) > 200:
+            raise ValueError("名称应为 1～200 个字符")
+        inferred_kind, inferred_parent = _classify_source(source)
+        kind = _enum(source_kind or inferred_kind, SOURCE_KINDS, "来源分类")
+        parent = parent_asset_id or inferred_parent
+        if parent is not None:
+            with self.connect() as conn:
+                exists = conn.execute("SELECT 1 FROM assets WHERE id=?", (parent,)).fetchone()
+            if not exists:
+                raise ValueError("父资产不存在")
+        asset_id = uuid.uuid4().hex
+        relative = f"assets/{asset_id}.npy"
+        destination = self.root / relative
+        temporary = destination.with_suffix(".tmp")
+        try:
+            with temporary.open("wb") as stream:
+                np.save(stream, data, allow_pickle=False)
+            temporary.replace(destination)
+            with self.connect() as conn:
+                self._insert_asset(
+                    conn, asset_id=asset_id, name=name, relative=relative,
+                    digest=file_digest(destination), rate=rate, count=data.size,
+                    source=source, source_kind=kind, sample_kind="complex",
+                    dtype="complex64", storage_kind="file",
+                    origin_group_id=origin_group_id, parent_asset_id=parent,
+                    rf_center_hz=_number(rf_center_hz, "射频中心"),
+                    capture_started_at=_optional_text(capture_started_at, "采集时间", 64),
+                    created_by=_optional_text(created_by, "创建者", 100))
+                if metadata is not None:
+                    conn.execute("INSERT INTO asset_metadata VALUES (?,?)",
+                                 (asset_id, json.dumps(metadata, ensure_ascii=False,
+                                                       allow_nan=False)))
+                    generation = metadata.get("generation") if isinstance(metadata, dict) else None
+                    if isinstance(generation, dict):
+                        self._register_generation_targets(conn, asset_id, generation,
+                                                          int(data.size), float(rate))
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            destination.unlink(missing_ok=True)
+            raise
+        return self.get_asset(asset_id)
+
+    def get_metadata(self, asset_id):
+        self.get_asset(asset_id)
+        with self.connect() as conn:
+            row = conn.execute("SELECT metadata_json FROM asset_metadata WHERE asset_id=?",
+                               (asset_id,)).fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def get_asset(self, asset_id):
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM assets WHERE id=?", (asset_id,)).fetchone()
+        if row is None:
+            raise ValueError("数据记录不存在")
+        return dict(row)
+
+    def _asset_clauses(self, search="", *, collection_id=None, scattered=False,
+                       include_archived=False):
+        """资产筛选条件列表（不含 WHERE 前缀）与参数。"""
+        clauses, params = [], []
+        if not include_archived:
+            clauses.append("assets.archived_at IS NULL")
+        if search:
+            clauses.append("instr(assets.name, ?) > 0")
+            params.append(str(search))
+        if collection_id is not None:
+            clauses.append("EXISTS (SELECT 1 FROM collection_members m WHERE "
+                           "m.asset_id=assets.id AND m.collection_id=?)")
+            params.append(str(collection_id))
+        if scattered:
+            clauses.append("NOT EXISTS (SELECT 1 FROM collection_members m JOIN collections c "
+                           "ON c.id=m.collection_id WHERE m.asset_id=assets.id "
+                           "AND c.archived_at IS NULL)")
+        return clauses, params
+
+    def list_assets(self, search="", limit=100, offset=0, *, collection_id=None,
+                    scattered=False, include_archived=False, after=None):
+        """分页列出资产。
+
+        ``collection_id`` 指定时按集合内 ``position`` 顺序；否则按
+        ``created_at DESC, id``（键集分页用 ``after=(created_at, id)`` 取下一页）。
+        """
+        if not 1 <= limit <= 500 or offset < 0:
+            raise ValueError("分页参数不合法")
+        clauses, params = self._asset_clauses(search, collection_id=collection_id,
+                                              scattered=scattered,
+                                              include_archived=include_archived)
+        if collection_id is not None:
+            if after is not None:
+                raise ValueError("集合内列表不支持键集分页")
+            conditions = ["m.collection_id=?", *clauses]
+            sql = ("SELECT assets.* FROM assets JOIN collection_members m "
+                   "ON m.asset_id=assets.id WHERE " + " AND ".join(conditions) +
+                   " ORDER BY m.position, assets.id LIMIT ? OFFSET ?")
+            values = [str(collection_id), *params, limit, offset]
+        else:
+            if after is not None:
+                created_at, last_id = after
+                clauses.append("(assets.created_at < ? OR "
+                               "(assets.created_at = ? AND assets.id > ?))")
+                params = [*params, str(created_at), str(created_at), str(last_id)]
+            where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+            sql = ("SELECT assets.* FROM assets " + where +
+                   " ORDER BY assets.created_at DESC, assets.id LIMIT ? OFFSET ?")
+            values = [*params, limit, offset]
+        with self.connect() as conn:
+            rows = conn.execute(sql, values).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_assets(self, search="", *, collection_id=None, scattered=False,
+                     include_archived=False):
+        clauses, params = self._asset_clauses(search, collection_id=collection_id,
+                                              scattered=scattered,
+                                              include_archived=include_archived)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self.connect() as conn:
+            return int(conn.execute(f"SELECT count(*) FROM assets {where}",
+                                    params).fetchone()[0])
+
+    def archived_assets(self, limit=500):
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM assets WHERE archived_at IS NOT NULL "
+                                "ORDER BY archived_at DESC, id LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def archive_asset(self, asset_id, archived=True):
+        self.get_asset(asset_id)
+        with self.connect() as conn:
+            conn.execute("UPDATE assets SET archived_at=?, updated_at=? WHERE id=?",
+                         (utc_now() if archived else None, utc_now(), asset_id))
+        return self.get_asset(asset_id)
+
+    def resolve_asset(self, asset):
+        """独立 NPY 资产的文件路径；分片资产必须走 :meth:`load_samples`。"""
+        if asset.get("storage_kind", "file") != "file":
+            raise ValueError("分片资产没有独立文件，请通过 load_samples 读取")
+        path = (self.root / asset["path"]).resolve()
+        if not path.is_relative_to(self.root / "assets"):
+            raise ValueError("资产路径越界")
+        if not path.is_file() or file_digest(path) != asset["sha256"]:
+            raise ValueError("资产文件缺失或校验失败")
+        return path
+
+    def _shard_record(self, asset):
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM asset_shards WHERE id=?",
+                               (asset["shard_id"],)).fetchone()
+        if row is None:
+            raise ValueError("分片记录缺失")
+        shard = dict(row)
+        path = (self.root / shard["path"]).resolve()
+        if not path.is_relative_to(self.root / "assets"):
+            raise ValueError("分片路径越界")
+        if not path.is_file():
+            raise ValueError("分片文件缺失或校验失败")
+        return path, shard
+
+    def load_samples(self, asset_id):
+        asset = self.get_asset(asset_id)
+        kind = asset.get("storage_kind", "file")
+        if kind == "file":
+            return asset, np.load(self.resolve_asset(asset), mmap_mode="r", allow_pickle=False)
+        if kind == "shard":
+            path, _ = self._shard_record(asset)
+            offset = int(asset["shard_offset"])
+            length = int(asset["shard_length"])
+            if offset < 0 or length <= 0:
+                raise ValueError("分片资产定位参数无效")
+            itemsize = np.dtype("complex64").itemsize
+            with path.open("rb") as stream:
+                stream.seek(offset * itemsize)
+                payload = stream.read(length * itemsize)
+            if len(payload) != length * itemsize or \
+                    hashlib.sha256(payload).hexdigest() != asset["sha256"]:
+                raise ValueError("资产文件缺失或校验失败")
+            return asset, np.frombuffer(payload, dtype=np.complex64).copy()
+        raise ValueError(f"暂不支持的存储类型：{kind}")
+
+    def set_label(self, asset_id, label):
+        if not isinstance(label, str) or len(label) > 200:
+            raise ValueError("备注最多 200 个字符")
+        self.get_asset(asset_id)
+        with self.connect() as conn:
+            conn.execute("UPDATE assets SET label=?, updated_at=? WHERE id=?",
+                         (label, utc_now(), asset_id))
+
+    def save_run(self, kind, result, arrays=None, asset_id=None):
+        if asset_id is not None:
+            self.get_asset(asset_id)
+        return super().save_run(kind, {**result, "asset_id": asset_id}, arrays, source_id=asset_id)
+
+    # ------------------------------------------------------------------ 分片
+    def create_shard(self, *, name="", created_by=None):
+        """创建分片写入器；封存前可继续追加，封存后不可改。"""
+        return ShardWriter(self, name=name, created_by=created_by)
+
+    def get_shard(self, shard_id):
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM asset_shards WHERE id=?", (shard_id,)).fetchone()
+        if row is None:
+            raise ValueError("分片不存在")
+        return dict(row)
+
+    def list_shards(self, limit=500):
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM asset_shards ORDER BY created_at DESC, id "
+                                "LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]

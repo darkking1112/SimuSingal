@@ -7,6 +7,7 @@ CSV 标注清单匹配与未匹配报告、失败项保留、分片自动阈值�
 import csv
 import os
 import time
+from datetime import datetime
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -17,11 +18,11 @@ pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 
 from PySide6 import QtCore, QtWidgets
-from signal_analysis.dataio import write_samples
-from signal_analysis.gui import (IMPORT_COL_MOD, IMPORT_COL_NOTE, IMPORT_COL_STATUS,
-                                 MainWindow)
+from signal_analysis.data.io import write_samples
+from signal_analysis.ui import (IMPORT_COL_MOD, IMPORT_COL_NOTE,
+                                IMPORT_COL_RF_CENTER, IMPORT_COL_STATUS, MainWindow)
 from signal_analysis.services import execute
-from signal_analysis.storage import Workspace
+from signal_analysis.data import Workspace
 
 
 def wait_job(app, window):
@@ -123,6 +124,90 @@ def test_file_list_batch_settings_and_import(tmp_path, monkeypatch):
     collection = next(item for item in workspace.list_collections()
                       if item["name"] == "清单批次集合")
     assert len(workspace.collection_asset_ids(collection["id"])) == 2
+
+
+@pytest.mark.gui
+def test_rf_center_per_file_override_and_batch_default(tmp_path, monkeypatch):
+    """射频中心：行内优先、留空回落本批默认；非法值标红阻断该行。"""
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    first = _make_npy(tmp_path, "center_a.npy")
+    second = _make_npy(tmp_path, "center_b.npy")
+    window = MainWindow(tmp_path)
+    window.show()
+    try:
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileNames",
+                            lambda *args: ([str(first), str(second)], "数据"))
+        window.choose_import_files()
+        wait_job(app, window)
+        rows = [window._import_row_by_path(str(first)),
+                window._import_row_by_path(str(second))]
+        window._apply_batch_settings(rows, sample_rate="48000")
+        window.import_rf_center.setText("100e6")  # 本批默认 100 MHz
+        # 行内非法值：该行标红，不被隐式忽略
+        window.import_table.item(rows[0], IMPORT_COL_RF_CENTER).setText("abc")
+        assert _status_text(window, rows[0]) == "射频中心应为数值"
+        # 行内覆盖本批默认；第二行留空 → 用默认
+        window.import_table.item(rows[0], IMPORT_COL_RF_CENTER).setText("433.5e6")
+        assert _status_text(window, rows[0]) == "就绪"
+        window.start_import_batch()
+        wait_job(app, window)
+    finally:
+        window.close()
+        app.processEvents()
+
+    workspace = Workspace(tmp_path)
+    assets = {item["name"]: item for item in workspace.list_assets()}
+    assert assets["center_a.npy"]["rf_center_hz"] == pytest.approx(433.5e6)
+    assert assets["center_b.npy"]["rf_center_hz"] == pytest.approx(100e6)
+
+
+@pytest.mark.gui
+def test_capture_time_from_manifest_or_import_time(tmp_path, monkeypatch):
+    """采集时间不手填：清单 CSV 逐文件声明（同行须一致），缺省写导入时间。"""
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    first = _make_npy(tmp_path, "capture_a.npy")
+    second = _make_npy(tmp_path, "capture_b.npy")
+    third = _make_npy(tmp_path, "capture_c.npy")
+    window = MainWindow(tmp_path)
+    assert not hasattr(window, "import_capture")  # 页面不提供手填入口
+    window.show()
+    try:
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileNames",
+                            lambda *args: ([str(first), str(second), str(third)], "数据"))
+        window.choose_import_files()
+        wait_job(app, window)
+        manifest = tmp_path / "capture.csv"
+        with manifest.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["文件", "粒度", "起止单位", "起始", "结束", "采集时间"])
+            writer.writerow(["capture_a.npy", "whole_record", "采样点", "0", "64",
+                             "2026-09-01T08:30:00Z"])
+            writer.writerow(["capture_b.npy", "whole_record", "采样点", "0", "64",
+                             "2026-09-02T09:00:00Z"])
+            writer.writerow(["capture_b.npy", "whole_record", "采样点", "0", "64",
+                             "2026-09-03T09:00:00Z"])  # 与上一行冲突
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
+                            lambda *args: (str(manifest), "CSV"))
+        window.import_csv_manifest()
+        wait_job(app, window)
+        report = window.import_csv_report.text()
+        assert "2 个文件带采集时间" in report
+        assert "未匹配/非法 1 行" in report
+        assert "采集时间与同一文件的其他行不一致" in report
+        rows = [window._import_row_by_path(str(item)) for item in (first, second, third)]
+        window._apply_batch_settings(rows, sample_rate="48000")
+        window.start_import_batch()
+        wait_job(app, window)
+    finally:
+        window.close()
+        app.processEvents()
+
+    workspace = Workspace(tmp_path)
+    assets = {item["name"]: item for item in workspace.list_assets()}
+    assert assets["capture_a.npy"]["capture_started_at"] == "2026-09-01T08:30:00Z"
+    assert assets["capture_b.npy"]["capture_started_at"] == "2026-09-02T09:00:00Z"
+    # 清单未声明的文件：缺省导入时间（可解析的 ISO 时间戳）
+    assert datetime.fromisoformat(assets["capture_c.npy"]["capture_started_at"])
 
 
 @pytest.mark.gui
@@ -335,8 +420,10 @@ def test_import_files_per_file_payload_and_legacy(tmp_path):
     first = _make_npy(tmp_path, "payload_a.npy", 32)
     second = _make_npy(tmp_path, "payload_b.npy", 48)
     result = execute({"workspace": str(tmp_path), "action": "import_files",
-                      "batch_shard": True, "files": [
+                      "batch_shard": True, "rf_center_hz": 100e6, "files": [
                           {"path": str(first), "sample_rate": 1000.0, "label": "甲",
+                           "rf_center_hz": 433e6,
+                           "capture_started_at": "2026-09-01T04:05:06Z",
                            "targets": [{"scope": "whole_record", "start": 0, "end": 32,
                                         "start_unit": "samples", "f_low_hz": -100.0,
                                         "f_high_hz": 100.0, "modulation": "QPSK"}]},
@@ -348,6 +435,11 @@ def test_import_files_per_file_payload_and_legacy(tmp_path):
     assert assets["payload_a.npy"]["sample_rate"] == 1000.0
     assert assets["payload_a.npy"]["label"] == "甲"
     assert assets["payload_b.npy"]["sample_rate"] == 2000.0
+    # 逐文件优先；未给出回落请求级（本批默认）
+    assert assets["payload_a.npy"]["rf_center_hz"] == pytest.approx(433e6)
+    assert assets["payload_b.npy"]["rf_center_hz"] == pytest.approx(100e6)
+    assert assets["payload_a.npy"]["capture_started_at"] == "2026-09-01T04:05:06Z"
+    assert assets["payload_b.npy"]["capture_started_at"]  # 缺省记本批导入时间
     assert all(item["storage_kind"] == "shard" for item in assets.values())
     target = workspace.list_targets(assets["payload_a.npy"]["id"], with_current=True)[0]
     assert (target["for_detection"], target["for_amc"]) == (1, 1)
@@ -356,12 +448,15 @@ def test_import_files_per_file_payload_and_legacy(tmp_path):
     third = _make_npy(tmp_path, "payload_c.npy", 16)
     legacy = execute({"workspace": str(tmp_path), "action": "import_files",
                       "paths": [str(third)], "sample_rate": 3000.0,
+                      "rf_center_hz": 50e6, "capture_started_at": "2026-09-02T00:00:00Z",
                       "targets": [{"scope": "segment", "f_low_hz": -50.0,
                                    "f_high_hz": 50.0}]})
     assert legacy["created"] == 1
     workspace = Workspace(tmp_path)
     third_asset = next(item for item in workspace.list_assets()
                        if item["name"] == "payload_c.npy")
+    assert third_asset["rf_center_hz"] == pytest.approx(50e6)
+    assert third_asset["capture_started_at"] == "2026-09-02T00:00:00Z"
     legacy_target = workspace.list_targets(third_asset["id"], with_current=True)[0]
     assert legacy_target["scope"] == "segment"
     assert legacy_target["for_detection"] == 1 and legacy_target["for_amc"] == 0

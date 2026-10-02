@@ -361,7 +361,7 @@ def test_classification_metrics_rejects_length_mismatch():
 def test_service_detect_run_carries_truth_and_metrics(tmp_path):
     """服务层 detect 任务：跑一次即可回读结果，且带真值与误差指标。"""
     from signal_analysis.services import execute
-    from signal_analysis.storage import Workspace
+    from signal_analysis.data import Workspace
 
     generated = execute({"workspace": str(tmp_path), "action": "generate",
                          "sample_rate": RATE, "duration": 0.2, "seed": 4,

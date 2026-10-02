@@ -15,7 +15,7 @@
 
 约定
 ----
-* 训练与推理共用 :func:`signal_analysis.ml.amc.extract_features`，数据集里存的
+* 训练与推理共用 :func:`signal_analysis.algorithms.amc.features.extract_features`，数据集里存的
   就是推理端会拿到的**同一种**特征向量；数据集的特征清单必须与 ``AMC_FEATURES``
   完全一致，否则脚本直接报错而不是悄悄训练。
 * 报告里的指标一律区分"训练集内"与"独立验证集"；本仓库**没有**约定的识别准确率
@@ -35,9 +35,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from signal_analysis.ml import amc  # noqa: E402
+from signal_analysis.algorithms.amc import feature_model as amc  # noqa: E402
 
-DEFAULT_OUTPUT = REPO_ROOT / "src" / "signal_analysis" / "ml" / amc.DEFAULT_MODEL_NAME
+DEFAULT_OUTPUT = REPO_ROOT / "src" / "signal_analysis" / "algorithms" / "amc" / amc.DEFAULT_MODEL_NAME
 DEFAULT_ONNX_NAME = "amc_onnx.json"
 TRAIN_EXTRA = "pip install .[train]"
 
@@ -232,10 +232,10 @@ def _main_transformer(args):
                   "epochs": args.epochs, "batch_size": args.batch_size,
                   "best_validation_accuracy": outcome["best_accuracy"],
                   "note": args.note or None},
-        notes="特征向量由 signal_analysis.ml.amc.extract_features 生成，标准化已写入导出图")
+        notes="特征向量由 signal_analysis.algorithms.amc.features.extract_features 生成，标准化已写入导出图")
     print(f"ONNX 分类器 {library}\n清单 {manifest_path}（sha256 {manifest['sha256'][:12]}…）")
 
-    from signal_analysis.ml.amc import onnx_scores
+    from signal_analysis.algorithms.amc.feature_model import onnx_scores
     from signal_analysis.evaluation import classification_metrics
 
     truth, predicted = [], []

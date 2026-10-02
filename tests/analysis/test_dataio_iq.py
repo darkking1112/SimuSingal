@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from signal_analysis.dataio import (IQ_DTYPES, MAX_FILE_BYTES, read_iq_binary, read_samples,
+from signal_analysis.data.io import (IQ_DTYPES, MAX_FILE_BYTES, read_iq_binary, read_samples,
                                     write_samples)
 
 

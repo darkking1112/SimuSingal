@@ -1,7 +1,7 @@
 """生成配方校验与参数预览测试（方案文档 §6.3）。"""
 import pytest
 
-from signal_analysis.recipes import preview_recipe, sample_seed, validate_recipe
+from signal_analysis.algorithms.generation.recipes import preview_recipe, sample_seed, validate_recipe
 
 RECIPE = {
     "contract": "gen_recipe_v1",

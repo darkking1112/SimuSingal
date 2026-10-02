@@ -1,11 +1,11 @@
 """采纳为参数标注（方案 §4.2）：检测/逐跳/AMC 结论 → 目标参考参数 + 标签。"""
 import pytest
 
-from signal_analysis.adoption import (adopt_classification, adopt_detections,
-                                      adopt_hops)
+from signal_analysis.data.adoption import (adopt_classification, adopt_detections,
+                                           adopt_hops)
 from signal_analysis.core_api import generate_iq
 from signal_analysis.services import execute
-from signal_analysis.storage import Workspace
+from signal_analysis.data import Workspace
 
 
 def add_generated(workspace, mode="fm", seed=1, name=None, snr=15.0):

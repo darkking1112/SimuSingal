@@ -32,7 +32,21 @@ if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from signal_analysis.core_api import generate_iq  # noqa: E402
-from signal_analysis.ml import (  # noqa: E402
+from signal_analysis.algorithms.amc.feature_model import (  # noqa: E402
+    amc_classify,
+    evaluate_model,
+    fit_model,
+    load_default_model,
+    load_model,
+    mode_to_class,
+    predict,
+    save_model,
+)
+from signal_analysis.algorithms.amc.features import (  # noqa: E402
+    extract_features,
+    feature_vector,
+)
+from signal_analysis.contracts.amc import (  # noqa: E402
     AMC_CLASSES,
     AMC_FEATURE_CONTRACT,
     AMC_FEATURES,
@@ -41,21 +55,11 @@ from signal_analysis.ml import (  # noqa: E402
     AMC_RESULT_CONTRACT,
     CLASS_LABELS,
     ModelError,
-    amc_classify,
-    evaluate_model,
-    extract_features,
-    feature_vector,
-    fit_model,
-    load_default_model,
-    load_model,
-    mode_to_class,
-    predict,
     read_amc_manifest,
-    save_model,
     write_amc_manifest,
 )
-from signal_analysis.ml.runtime import runtime_version  # noqa: E402
-from signal_analysis.storage import Workspace  # noqa: E402
+from signal_analysis.inference.runtime import runtime_version  # noqa: E402
+from signal_analysis.data import Workspace  # noqa: E402
 from signal_analysis.tasks import run_job  # noqa: E402
 
 RATE = 200_000.0
@@ -338,7 +342,7 @@ def test_gui_amc_tab_renders_result(tmp_path):
     pytest.importorskip("pyqtgraph")
     from PySide6 import QtWidgets
 
-    from signal_analysis.gui import MainWindow
+    from signal_analysis.ui import MainWindow
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     workspace = tmp_path / "ws"
@@ -347,7 +351,7 @@ def test_gui_amc_tab_renders_result(tmp_path):
     try:
         assert window.tabs.count() == 10
         labels = [window.tabs.tabText(index) for index in range(window.tabs.count())]
-        # 页序由 signal_analysis.gui.MainWindow.__init__ 的页面注册表决定，此处钉住以免误改
+        # 页序由 signal_analysis.ui.MainWindow.__init__ 的页面注册表决定，此处钉住以免误改
         assert labels == ["信号导入", "IQ 信号生成", "数据分析", "信号检测", "调制识别", "跳频参数",
                           "模型训练", "数据管理", "算法对比", "运行记录"]
         assert window.amc_button.text() and window.amc_from_detect.text()
@@ -466,7 +470,7 @@ def test_amc_classify_rejects_onnx_manifest_without_runtime(tmp_path):
     """记录缺 onnxruntime 时的行为：给出安装提示，而不是栈回溯。"""
     if runtime_version() is not None:
         pytest.skip("本机已安装 onnxruntime")
-    from signal_analysis.ml import RuntimeUnavailable
+    from signal_analysis.inference import RuntimeUnavailable
 
     model = _placeholder_onnx(tmp_path)
     manifest_path = tmp_path / "amc.json"

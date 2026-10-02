@@ -5,7 +5,7 @@
 ``forward`` 直接返回 ``(B, K, 6)`` 的检测框张量，列定义与推理端
 ``normalized_boxes_v1`` 完全一致（``[x_center, y_center, width, height,
 confidence, class]``，前四列按图像宽高归一化），因此 ``torch.onnx.export``
-之后无需任何后处理即可被 :func:`signal_analysis.ml.parse_model_output` 解码。
+之后无需任何后处理即可被 :func:`signal_analysis.contracts.decode.parse_model_output` 解码。
 
 结构：若干次步长 2 卷积（默认 4 次 → 步长 16 网格）→ 3×3 + 1×1 卷积输出
 ``1（目标性）+ 4（框）+ C（类别）``；解码在图中用 ``sigmoid / softplus /

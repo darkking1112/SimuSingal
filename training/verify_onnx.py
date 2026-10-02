@@ -9,8 +9,8 @@
    ``input.image_size``，输出必须能被 :func:`parse_model_output` 解码
    （列数与 :data:`BOX_COLUMNS` 一致）——这一条只能从图上验证，清单里看不出来；
 4. **端到端**：用确定性场景（含跳频会话、双信号、纯噪声）跑
-   :func:`signal_analysis.ml.ml_detect`（逐跳清单则跑
-   :func:`signal_analysis.ml.ml_detect_hops`），检查结果是 JSON 安全的，并用项目
+   :func:`signal_analysis.algorithms.detection.ai.ml_detect`（逐跳清单则跑
+   :func:`signal_analysis.algorithms.detection.ai.ml_detect_hops`），检查结果是 JSON 安全的，并用项目
    自身评测口径（:func:`evaluate_detections`）给出召回/精确率；
 5. **可复现**：同一批样本重复推理，检测结果必须逐字节一致；
 6. **数值一致性**（``--reference``）：把两个模型放在同一张时频图上比对原始
@@ -45,19 +45,19 @@ from signal_analysis.evaluation import (  # noqa: E402
     hop_truth,
     signal_truth,
 )
-from signal_analysis.ml import (  # noqa: E402
+from signal_analysis.algorithms.detection.ai import ml_detect, ml_detect_hops  # noqa: E402
+from signal_analysis.algorithms.dsp.image import detection_image, spectral_context  # noqa: E402
+from signal_analysis.contracts import (  # noqa: E402
     BOX_COLUMNS,
     DEFAULT_LABEL_SEMANTICS,
     LABEL_SEMANTICS,
-    RuntimeUnavailable,
-    detection_image,
-    ml_detect,
-    ml_detect_hops,
     parse_model_output,
     read_model_manifest,
+)
+from signal_analysis.inference import (  # noqa: E402
+    RuntimeUnavailable,
     runtime_module,
     runtime_version,
-    spectral_context,
 )
 
 

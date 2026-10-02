@@ -4,7 +4,7 @@
 :mod:`detectors.torch_export`（torch 侧包装）与 :mod:`detectors.onnx_contract`
 （ONNX 图改写）共用，因此刻意不导入 ``torch`` / ``onnx``。
 
-目标契约（与 :mod:`signal_analysis.ml.decode` 完全一致，冻结为
+目标契约（与 :mod:`signal_analysis.contracts.decode` 完全一致，冻结为
 ``normalized_boxes_v1``）：
 
 * 形状 ``(1, N, 6)``，每行 ``[x_center, y_center, width, height, confidence, class]``；
@@ -16,16 +16,16 @@
 
 第三方检测器（YOLO 系、RT-DETR、YOLOX）统一使用"左上角为原点、``y`` 向下"
 的图像坐标，而本项目的时频图行 0 是 ``+fs/2``（
-:func:`signal_analysis.ml.tensor.detection_image` 的排布）。两者**恰好同向**，
+:func:`signal_analysis.algorithms.dsp.image.detection_image` 的排布）。两者**恰好同向**，
 因此**不需要任何翻转**：只要标签来自
-:func:`signal_analysis.ml.tensor.band_to_box`，同一套 ``(x, y, w, h)`` 就可以
+:func:`signal_analysis.contracts.image.band_to_box`，同一套 ``(x, y, w, h)`` 就可以
 在训练侧与推理侧直接互通。一旦有人"顺手"写了 ``y = 1 - y``，框会整体上下翻转，
 而形状校验查不出来——这就是 README §7 把"绝不另写一份 y 坐标公式"列为第一条的原因。
 """
 
 from __future__ import annotations
 
-#: 契约列数（等于 ``signal_analysis.ml.decode.BOX_COLUMNS``）
+#: 契约列数（等于 ``signal_analysis.contracts.decode.BOX_COLUMNS``）
 CONTRACT_COLUMNS = 6
 
 #: 契约名称

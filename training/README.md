@@ -243,7 +243,7 @@ AI 框与灰色虚线基线框）；逐跳模型在**跳频参数 → AI 估计�
 ## 6. 调制识别（A09 六类，P4）
 
 与检测并列的第二条链路：**单信号频带内的调制样式识别**，类别字典按技术方案原文固定为六类：
-**FM、SSB、2ASK、QPSK、16QAM、64QAM**（`signal_analysis.ml.amc.AMC_CLASSES`）。`am` 与两种跳频样式
+**FM、SSB、2ASK、QPSK、16QAM、64QAM**（`signal_analysis.contracts.amc.AMC_CLASSES`）。`am` 与两种跳频样式
 **不在**字典内：跳频是"一段会话一个实例"的检测对象，`am` 只作为数据库示例出现；遇到这两类时结果
 标为"不适用"并照常计数，不丢弃样本。
 
@@ -251,12 +251,12 @@ AI 框与灰色虚线基线框）；逐跳模型在**跳频参数 → AI 估计�
 
 | 项目 | 取值 | 定义位置 |
 | --- | --- | --- |
-| 特征契约 | `amc_feature_vector_v1`，顺序由 `AMC_FEATURES` 固定（34 维，全为有限浮点数） | `_numeric_modulation.py::extract_features`（旧入口 `ml.amc.extract_features` 保留） |
+| 特征契约 | `amc_feature_vector_v1`，顺序由 `AMC_FEATURES` 固定（34 维，全为有限浮点数） | `algorithms/amc/features.py::extract_features` |
 | 特征内容 | 包络统计、谱平坦度/边缘、瞬时频率与相位统计、`|M20|/|C42|/|C63|`、全样本与峰值幅度分布、16 桶峰值幅度直方图模板、带内信噪比粗估 | 同上 |
 | 线性模型契约 | `amc_model_v1`：`z=(x−mean)/scale`、`p=softmax(T·(zW+b))`，无隐藏状态 | `ml/amc.py::fit_model` |
 | ONNX 契约 | `amc_feature_vector_v1`：输入 `features (N,34)` float32 **未标准化**，输出 `scores (N,6)` 概率，标准化写入导出图 | `ml/amc.py::write_amc_manifest` |
 | 结果契约 | `amc_classify_v1`：特征、频带、六类概率、可信度提示与传统启发式对照 | `ml/amc.py::amc_classify` |
-| 真值来源 | 生成器 `mode` 直接就是类别名；只在**单信号**资产上与真值比对 | `services.py::_attach_amc_truth` |
+| 真值来源 | 生成器 `mode` 直接就是类别名；只在**单信号**资产上与真值比对 | `services/truth.py::_attach_amc_truth` |
 
 ### 6.2 构建数据集、训练与验收
 
@@ -284,7 +284,7 @@ AI 框与灰色虚线基线框）；逐跳模型在**跳频参数 → AI 估计�
 
 关键设计：
 
-* **特征与推理同源**：数据集里的特征直接来自 `ml.amc.extract_features`，训练脚本不再重算，
+* **特征与推理同源**：数据集里的特征直接来自 `algorithms.amc.features.extract_features`，训练脚本不再重算，
   避免"训练特征 ≠ 推理特征"；
 * **带内信噪比是唯一验收口径**（`inband_snr_v1`）：数据集的 `snr_db` 与检测/识别结果里的
   `snr_estimate_db` 语义一致，分信噪比指标按 5 dB 分档统计；
@@ -342,11 +342,11 @@ CNN / TCN，让网络自己学调制特征。两者是**互不替代**的两条�
 
 | 项目 | 取值 | 定义位置 |
 | --- | --- | --- |
-| 波形契约 | `iq_waveform_v1`：`(2, N)`、通道排布 `iq_channels_first_v1`、归一化 `unit_rms` | `ml/iq.py` |
+| 波形契约 | `iq_waveform_v1`：`(2, N)`、通道排布 `iq_channels_first_v1`、归一化 `unit_rms` | `contracts/iq.py` |
 | 窗口长度 | 64 ≤ N ≤ 65536，默认 1024；**必须与清单 `input.samples` 一致** | `iq_waveform(window_samples=...)` |
-| 前端口径 | 抽取比 `samples_per_band = 8.0`、低通抽头 `lowpass_taps = 65`，与特征通路**同一份实现**（`_numeric_preprocess.py` 的混频/抽取，`ml.amc` 保留旧入口） | `ml/iq.py::_require_front_end` |
+| 前端口径 | 抽取比 `samples_per_band = 8.0`、低通抽头 `lowpass_taps = 65`，与特征通路**同一份实现**（`algorithms/dsp/preprocess.py` 的混频/抽取） | `algorithms/amc/iq_model.py::_require_front_end` |
 | ONNX 契约 | 输入 `iq (1, 2, N)` float32、输出 `scores (1, C)` 概率（softmax 已写进图） | `training/iq_cnn.py::export_onnx` |
-| 清单 | `iq_waveform_v1` + `runtime=onnxruntime` + sha256 + 类别字典 + 前端口径 + 声明式默认中心/带宽 | `ml/iq.py::write_iq_manifest` |
+| 清单 | `iq_waveform_v1` + `runtime=onnxruntime` + sha256 + 类别字典 + 前端口径 + 声明式默认中心/带宽 | `contracts/iq.py::write_iq_manifest` |
 | 结果契约 | `amc_iq_classify_v1`：波形摘要、`snr_estimate_db`、概率、可信度提示、待确认项 | `ml/iq.py::amc_iq_classify` |
 
 与检测/特征通路的清单**不能互串**：`read_model_manifest` 仍硬校验 `tf_image_v1` + 单通道，

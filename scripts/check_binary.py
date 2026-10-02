@@ -54,7 +54,7 @@ def main():
                         "assert all(m.__file__.endswith(('.so','.pyd')) for m in modules); "
                         "print([m.__file__ for m in modules])"],
                        check=True, env=env, cwd=stage)
-        subprocess.run([sys.executable, "-c", "from signal_analysis.ml import amc; "
+        subprocess.run([sys.executable, "-c", "from signal_analysis.algorithms.amc import feature_model as amc; "
                         "path = amc.default_model_path(); assert path.is_file(), path; "
                         "model = amc.load_model(path); "
                         "assert model['contract'] == amc.AMC_MODEL_CONTRACT; "

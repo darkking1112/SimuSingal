@@ -206,7 +206,7 @@ class DetectorAdapter(abc.ABC):
         本路径不需要框架的 Python 包（图已经是导出的成品），只需 onnx/onnxruntime。
         """
         self.check_available(allow_copyleft, runtime=False)
-        from signal_analysis.ml.manifest import DEFAULT_DYNAMIC_RANGE_DB, DEFAULT_NFFT
+        from signal_analysis.contracts.manifest import DEFAULT_DYNAMIC_RANGE_DB, DEFAULT_NFFT
 
         if data_root:
             card, records = load_dataset(data_root)
@@ -261,7 +261,7 @@ class DetectorAdapter(abc.ABC):
     def _write_manifest(self, manifest_path, onnx_path, *, contract, card, records, spec,
                         validation, graph, opset, size, model_id, version, weights, notes,
                         prep, dataset_summary, allow_copyleft):
-        from signal_analysis.ml import write_model_manifest
+        from signal_analysis.contracts import write_model_manifest
 
         splits = card.get("splits") or {}
         training = {

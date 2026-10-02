@@ -32,13 +32,13 @@ for _extra in (REPO_ROOT / "src", TRAINING):
         sys.path.insert(0, str(_extra))
 
 from signal_analysis.core_api import generate_iq  # noqa: E402
-from signal_analysis.ml import AMC_CLASSES  # noqa: E402
-from signal_analysis.ml.iq import (  # noqa: E402
+from signal_analysis.algorithms.amc.iq_model import iq_waveform  # noqa: E402
+from signal_analysis.contracts.amc import AMC_CLASSES  # noqa: E402
+from signal_analysis.contracts.iq import (  # noqa: E402
     CLASS_SET_A09,
     CLASS_SET_CUSTOM,
     IQ_INPUT_CHANNELS,
     IQ_WAVEFORM_CONTRACT,
-    iq_waveform,
 )
 
 RATE = 200_000.0

@@ -81,15 +81,17 @@ from detectors.dataset import (  # noqa: E402
     frequency_overlap_pairs,
     instance_statistics,
 )
-from signal_analysis.ml import (  # noqa: E402
+from signal_analysis.algorithms.dsp.image import (  # noqa: E402
+    detection_image,
+    measure_band,
+    spectral_context,
+)
+from signal_analysis.contracts import (  # noqa: E402
     BOX_COLUMNS,
     IMAGE_LAYOUT,
     INPUT_CONTRACT,
     OUTPUT_LAYOUT,
     band_to_box,
-    detection_image,
-    measure_band,
-    spectral_context,
 )
 from torchsig_bundle import BUNDLE_VERSION, load_bundle  # noqa: E402
 

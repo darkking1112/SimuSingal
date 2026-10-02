@@ -13,9 +13,9 @@ pytest.importorskip("pyqtgraph")
 
 from PySide6 import QtWidgets
 
-from signal_analysis.collection_gen_gui import CollectionGenPanel, SignalParamsDialog
-from signal_analysis.gui import MainWindow
-from signal_analysis.recipes import check_generator_support, validate_recipe
+from signal_analysis.ui import MainWindow
+from signal_analysis.ui.pages.collection_gen_page import CollectionGenPanel, SignalParamsDialog
+from signal_analysis.algorithms.generation.recipes import check_generator_support, validate_recipe
 
 
 def wait_job(app, window, timeout=30.0):

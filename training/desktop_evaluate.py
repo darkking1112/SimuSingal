@@ -40,7 +40,7 @@ def verify_native(native_path, contract_path, size):
 
 
 def match_boxes(predictions, truth, threshold=.5):
-    from signal_analysis.ml.decode import _iou
+    from signal_analysis.contracts.decode import _iou
     used = set()
     matched = 0
     for prediction in sorted(predictions, key=lambda box: -box[4]):
@@ -56,7 +56,7 @@ def match_boxes(predictions, truth, threshold=.5):
 
 def evaluate(data, model_path, output):
     from detectors.dataset import load_dataset
-    from signal_analysis.ml.decode import parse_model_output, non_max_suppression
+    from signal_analysis.contracts.decode import parse_model_output, non_max_suppression
     _, records = load_dataset(data)
     runtime = session(model_path)
     name = runtime.get_inputs()[0].name

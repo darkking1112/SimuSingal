@@ -167,12 +167,12 @@ def main(argv=None):
             return worker_main(args.request, args.response)
         if args.command in (None, "gui"):
             try:
-                from .gui import launch
+                from .ui import launch
             except ImportError as exc:
                 print(f"桌面依赖不可用：{exc}。请安装项目的 [gui] 依赖。", file=sys.stderr)
                 return 2
             return launch(args.workspace)
-        from .storage import Workspace
+        from .data import Workspace
         from .tasks import run_job
         workspace = Workspace(args.workspace)
         # 命令行用连字符（ml-detect），服务动作名用下划线（ml_detect）
@@ -183,10 +183,10 @@ def main(argv=None):
             from common.reports import export_report
             result = {"path": export_report(workspace.get_run(args.run_id), args.path)}
         elif args.command == "plugin-manifest":
-            from .plugins import create_demo_manifest
+            from .integrations.plugins import create_demo_manifest
             result = create_demo_manifest(args.library, args.output)
         elif args.command == "ml-manifest":
-            from .ml import write_model_manifest
+            from .contracts import write_model_manifest
             training = {key: value for key, value in (("framework", args.framework),
                                                       ("license", args.license),
                                                       ("dataset", args.dataset))
@@ -199,7 +199,7 @@ def main(argv=None):
                 spectrogram_nfft=args.nfft, dynamic_range_db=args.dynamic_range,
                 label_semantics=args.label_semantics)
         elif args.command == "amc-manifest":
-            from .ml import write_amc_manifest
+            from .contracts import write_amc_manifest
             kwargs = {"identifier": args.identifier or "amc-linear-default",
                       "version": args.version, "opset": args.opset, "notes": args.notes}
             if args.dataset:
@@ -209,7 +209,7 @@ def main(argv=None):
                       "sha256": manifest["sha256"], "input": manifest["input"],
                       "output": manifest["output"]}
         elif args.command == "amc-iq-manifest":
-            from .ml import DEFAULT_IQ_SAMPLES, write_iq_manifest
+            from .contracts import DEFAULT_IQ_SAMPLES, write_iq_manifest
             kwargs = {"identifier": args.identifier or "iq-cnn-default",
                       "version": args.version, "opset": args.opset, "notes": args.notes,
                       "classes": args.classes,

@@ -25,8 +25,8 @@
                 │
         detections (1, max_boxes, 6) float32
 
-输出列序与 :data:`signal_analysis.ml.decode.BOX_COLUMNS` 完全一致，
-所以推理端只需要 :func:`signal_analysis.ml.decode.parse_model_output`，
+输出列序与 :data:`signal_analysis.contracts.decode.BOX_COLUMNS` 完全一致，
+所以推理端只需要 :func:`signal_analysis.contracts.decode.parse_model_output`，
 不需要任何模型相关的解码分支。``y`` 方向不做翻转（见 :mod:`.contract` 的说明）。
 
 ``torch`` 始终惰性导入：本模块可以被 import，但只有真正构建/导出时才要求安装。
@@ -38,7 +38,7 @@ from pathlib import Path
 
 from .contract import CONTRACT_COLUMNS, layout_spec
 
-#: 宽度/高度下限（与 ``signal_analysis.ml.tensor.band_to_box`` 同一量级）
+#: 宽度/高度下限（与 ``signal_analysis.contracts.image.band_to_box`` 同一量级）
 MIN_EXTENT = 1e-4
 
 #: ImageNet 标准化常量（YOLOX / RT-DETR 的默认预处理）

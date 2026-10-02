@@ -4,8 +4,8 @@
 为什么要单独一套数据集
 ----------------------
 
-``build_amc_dataset.py`` 存的是 :func:`signal_analysis.ml.amc.extract_features` 产出的
-34 维特征向量；本脚本存的是 :func:`signal_analysis.ml.iq.iq_waveform` 产出的
+``build_amc_dataset.py`` 存的是 :func:`signal_analysis.algorithms.amc.features.extract_features` 产出的
+34 维特征向量；本脚本存的是 :func:`signal_analysis.algorithms.amc.iq_model.iq_waveform` 产出的
 ``(2, N)`` 单位 RMS 复基带窗口。两者是**两条互不替代的通路**（见 ``training/README.md``）：
 
 * 特征通路：人工设计特征 + 线性/Transformer 分类头，类别字典冻结为 A09 六类；
@@ -74,8 +74,9 @@ from build_amc_dataset import (  # noqa: E402
     _signal_spec,
 )
 from signal_analysis.core_api import generate_iq  # noqa: E402
-from signal_analysis.ml import amc  # noqa: E402
-from signal_analysis.ml.iq import (  # noqa: E402
+from signal_analysis.algorithms.amc import feature_model as amc  # noqa: E402
+from signal_analysis.algorithms.amc.iq_model import iq_waveform  # noqa: E402
+from signal_analysis.contracts.iq import (  # noqa: E402
     CLASS_SET_A09,
     CLASS_SET_CUSTOM,
     DEFAULT_IQ_SAMPLES,
@@ -86,7 +87,6 @@ from signal_analysis.ml.iq import (  # noqa: E402
     MAX_CLASSES,
     MAX_CLASS_NAME,
     MIN_IQ_SAMPLES,
-    iq_waveform,
     class_set_name,
 )
 from torchsig_bundle import load_bundle  # noqa: E402
@@ -504,7 +504,7 @@ def main(argv=None):
             "classes": list(classes),
             "class_count": len(classes),
             "mode_to_class": {mode: amc.mode_to_class(mode) for mode in amc.AMC_CLASSES},
-            "note": "波形由 signal_analysis.ml.iq.iq_waveform 生成，训练与推理同源；"
+            "note": "波形由 signal_analysis.algorithms.amc.iq_model.iq_waveform 生成，训练与推理同源；"
                     "类别顺序即模型输出下标顺序",
         },
         "splits": {

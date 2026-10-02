@@ -11,7 +11,7 @@ pytest.importorskip("pyqtgraph")
 
 from PySide6 import QtWidgets
 
-from signal_analysis.gui import MainWindow
+from signal_analysis.ui import MainWindow
 
 
 def wait_job(app, window, timeout=60.0):

@@ -5,8 +5,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from signal_analysis.annotations import AnnotationDataset
-from signal_analysis.storage import Workspace
+from signal_analysis.data.annotations import AnnotationDataset
+from signal_analysis.data import Workspace
 from signal_analysis.tasks import run_job
 
 from test_collection_gen import generate, make_recipe

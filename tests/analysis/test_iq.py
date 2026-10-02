@@ -36,9 +36,17 @@ if str(SRC) not in sys.path:
 
 from common.storage import file_digest  # noqa: E402
 from signal_analysis.core_api import generate_iq  # noqa: E402
-from signal_analysis.ml import (  # noqa: E402
+from signal_analysis.algorithms.amc.features import extract_features  # noqa: E402
+from signal_analysis.algorithms.amc.iq_model import (  # noqa: E402
+    amc_iq_classify,
+    iq_scores,
+    iq_waveform,
+)
+from signal_analysis.contracts.amc import (  # noqa: E402
     AMC_CLASSES,
     CLASS_LABELS,
+)
+from signal_analysis.contracts.iq import (  # noqa: E402
     CLASS_SET_A09,
     CLASS_SET_CUSTOM,
     DEFAULT_IQ_SAMPLES,
@@ -49,24 +57,20 @@ from signal_analysis.ml import (  # noqa: E402
     IQ_ONNX_CONTRACT,
     IQ_RESULT_CONTRACT,
     IQ_WAVEFORM_CONTRACT,
-    ManifestError,
-    amc_iq_classify,
     class_labels,
     class_set_name,
-    extract_features,
-    iq_scores,
-    iq_waveform,
-    load_iq_runner,
     read_iq_manifest,
     write_iq_manifest,
 )
-from signal_analysis.ml.amc import SAMPLES_PER_BAND  # noqa: E402
-from signal_analysis.ml.runtime import (  # noqa: E402
+from signal_analysis.contracts.manifest import ManifestError  # noqa: E402
+from signal_analysis.contracts.preprocess import SAMPLES_PER_BAND  # noqa: E402
+from signal_analysis.inference.runtime import (  # noqa: E402
     IQModelRunner,
     RuntimeUnavailable,
+    load_iq_runner,
     runtime_version,
 )
-from signal_analysis.storage import Workspace  # noqa: E402
+from signal_analysis.data import Workspace  # noqa: E402
 from signal_analysis.tasks import run_job  # noqa: E402
 
 RATE = 200_000.0
@@ -386,7 +390,7 @@ def test_manifest_rejects_wrong_contract_and_front_end(tmp_path):
 
 def test_time_frequency_reader_still_rejects_iq_manifests(tmp_path):
     """两个读取器互不放松：IQ 清单不能喂给时频图检测入口。"""
-    from signal_analysis.ml import read_model_manifest
+    from signal_analysis.contracts import read_model_manifest
 
     model = _placeholder_onnx(tmp_path / "run")
     path = tmp_path / "run" / "iq.json"
@@ -692,7 +696,7 @@ def test_gui_routes_iq_manifest_to_the_iq_action(tmp_path, tiny_model):
     pytest.importorskip("PySide6")
     pytest.importorskip("pyqtgraph")
     from PySide6 import QtWidgets
-    from signal_analysis.gui import MainWindow
+    from signal_analysis.ui import MainWindow
 
     manifest_path, _, _, _ = tiny_model
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -718,7 +722,7 @@ def test_gui_renders_iq_result_without_fake_feature_columns(tmp_path, tiny_model
     pytest.importorskip("PySide6")
     pytest.importorskip("pyqtgraph")
     from PySide6 import QtWidgets
-    from signal_analysis.gui import MainWindow
+    from signal_analysis.ui import MainWindow
 
     manifest_path, _, _, _ = tiny_model
     workspace = tmp_path / "ws"

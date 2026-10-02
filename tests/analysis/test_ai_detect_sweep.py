@@ -307,7 +307,7 @@ def test_cli_json_roundtrip_is_nan_free(tmp_path, monkeypatch, capsys):
         manifest = _manifest()
         return StubRunner(np.array([[0.5, 0.5, 0.5, 0.02, 0.9, 0.0]]), manifest), manifest, "stub"
 
-    import signal_analysis.ml.runtime as runtime
+    import signal_analysis.inference.runtime as runtime
     monkeypatch.setattr(runtime, "load_runner", fake_load_runner)
     sweep.main(argv)
     payload = json.loads(target.read_text(encoding="utf-8"))
@@ -323,7 +323,7 @@ def test_truth_sigmf_is_refused_explicitly(monkeypatch):
     def fake_load_runner(*_args, **_kwargs):  # pragma: no cover - 不应被调用
         raise AssertionError("--truth sigmf 必须在加载模型之前就报错")
 
-    import signal_analysis.ml.runtime as runtime
+    import signal_analysis.inference.runtime as runtime
     monkeypatch.setattr(runtime, "load_runner", fake_load_runner)
     with pytest.raises(SystemExit):
         sweep.main(["--manifest", "stub.json", "--truth", "sigmf"])

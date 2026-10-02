@@ -29,7 +29,7 @@ if str(REPO_ROOT / "src") not in sys.path:
 if str(TRAINING) not in sys.path:
     sys.path.insert(0, str(TRAINING))
 
-from signal_analysis.ml import band_to_box, read_model_manifest  # noqa: E402
+from signal_analysis.contracts import band_to_box, read_model_manifest  # noqa: E402
 
 
 def _load(name, path):
