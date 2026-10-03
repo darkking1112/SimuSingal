@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -15,8 +16,48 @@ def event(**values):
     print("TRAIN_EVENT " + json.dumps(values, ensure_ascii=False, allow_nan=False), flush=True)
 
 
+class StageReporter:
+    """把集合快照进度写成 TRAIN_EVENT（外部训练任务没有 job_dir）。"""
+
+    def __init__(self):
+        self._last = 0.0
+
+    def emit(self, done, total, message, **_extra):
+        now = time.monotonic()
+        if int(done) != int(total) and now - self._last < 1.0:
+            return
+        self._last = now
+        event(stage=str(message), message=str(message), done=int(done), total=int(total))
+
+
+def build_training_input(config, output):
+    """从训练集／验证集集合构建本次运行的输入快照；返回带 ``data`` 的配置副本。
+
+    训练页不再导出训练集：本次运行的数据由集合的当前内容现场装配，写进运行目录，
+    ``experiment.json`` 的配置与 ``training_inputs.json`` 一起作为溯源记录。
+    """
+    from signal_analysis.data import Workspace
+    from signal_analysis.contracts.iq import DEFAULT_IQ_SAMPLES
+    from signal_analysis.services.training_inputs import inputs_plan, plan_summary
+    from signal_analysis.services.training_snapshot import snapshot
+
+    workspace = Workspace(config["workspace"])
+    event(stage="构建训练输入")
+    plan = inputs_plan(workspace, config["task"], config["train_collection_id"],
+                       config["val_collection_id"])
+    (output / "training_inputs.json").write_text(
+        json.dumps(plan_summary(plan), ensure_ascii=False, indent=2), encoding="utf-8")
+    report = snapshot(workspace, plan, destination=output / "collection_data",
+                      image_size=int(config.get("image_size", 1024)),
+                      nfft=int(config.get("nfft", 512)),
+                      samples=int(config.get("samples", DEFAULT_IQ_SAMPLES)),
+                      seed=int(config.get("seed", 0)), reporter=StageReporter())
+    event(stage=f"训练输入就绪：{report['samples']} 个样本", samples=report["samples"])
+    return dict(config, data=report["path"])
+
+
 def execute(config, output):
-    from signal_analysis.data.annotations import AnnotationDataset, append_asset
+    from signal_analysis.data.annotations import AnnotationDataset
     output = Path(output).resolve()
     import importlib.metadata
     packages = {}
@@ -29,24 +70,16 @@ def execute(config, output):
         {"python": sys.executable, "version": sys.version, "packages": packages}, indent=2),
         encoding="utf-8")
     task = config.get("task", "iq")
-    if task == "asset":
-        append_asset(config["data"], config["workspace"], config["asset_id"])
-        return
-    # 训练外部进程只训练：数据由“信号集合生成”在主程序内产出（TorchSig 例外，
-    # 由 signal_analysis.integrations.torchsig 在 Linux 下单独调用 build_torchsig.py）。
+    if task not in ("iq", "detection"):
+        raise ValueError("未知训练任务")
+    # 训练外部进程只训练：数据由本次运行从信号集合现场装配（第 10 节）。
+    config = build_training_input(config, output)
     if task == "iq":
         from signal_analysis.services.training_jobs import iq_plan
-        if config["source"] == "existing":
-            # Snapshot before validation/training; later edits cannot change this experiment.
-            import shutil
-            shutil.copytree(config["data"], output / "iq_data")
-            config = dict(config, data=str(output / "iq_data"))
         for stage in iq_plan(config, output):
             event(stage=stage["name"])
             subprocess.run(stage["argv"], cwd=ROOT, check=True)
         return
-    if task != "detection":
-        raise ValueError("未知训练任务")
     import torch
     if config["device"] == "cuda" and not torch.cuda.is_available():
         raise ValueError("所选训练环境的 CUDA 不可用，请选择 CPU 或配置 CUDA 环境")

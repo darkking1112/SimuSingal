@@ -11,12 +11,12 @@ def _budgets(action):
 
     - 16M 样本的生成可能明显超过默认 30 s 子进程超时；
     - 数据盘点/清理要遍历整棵工作区目录树，同样放宽；
-    - 集合生成/训练集导出/批量导入是长任务：取消给 120 s 优雅收尾（封存已写
-      数据并返回部分结果），而不是直接终止子进程。
+    - 集合生成/批量导入是长任务：取消给 120 s 优雅收尾（封存已写数据并返回部分
+      结果），而不是直接终止子进程。
     """
     if action == "generate":
         return 600.0, 0.0
-    if action in ("generate_collection", "torchsig_import", "export_training_data",
+    if action in ("generate_collection", "torchsig_import",
                   "torchsig_probe", "import_files", "import_inspect"):
         return 3600.0, 120.0
     if action in ("storage_report", "storage_cleanup", "migrate_legacy"):

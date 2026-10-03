@@ -101,11 +101,18 @@ def test_iq_test_partition_does_not_enter_validation():
 
 def wait_process(app, page, timeout=30):
     deadline = time.monotonic() + timeout
-    while page.process is not None and time.monotonic() < deadline:
+    while page.runner.active and time.monotonic() < deadline:
         app.processEvents()
         time.sleep(.01)
     app.processEvents()
-    assert page.process is None, page.log.toPlainText()[-2000:]
+    assert not page.runner.active, page.log.toPlainText()[-2000:]
+
+
+def training_config(page, repository):
+    """训练页配置：集合 ID 由调用方补齐（本文件的假 worker 不读集合）。"""
+    config = page.configuration()
+    config.update(repository=str(repository), python=sys.executable)
+    return config
 
 
 @pytest.fixture
@@ -123,57 +130,45 @@ def window(tmp_path):
 
 
 @pytest.mark.gui
-def test_gui_roi_geometry_roundtrip_and_empty_confirmation(window, tmp_path):
-    app, widget = window
-    dataset = sample_dataset(tmp_path / "data")
-    page = widget.training_page
-    page.set_dataset(dataset.root)
-    page.add_box(box=[.6, .2, .3, .1, 1, 0])
-    assert page.save_annotation()
-    assert np.allclose(AnnotationDataset(dataset.root).record(0)["boxes"][0], [.6, .2, .3, .1, 1, 0])
-    page.samples.setCurrentRow(1)
-    page.clear_boxes()
-    assert page.save_annotation()
-    assert AnnotationDataset(dataset.root).record(1)["annotation_status"] == "reviewed"
-    page.dataset.snapshot(tmp_path / "ready")
-
-
-@pytest.mark.gui
-def test_gui_external_iq_training_export_verify_and_load(window):
+def test_gui_external_iq_training_from_collections_verify_and_load(window):
+    """集合直读的端到端链路：两个集合 → 训练 → ONNX/清单/验收 → 加载到调制识别。"""
     pytest.importorskip("torch")
     pytest.importorskip("onnxruntime")
     pytest.importorskip("onnx")
     app, widget = window
-    page = widget.training_page
-    # 训练页不生成数据：数据集来自“所选集合”的导出（这里直接走服务等价路径）
-    from signal_analysis.tasks import run_job as service_job
+    page = widget.amc_training_page
+    from test_collection_gen import generate, make_recipe
 
-    collection = service_job({"workspace": str(widget.workspace.root),
-                              "action": "generate_collection", "collection_name": "训练数据",
-                              "recipe": {"contract": "gen_recipe_v1", "engine": "project",
-                                         "base_seed": 5, "count": 8,
-                                         "record": {"sample_rate_hz": {"fixed": 200000.0},
-                                                    "duration_s": {"fixed": 0.05}},
-                                         "signals": {"count": {"fixed": 1},
-                                                     "mode": {"balanced": ["qpsk", "fm"]},
-                                                     "bandwidth_ratio": {"fixed": 0.06},
-                                                     "snr_db": {"uniform": [10, 30]},
-                                                     "power_dbfs": {"fixed": -8.0}},
-                                         "labels": {"detection": "session_v1", "amc": True}}},
-                              timeout=120)
-    exported = service_job({"workspace": str(widget.workspace.root),
-                            "action": "export_training_data",
-                            "collection_id": collection["collection_id"],
-                            "task": "iq", "samples": 128}, timeout=120)
-    config = page.configuration()
-    config.update(task="iq", source="existing", data=exported["path"], arch="cnn",
-                  epochs=1, batch=4)
-    page.start(config)
-    assert page.process is not None
-    wait_process(app, page, timeout=60)
-    assert page.record["status"] == "success", page.log.toPlainText()[-4000:]
-    assert page.record["metrics"][0]["epoch"] == 1
-    assert (page.directory / "verification.json").is_file()
+    recipe = make_recipe(count=6, signals={
+        "count": {"fixed": 1}, "mode": {"balanced": ["qpsk", "fm"]},
+        "bandwidth_ratio": {"fixed": 0.06}, "snr_db": {"uniform": [10, 30]},
+        "power_dbfs": {"fixed": -8.0}},
+        record={"sample_rate_hz": {"fixed": 200000.0}, "duration_s": {"fixed": 0.05}})
+    train = generate(widget.workspace, recipe, collection_name="训练集")
+    val = generate(widget.workspace, recipe, collection_name="验证集")
+    widget.refresh_collections()
+    widget.collection_combo.setCurrentIndex(
+        widget.collection_combo.findData(train["collection_id"]))
+    app.processEvents()
+
+    page.arch.setCurrentText("cnn")
+    page.epochs.setValue(1)
+    page.batch.setValue(4)
+    page.val_collection.setCurrentIndex(
+        page.val_collection.findData(val["collection_id"]))
+    assert page.train_collection.currentData() == train["collection_id"]
+    page.start_training()
+    assert page.runner.active, page.status.text()
+    wait_process(app, page, timeout=120)
+    assert page.runner.record["status"] == "success", page.log.toPlainText()[-4000:]
+    assert page.runner.record["metrics"][0]["epoch"] == 1
+    # 本次运行的输入快照与集合溯源记录
+    directory = page.runner.directory
+    assert (directory / "collection_data" / "iq_dataset.json").is_file()
+    inputs = json.loads((directory / "training_inputs.json").read_text(encoding="utf-8"))
+    assert inputs["train_collection"]["collection_id"] == train["collection_id"]
+    assert inputs["val_collection"]["collection_id"] == val["collection_id"]
+    assert (directory / "verification.json").is_file()
     assert page.load_button.isEnabled()
     page.load_model()
     assert widget.tabs.currentIndex() == widget._page_index("调制识别")
@@ -183,26 +178,29 @@ def test_gui_external_iq_training_export_verify_and_load(window):
 @pytest.mark.gui
 def test_failed_start_and_cancel_are_persisted(window, tmp_path):
     app, widget = window
-    page = widget.training_page
+    page = widget.detection_training_page
     repo = tmp_path / "repo"
     (repo / "training").mkdir(parents=True)
     worker = repo / "training/desktop_worker.py"
     worker.write_text("raise RuntimeError('intentional failure')\n")
-    config = page.configuration()
-    config.update(task="asset", repository=str(repo), python=sys.executable)
-    page.start(config)
+    config = training_config(page, repo)
+    page.runner.start(config, owner=page.OWNER, task_kind="training",
+                      validate_config=lambda _config: None)
     wait_process(app, page)
-    assert page.record["status"] == "failed"
+    assert page.runner.record is not None, page.status.text()
+    assert page.runner.record["status"] == "failed", page.status.text()
     assert "intentional failure" in page.log.toPlainText()
-    worker.write_text("import time, os\nif os.name == 'posix': os.setsid()\nprint('ready', flush=True)\ntime.sleep(60)\n")
-    page.start(config)
+    worker.write_text("import time\nprint('ready', flush=True)\ntime.sleep(60)\n")
+    page.runner.start(config, owner=page.OWNER, task_kind="training",
+                      validate_config=lambda _config: None)
     deadline = time.monotonic() + 5
     while "ready" not in page.log.toPlainText() and time.monotonic() < deadline:
         app.processEvents()
         time.sleep(.01)
-    page.stop()
+    page.runner.stop()
     wait_process(app, page)
-    assert json.loads((page.directory / "experiment.json").read_text(encoding="utf-8"))["status"] == "stopped"
+    assert json.loads((page.runner.directory / "experiment.json").read_text(
+        encoding="utf-8"))["status"] == "stopped"
 
 
 @pytest.mark.gui
@@ -213,17 +211,18 @@ def test_worker_output_is_decoded_as_utf8(window, tmp_path):
     解码会让中文日志全部变成乱码（训练正常、日志不可读）。
     """
     app, widget = window
-    page = widget.training_page
+    page = widget.detection_training_page
     repo = tmp_path / "repo"
     (repo / "training").mkdir(parents=True)
     (repo / "training/desktop_worker.py").write_text(
         "print('阶段：模型契约验收')\nprint('清单：detector@0.1.0 运行时 1.30.0')\n",
         encoding="utf-8")
-    config = page.configuration()
-    config.update(task="asset", repository=str(repo), python=sys.executable)
-    page.start(config)
+    config = training_config(page, repo)
+    page.runner.start(config, owner=page.OWNER, task_kind="training",
+                      validate_config=lambda _config: None)
     wait_process(app, page)
     text = page.log.toPlainText()
+    assert text, page.status.text()
     assert "阶段：模型契约验收" in text
     assert "清单：detector@0.1.0" in text
     assert "\ufffd" not in text
@@ -232,7 +231,7 @@ def test_worker_output_is_decoded_as_utf8(window, tmp_path):
 def test_worker_log_decoder_handles_legacy_gbk():
     pytest.importorskip("PySide6")
     pytest.importorskip("pyqtgraph")
-    from signal_analysis.ui.pages.training_page import decode_worker_log
+    from signal_analysis.services.training_jobs import decode_worker_log
 
     text = "清单：中文输出"
     assert decode_worker_log(text.encode("utf-8")) == text

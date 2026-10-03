@@ -30,7 +30,7 @@
 > 会话级模型清单不能被逐跳通路使用，反之亦然——清单里的 `training.label_semantics`
 > 就是这个门禁（§7.4）。
 
-共享数值实现：STFT、噪声底、掩膜与占用区间在 `algorithms/dsp/base.py`；会话合并在 `algorithms/detection/energy.py`；逐跳配置与 `_finalise_hops`、`_refine_hop_bands`、`_group_hop_sessions` 在 `algorithms/detection/hops.py`。AI 模块直接导入这些实现，网络定位后的物理量口径保持一致。详细模块依赖见[数值算法模块拆分与回归说明](../数值算法模块拆分与回归说明.md)。
+共享数值实现：STFT、噪声底、掩膜与占用区间在 `algorithms/dsp/base.py`；会话合并在 `algorithms/detection/energy.py`；逐跳配置与 `_finalise_hops`、`_refine_hop_bands`、`_group_hop_sessions` 在 `algorithms/detection/hops.py`。AI 模块直接导入这些实现，网络定位后的物理量口径保持一致。详细模块依赖与数值基线复核见[基础工程实现与文件说明](../基础工程实现与文件说明.md)的「数值模块与算法边界」。
 
 ---
 

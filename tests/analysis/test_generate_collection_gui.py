@@ -100,23 +100,28 @@ def test_append_to_existing_collection_and_missing_name(tmp_path):
 
 
 @pytest.mark.gui
-def test_training_page_uses_collections_and_never_generates(tmp_path):
-    """训练页只保留“使用所选集合 / 已有数据集”；导出为后台任务。"""
+def test_training_pages_use_collections_without_generation_or_exports(tmp_path):
+    """两个训练页只用集合：没有生成入口、没有导出入口、没有数据集来源下拉。"""
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = MainWindow(tmp_path)
     window.show()
     try:
-        page = window.training_page
+        page = window.detection_training_page
+        amc_page = window.amc_training_page
         texts = [button.text() for button in page.findChildren(QtWidgets.QPushButton)]
         assert not any("准备检测数据" in text for text in texts)
-        assert page.source.count() == 2
-        assert [page.source.itemData(i) for i in range(2)] == ["collection", "existing"]
-        config = page.configuration()
-        assert set(config) == {"repository", "python", "task", "arch", "data", "source",
-                               "collection_id", "weights", "framework_path",
-                               "framework_config", "device", "epochs", "batch", "lr",
-                               "seed"}
-        # 先生成一个集合，再从训练页导出检测数据
+        assert not any("导出训练数据" in text for text in texts)
+        assert page.configuration()["task"] == "detection"
+        assert amc_page.configuration()["task"] == "iq"
+        for training_page in (page, amc_page):
+            for field in ("data", "source", "collection", "export_button"):
+                assert not hasattr(training_page, field), field
+        assert set(page.configuration()) == {
+            "repository", "python", "task", "arch", "workspace", "train_collection_id",
+            "val_collection_id", "weights", "framework_path", "framework_config",
+            "device", "epochs", "batch", "lr", "seed", "image_size", "nfft"}
+        assert amc_page.sections.tabText(0) == "信号标注"
+
         workspace = window.workspace
         result = run_job({"workspace": str(workspace.root), "action": "generate_collection",
                           "collection_name": "训练用集合",
@@ -132,25 +137,15 @@ def test_training_page_uses_collections_and_never_generates(tmp_path):
                                      "labels": {"detection": "session_v1", "amc": True}}},
                        timeout=120)
         window.refresh_collections()
-        index = page.collection.findData(result["collection_id"])
+        index = window.collection_combo.findData(result["collection_id"])
         assert index >= 0
-        page.collection.setCurrentIndex(index)
-        page.task.setCurrentIndex(0)  # 检测
-        page.export_selected_collection()
-        wait_job(app, window)
-        exported = Path(page.data.text())
-        assert exported.is_dir() and (exported / "dataset.json").is_file()
-        assert "检测数据集" in page.status.text()
-        # 导出的数据集是训练脚本认识的那一种
-        from detectors.dataset import load_dataset
-
-        card, records = load_dataset(exported)
-        assert card["contract"]["label_semantics"] == "session_v1" and len(records) == 6
-        # IQ 任务：默认要求先导出再训练
-        page.task.setCurrentIndex(1)  # IQ
-        page.data.setText("")
-        page.start_training()
-        assert "请先点“导出训练数据" in page.status.text()
+        window.collection_combo.setCurrentIndex(index)
+        # 训练集默认跟随侧栏集合；两页共用同一集合（验证集需另外指定）
+        assert page.train_collection.currentData() == result["collection_id"]
+        assert amc_page.train_collection.currentData() == result["collection_id"]
+        # 训练输入直接来自集合：不产生导出目录，也不登记数据版本
+        assert not (workspace.root / "training" / "datasets").exists()
+        assert workspace.list_dataset_versions() == []
     finally:
         window.close()
         app.processEvents()

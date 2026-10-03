@@ -24,6 +24,7 @@ from .pages.hops_page import HopsPageMixin
 from .pages.amc_page import AmcPageMixin
 from .pages.history_page import HistoryPageMixin
 from .pages.data_page import DataPageMixin
+from .training_coordinator import TrainingCoordinator
 from .constants import (IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
                         IMPORT_COL_FILE, IMPORT_COL_FORMAT, IMPORT_COL_MOD,
                         IMPORT_COL_NAME, IMPORT_COL_POINTS, IMPORT_COL_RATE,
@@ -47,9 +48,14 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
         self.asset_limit = 100
         self.asset_page = 0
         self.adopt_run_ids = {}
+        #: 侧栏集合范围上次成功应用的值；标注保存失败时回滚到它（第 11 节）。
+        self._applied_collection_scope = None
+        self._restoring_scope = False
         super().__init__(Workspace(workspace), "电磁信号分析 · SignalAnalysis",
                          "离线数据 · 通用统计与时频展示 · IQ 信号生成 · 信号检测与调制识别 · "
                          "算法对比与离线报告 · 原生插件")
+        self.training_coordinator = TrainingCoordinator(self)
+        self.training_pages_by_owner = {}
         # 页面注册表：顺序即界面顺序，也是全项目唯一决定标签下标的地方。
         # 其余代码一律用 _page_index("页面名") 取下标、用页面名作 tab_results 的键，
         # 这样调整页序不会出现“静默跳到错误页面”或“读到别的页面的结果”。
@@ -60,7 +66,8 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             "信号检测": self.build_detect,
             "调制识别": self.build_amc,
             "跳频参数": self.build_hops,
-            "模型训练": self.build_training,
+            "信号检测训练": self.build_detection_training,
+            "AMC 识别训练": self.build_amc_training,
             "数据管理": self.build_data_management,
             "算法对比": self.build_compare,
             "运行记录": self.build_history,
@@ -68,6 +75,7 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
         self.page_index = {title: index for index, title in enumerate(pages)}
         for title, builder in pages.items():
             self.tabs.addTab(builder(), title)
+        self.training_pages = tuple(self.training_pages_by_owner.values())
         self.last_result = None
         self._play_data = None
         self._play_rate = 1.0
@@ -82,20 +90,36 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
         self.play_timer = QtCore.QTimer(self)
         self.play_timer.setInterval(33)
         self.play_timer.timeout.connect(self._on_playback_tick)
+        self.tasks.started.connect(self._refresh_task_controls)
         self.tasks.finished.connect(self._refresh_task_controls)
         self.refresh_history()
         self.refresh_collections()
         self.refresh_assets()
+        self._update_training_tab_access()
 
-    def build_training(self):
-        from .pages.training_page import TrainingPage
-        self.training_page = TrainingPage(self)
-        return self.training_page
+    def build_detection_training(self):
+        from .pages.detection_training_page import DetectionTrainingPage
+        self.detection_training_page = DetectionTrainingPage(
+            self, self.training_coordinator)
+        self.training_pages_by_owner[self.detection_training_page.OWNER] = (
+            self.detection_training_page)
+        return self.detection_training_page
+
+    def build_amc_training(self):
+        from .pages.amc_training_page import AmcTrainingPage
+        self.amc_training_page = AmcTrainingPage(self, self.training_coordinator)
+        self.training_pages_by_owner[self.amc_training_page.OWNER] = self.amc_training_page
+        return self.amc_training_page
 
     def closeEvent(self, event):
-        if not self.training_page.shutdown():
-            event.ignore()
-            return
+        for page in getattr(self, "training_pages", ()):
+            if not page.prepare_shutdown():
+                event.ignore()
+                return
+        for page in getattr(self, "training_pages", ()):
+            if not page.runner.shutdown():
+                event.ignore()
+                return
         super().closeEvent(event)
 
     def _page_index(self, title):
@@ -114,6 +138,9 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
     def owner_buttons(self, owner):
         """按页面返回任务期间要禁用的按钮；未登记的 owner 回退为整窗按钮集合。"""
         adopt = self._adopt_buttons()
+        training_page = self.training_pages_by_owner.get(owner)
+        if training_page is not None:
+            return training_page.task_buttons()
         mapping = {
             "信号导入": (self.import_add_files_button, self.import_add_folder_button,
                         self.import_remove_button, self.import_recheck_button,
@@ -128,12 +155,19 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             "调制识别": (self.amc_button, adopt["调制识别"]),
             "数据管理": (self.storage_scan_button, self.storage_preview_button,
                         self.storage_cleanup_button, self.migrate_button),
-            "模型训练": (self.training_page.export_button,),
         }
         return mapping.get(owner, tuple(self.job_buttons()))
 
     def task_finished_text(self, task):
         """任务结束文案：有结果的任务复用 result_status 的统计文案。"""
+        if task.owner in self.training_pages_by_owner:
+            if task.state == "cancelled":
+                return f"{task.label} · 已取消"
+            if task.state == "failed":
+                return f"{task.label} · 失败：{task.error or ''}"
+            if task.result is not None:
+                return self.result_status(task.result)
+            return f"{task.label} · 已完成"
         if task.result is not None:
             try:
                 return self.result_status(task.result)
@@ -148,6 +182,8 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
                 button.setEnabled(page in self.adopt_run_ids)
         if hasattr(self, "import_start_button"):
             self._update_import_controls()
+        for page in getattr(self, "training_pages", ()):
+            page.refresh_controls()
 
     def _adopt_buttons(self):
         return {"信号检测": getattr(self, "adopt_detect_button", None),
@@ -188,9 +224,6 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             if result.get("ok"):
                 return "TorchSig 环境可用：" + str(result.get("version"))
             return f"TorchSig 环境不可用：{result.get('message')}"
-        if kind == "training_export":
-            name = {"detection": "检测", "iq": "AMC"}.get(result.get("task"))
-            return f"{name}训练数据导出完成：{result.get('samples', 0)} 个样本"
         if kind == "import_inspect":
             if result.get("cancelled"):
                 return (f"识别已取消：已完成 {len(result.get('files', []))}"
@@ -238,8 +271,6 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             self._collections_changed()
         elif result.get("kind") == "torchsig_probe":
             self.gen_panel.show_probe(result)
-        elif result.get("kind") == "training_export":
-            self.training_page.export_finished(result)
         elif result.get("kind") == "adopt_result":
             # 目标参考参数与标签已变：刷新侧栏只读详情与集合面板进度
             self.asset_changed()
@@ -281,13 +312,22 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
         self.collection_combo.setToolTip("按集合筛选资产；零散资产指不在任何未归档集合中的资产")
         self.collection_combo.addItem("全部资产", None)
         self.collection_combo.addItem("零散资产", "__scattered__")
-        self.collection_combo.currentIndexChanged.connect(self.refresh_assets)
+        self.collection_combo.currentIndexChanged.connect(self._sidebar_collection_changed)
         layout.addWidget(self.collection_combo)
         layout.addWidget(QtWidgets.QLabel("数据资产"))
         self.search = QtWidgets.QLineEdit()
         self.search.setPlaceholderText("按信号名称查找")
         self.search.textChanged.connect(self.refresh_assets)
         layout.addWidget(self.search)
+        self.label_filter = QtWidgets.QComboBox()
+        self.label_filter.setToolTip(
+            "按标注状态过滤：只保留仍有目标缺少该任务标签的资产；\n"
+            "没有目标的资产（纯噪声负样本、已确认无信号）不在此列")
+        self.label_filter.addItem("全部", None)
+        self.label_filter.addItem("未标注检测信息", "detection")
+        self.label_filter.addItem("未标注AMC信息", "amc")
+        self.label_filter.currentIndexChanged.connect(self.refresh_assets)
+        layout.addWidget(self.label_filter)
         self.assets = QtWidgets.QListWidget()
         self.assets.currentItemChanged.connect(self.asset_changed)
         layout.addWidget(self.assets, 1)
@@ -358,9 +398,11 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             self._import_collection_changed()
         if hasattr(self, "gen_panel"):
             self.gen_panel.refresh_collections()
-        if hasattr(self, "training_page"):
-            self.training_page.refresh_collections()
+        for page in getattr(self, "training_pages", ()):
+            page.refresh_collections()
         self.update_gen_collection_scope()
+        self._update_training_tab_access()
+        self._applied_collection_scope = self.collection_combo.currentData()
 
     def _asset_scope(self):
         data = self.collection_combo.currentData()
@@ -370,6 +412,78 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             return {"collection_id": data}
         return {}
 
+    #: 训练页注册名；只在侧栏选中具体集合时可用（见第 10.2 节）。
+    TRAINING_TAB_TITLES = ("信号检测训练", "AMC 识别训练")
+
+    def current_collection_id(self):
+        """侧栏当前选中的集合 ID；「全部资产」「零散资产」或未初始化时返回 ``None``。"""
+        if not hasattr(self, "collection_combo"):
+            return None
+        data = self.collection_combo.currentData()
+        return data if isinstance(data, str) and data != "__scattered__" else None
+
+    def select_asset(self, asset_id):
+        """按资产 ID 选中左侧列表项（用于保存失败时回滚选择）；不在列表中返回 False。"""
+        for row in range(self.assets.count()):
+            asset = self.assets.item(row).data(QtCore.Qt.ItemDataRole.UserRole)
+            if asset and asset["id"] == asset_id:
+                self.assets.setCurrentItem(self.assets.item(row))
+                return True
+        return False
+
+    def _sidebar_collection_changed(self, *_):
+        """侧栏集合范围变化：先保存训练页的标注，保存失败则回滚选择（第 11 节）。
+
+        名字必须避开页面 mixin 的 ``_collection_selected``（数据管理页的信号集合子页用它）。
+        """
+        if self._restoring_scope:
+            return
+        if not self._flush_annotation_edits():
+            self._restore_collection_scope()
+            return
+        self._applied_collection_scope = self.collection_combo.currentData()
+        self.refresh_assets()
+        self._collection_scope_changed()
+
+    def _flush_annotation_edits(self):
+        """保存两个训练页里未保存的标注；任一保存失败返回 False。"""
+        for page in getattr(self, "training_pages", ()):
+            if not page.save_if_dirty():
+                return False
+        return True
+
+    def _restore_collection_scope(self):
+        """把侧栏集合恢复到上次成功应用的值（标注保存失败时保持上下文不变）。"""
+        index = self.collection_combo.findData(self._applied_collection_scope)
+        self._restoring_scope = True
+        try:
+            self.collection_combo.setCurrentIndex(max(0, index))
+            self.refresh_assets()
+        finally:
+            self._restoring_scope = False
+
+    def _collection_scope_changed(self, *_):
+        """侧栏集合范围变化：刷新训练页可用性并把「训练集」同步到当前集合。"""
+        collection_id = self.current_collection_id()
+        for page in getattr(self, "training_pages", ()):
+            page.sync_train_collection(collection_id)
+        self._update_training_tab_access()
+
+    def _update_training_tab_access(self):
+        """训练页需要具体集合：全部资产/零散资产时置灰，并跳回“信号导入”。"""
+        index_map = getattr(self, "page_index", None)
+        if not index_map or not hasattr(self, "tabs"):
+            return
+        enabled = self.current_collection_id() is not None
+        guarded = [index_map[title] for title in self.TRAINING_TAB_TITLES
+                   if title in index_map]
+        current = self.tabs.currentIndex()
+        # 先离开训练页再置灰：Qt 会把禁用标签页上的当前页挪到相邻页，而不是我们要求的首页
+        if not enabled and current in guarded:
+            self.tabs.setCurrentIndex(self._page_index("信号导入"))
+        for index in guarded:
+            self.tabs.setTabEnabled(index, enabled)
+
     def change_asset_page(self, delta, reset=False):
         """翻页或重置到第一页；页码越界时由 refresh_assets 夹取。"""
         self.asset_page = 0 if reset else max(0, self.asset_page + delta)
@@ -378,22 +492,29 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
     def refresh_assets(self, *_):
         selected = self.selected_asset()
         scope = self._asset_scope()
+        missing_labels = self.label_filter.currentData()
         self.update_gen_collection_scope()
-        total = self.workspace.count_assets(self.search.text(), **scope)
+        total = self.workspace.count_assets(self.search.text(), **scope,
+                                           missing_labels=missing_labels)
         self.asset_limit = int(self.page_size.currentText())
         pages = max(1, -(-total // self.asset_limit))
         self.asset_page = min(self.asset_page, pages - 1)
         self.assets.clear()
         for asset in self.workspace.list_assets(self.search.text(), self.asset_limit,
                                                 self.asset_page * self.asset_limit,
-                                                **scope):
+                                                **scope, missing_labels=missing_labels):
             item = QtWidgets.QListWidgetItem(asset["name"])
             item.setData(QtCore.Qt.ItemDataRole.UserRole, asset)
             self.assets.addItem(item)
             if selected and selected["id"] == asset["id"]:
                 self.assets.setCurrentItem(item)
         self.page_label.setText(f"第 {self.asset_page + 1}/{pages} 页")
-        self.asset_total.setText(f"共 {total} 条")
+        self.asset_total.setText(f"共 {total} 条" + (
+            f" · 已过滤「{self.label_filter.currentText()}」"
+            if missing_labels is not None else ""))
+        if not total and missing_labels is not None:
+            self.asset_info.setText("当前过滤下没有资产：这些资产的目标都已有该任务标签，"
+                                    "或资产没有目标（负样本/无信号）")
         self.prev_page.setEnabled(self.asset_page > 0)
         self.next_page.setEnabled(self.asset_page + 1 < pages)
         if self.assets.currentItem() is None and self.assets.count():
@@ -499,7 +620,7 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
                 button.setEnabled(False)
 
     def display_result(self, result):
-        """按结果类型写回对应页面并切过去；页面名与下标一律经由页面注册表解析。"""
+        """按结果类型写回对应页面（不切换当前标签页）；页面名与下标一律经由页面注册表解析。"""
         self.last_result = result
         if result["kind"] == "analysis":
             self.tab_results["态势显示"] = result

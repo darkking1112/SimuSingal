@@ -4,7 +4,7 @@
 :mod:`.truth`（真值附加）、:mod:`.detection` / :mod:`.amc`（检测与识别编排）、
 :mod:`.generation`（生成与分析）、:mod:`.datasets`（数据集与标注）、
 :mod:`.management`（维护与迁移）；执行器 :mod:`.collection_gen` /
-:mod:`.training_export` / :mod:`.training_jobs` 也收在本包内。
+:mod:`.training_inputs` / :mod:`.training_snapshot` / :mod:`.training_jobs` 也收在本包内。
 
 ``execute`` 是唯一入口（``tasks.run_job`` 调用）；旧模块级的导入辅助名
 （``_attach_hop_truth``、``_normalized_target_rows`` 等）继续可导入，供测试与
@@ -72,8 +72,6 @@ def execute(request):
         return generation.torchsig_import(workspace, request)
     if action == "torchsig_probe":
         return generation.torchsig_probe(workspace, request)
-    if action == "export_training_data":
-        return datasets.export_training_data(workspace, request)
     if action == "migrate_legacy":
         return management.migrate_legacy(workspace, request)
     raise ValueError(f"不支持的任务类型：{action}")

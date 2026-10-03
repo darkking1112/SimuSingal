@@ -58,6 +58,12 @@ class DataPageMixin:
                 table.setItem(row, column, QtWidgets.QTableWidgetItem(str(text)))
         table.resizeColumnsToContents()
 
+    def _set_tab_text(self, widget, title):
+        """按控件定位页签下标，避免页签顺序变动后写错页签标题。"""
+        index = self.storage_tables.indexOf(widget)
+        if index >= 0:
+            self.storage_tables.setTabText(index, title)
+
     @staticmethod
     def _count_text(shown, truncated):
         return f"{shown:,}+" if truncated else f"{shown:,}"
@@ -488,7 +494,7 @@ class DataPageMixin:
                        [(kind, path, format_bytes(size), reason)
                         for kind, path, size, reason in issues]
                        or [("无", "--", "0 B", "索引与磁盘一致")])
-        self.storage_tables.setTabText(4, f"一致性（{len(issues)}）")
+        self._set_tab_text(self.storage_issue_table, f"一致性（{len(issues)}）")
 
     def _fill_cleanup_table(self, report):
         targets = report["cleanup"]["targets"]
@@ -518,7 +524,7 @@ class DataPageMixin:
         else:
             hint += " · 勾选后点“执行清理”"
         self.storage_cleanup_hint.setText(hint)
-        self.storage_tables.setTabText(5, f"可清理项（{len(targets)}）")
+        self._set_tab_text(self.storage_cleanup_table, f"可清理项（{len(targets)}）")
         self._sync_cleanup_button()
 
     def _render_data_management(self, report):

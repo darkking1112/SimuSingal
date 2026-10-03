@@ -1,4 +1,4 @@
-"""数据集与标注生命周期服务：构建/校验/初始标注/采纳运行结果/训练数据导出。"""
+"""数据集与标注生命周期服务：构建/校验/初始标注/采纳运行结果。"""
 
 
 def dataset_build(workspace, request):
@@ -33,9 +33,3 @@ def adopt_result(workspace, request):
     from ..data.adoption import adopt_run_result
 
     return adopt_run_result(workspace, request["run_id"])
-
-
-def export_training_data(workspace, request):
-    from .training_export import export_training_data as run_export_training_data
-
-    return run_export_training_data(workspace, request)

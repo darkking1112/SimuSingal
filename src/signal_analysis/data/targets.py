@@ -5,12 +5,38 @@
 组合使用。
 """
 
+import json
 import uuid
 
 from common.storage import utc_now
 from ..storage.schema import SCOPES, TASKS, VERSION_SOURCES, _MODULATION_NAMES
 from ..storage.utils import (_clean_text, _enum, _integer, _json_safe, _json_text,
                              _number, _optional_text, _target_sort_key)
+
+#: 页面只编辑时间/频率时应当沿用的版本字段：不传就会被写成 NULL（新版本是完整快照）。
+CARRYOVER_FIELDS = ("signal_type", "waveform_mode", "modulation", "nominal_center_hz",
+                    "nominal_bandwidth_hz", "symbol_rate_baud", "hop_rate_hz", "is_hopping",
+                    "snr_db", "snr_definition", "power_dbfs")
+
+
+def carryover_fields(previous, *, exclude=()):
+    """从旧参数版本取出「本次没有编辑、应沿用」的字段。
+
+    ``append_target_version`` 每次写的是完整快照，未传字段一律为 NULL，因此调用方
+    必须显式带上要保留的旧值。``exclude`` 用于排除本次由表单编辑的字段；
+    ``params_json`` 在库里是 JSON 文本，这里解码回对象以免二次转义。
+    """
+    if not previous:
+        return {}
+    fields = {name: previous[name] for name in CARRYOVER_FIELDS
+              if name not in exclude and previous.get(name) is not None}
+    text = previous.get("params_json")
+    if text is not None and "params_json" not in exclude:
+        try:
+            fields["params_json"] = json.loads(text)
+        except (TypeError, ValueError):
+            pass
+    return fields
 
 
 class TargetMixin:
@@ -179,6 +205,26 @@ class TargetMixin:
                               waveform_mode=None, modulation=None, symbol_rate_baud=None,
                               hop_rate_hz=None, is_hopping=None, snr_db=None,
                               snr_definition=None, power_dbfs=None, params_json=None):
+        with self.connect() as conn:
+            return self._append_target_version(
+                conn, target_id, source=source, note=note, sample_start=sample_start,
+                sample_end=sample_end, f_low_hz=f_low_hz, f_high_hz=f_high_hz,
+                center_hz=center_hz, bandwidth_hz=bandwidth_hz,
+                nominal_center_hz=nominal_center_hz,
+                nominal_bandwidth_hz=nominal_bandwidth_hz, signal_type=signal_type,
+                waveform_mode=waveform_mode, modulation=modulation,
+                symbol_rate_baud=symbol_rate_baud, hop_rate_hz=hop_rate_hz,
+                is_hopping=is_hopping, snr_db=snr_db, snr_definition=snr_definition,
+                power_dbfs=power_dbfs, params_json=params_json)
+
+    def _append_target_version(self, conn, target_id, *, source, note=None, sample_start=None,
+                               sample_end=None, f_low_hz=None, f_high_hz=None,
+                               center_hz=None, bandwidth_hz=None, nominal_center_hz=None,
+                               nominal_bandwidth_hz=None, signal_type=None,
+                               waveform_mode=None, modulation=None, symbol_rate_baud=None,
+                               hop_rate_hz=None, is_hopping=None, snr_db=None,
+                               snr_definition=None, power_dbfs=None, params_json=None):
+        """校验并写一个参考参数版本行；使用调用方的连接，便于与标签写入同事务。"""
         target = self.get_target(target_id)
         asset = self.get_asset(target["asset_id"])
         source = _enum(source, VERSION_SOURCES, "来源")
@@ -211,25 +257,24 @@ class TargetMixin:
                 raise ValueError("带宽与频率边界不一致（应为边界派生值）")
         note = _optional_text(note, "备注", 500)
         nominal_bandwidth_hz = _number(nominal_bandwidth_hz, "名义带宽", minimum=0.0)
-        with self.connect() as conn:
-            row = conn.execute("SELECT MAX(version_no) FROM target_versions WHERE target_id=?",
-                               (target_id,)).fetchone()
-            previous = conn.execute(
-                "SELECT id FROM target_versions WHERE target_id=? ORDER BY version_no DESC "
-                "LIMIT 1", (target_id,)).fetchone()
-            return self._insert_target_version_row(
-                conn, target_id=target_id, source=source, note=note,
-                sample_start=start, sample_end=end, f_low_hz=low, f_high_hz=high,
-                nominal_center_hz=_number(nominal_center_hz, "名义中心频率"),
-                nominal_bandwidth_hz=nominal_bandwidth_hz, signal_type=signal_type,
-                waveform_mode=waveform_mode, modulation=modulation,
-                symbol_rate_baud=_number(symbol_rate_baud, "符号率", minimum=0.0),
-                hop_rate_hz=_number(hop_rate_hz, "跳速", minimum=0.0),
-                is_hopping=None if is_hopping is None else int(bool(is_hopping)),
-                snr_db=_number(snr_db, "SNR"), snr_definition=snr_definition,
-                power_dbfs=_number(power_dbfs, "功率"), params_json=params_json,
-                version_no=int(row[0] or 0) + 1,
-                supersedes_id=previous["id"] if previous else None)
+        row = conn.execute("SELECT MAX(version_no) FROM target_versions WHERE target_id=?",
+                           (target_id,)).fetchone()
+        previous = conn.execute(
+            "SELECT id FROM target_versions WHERE target_id=? ORDER BY version_no DESC "
+            "LIMIT 1", (target_id,)).fetchone()
+        return self._insert_target_version_row(
+            conn, target_id=target_id, source=source, note=note,
+            sample_start=start, sample_end=end, f_low_hz=low, f_high_hz=high,
+            nominal_center_hz=_number(nominal_center_hz, "名义中心频率"),
+            nominal_bandwidth_hz=nominal_bandwidth_hz, signal_type=signal_type,
+            waveform_mode=waveform_mode, modulation=modulation,
+            symbol_rate_baud=_number(symbol_rate_baud, "符号率", minimum=0.0),
+            hop_rate_hz=_number(hop_rate_hz, "跳速", minimum=0.0),
+            is_hopping=None if is_hopping is None else int(bool(is_hopping)),
+            snr_db=_number(snr_db, "SNR"), snr_definition=snr_definition,
+            power_dbfs=_number(power_dbfs, "功率"), params_json=params_json,
+            version_no=int(row[0] or 0) + 1,
+            supersedes_id=previous["id"] if previous else None)
 
     def _insert_target_version_row(self, conn, *, target_id, source, version_no=None,
                                    supersedes_id=None, note=None, sample_start=None,

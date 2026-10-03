@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""训练环境自检与补装：对应 GUI「模型训练」页所需的外部 Python 环境。
+"""训练环境自检与补装：对应 GUI 检测 / AMC 训练页所需的外部 Python 环境。
 
 用**训练环境自己的解释器**运行本脚本（就是 GUI 里「训练环境 Python」所填的那个）：
 
@@ -210,7 +210,7 @@ def print_summary(results, source_missing):
         bad = [d for d, _, g, _ in PACKAGES if g == "yolo" and results[d][0] != "ok"]
         reasons.extend(bad)
         print(f"  YOLO26s 检测训练: 缺 {', '.join(bad)}"
-              + ("（另需一个训练数据集）" if group_ready(results, "yolo") else ""))
+              + ("（另需在界面选择训练集/验证集信号集合）" if group_ready(results, "yolo") else ""))
     if group_ready(results, "common") and group_ready(results, "rtdetr"):
         print("  RT-DETR 检测训练: 依赖就绪（还需在界面选择 rtdetrv2_pytorch 目录与模型 YAML）")
     else:

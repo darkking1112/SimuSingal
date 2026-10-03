@@ -71,8 +71,6 @@ def iq_plan(config, directory):
         stages.append({"name": name, "argv": [python, "-u", str(scripts / script),
                                                *map(str, args)]})
 
-    if config["source"] != "existing":
-        raise ValueError("训练页不生成数据：请选择已有数据集，或先在“信号集合生成”里生成集合并选用“所选集合”")
     data = Path(config["data"]).expanduser().resolve()
     for name in ("iq_dataset.json", "iq_dataset.npz"):
         if not (data / name).is_file():

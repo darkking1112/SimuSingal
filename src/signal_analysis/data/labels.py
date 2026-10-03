@@ -220,7 +220,6 @@ class LabelMixin:
         task_set = self.get_task_set(task_set_id)
         if task_set["task"] != "amc":
             raise ValueError("该任务标注集不是 AMC 集")
-        class_state = _enum(class_state, CLASS_STATES, "类别状态")
         target = self.get_target(target_id)
         version = (self.get_target_version(target_version_id) if target_version_id
                    else self.current_target_version(target_id))
@@ -228,6 +227,43 @@ class LabelMixin:
             raise ValueError("目标缺少参考参数版本，无法标注")
         if version["target_id"] != target_id:
             raise ValueError("参考参数版本与目标不匹配")
+        extra = self._amc_label_extra(task_set, target, class_state, class_name,
+                                      window_start, window_end, analysis_center_hz,
+                                      analysis_bandwidth_hz)
+        return self._append_label("amc", task_set_id, target_id, source=source, note=note,
+                                  class_name=extra.pop("class_name"),
+                                  target_version_id=version["id"], extra=extra)
+
+    def append_amc_annotation(self, task_set_id, target_id, *, source, class_state,
+                              class_name=None, note=None, label_note=None,
+                              window_start=None, window_end=None, analysis_center_hz=None,
+                              analysis_bandwidth_hz=None, version_note=None,
+                              **version_fields):
+        """同一事务写目标参数版本 + AMC 标签；校验失败不留下任何写入。
+
+        「信号标注」子页同时改参数与类别：分两次写会出现「标签校验失败但参数版本已落盘」
+        的半成品（第 11 节），因此这里先校验标签字段，再在同一个连接里写版本与标签。
+        """
+        task_set = self.get_task_set(task_set_id)
+        if task_set["task"] != "amc":
+            raise ValueError("该任务标注集不是 AMC 集")
+        target = self.get_target(target_id)
+        extra = self._amc_label_extra(task_set, target, class_state, class_name,
+                                      window_start, window_end, analysis_center_hz,
+                                      analysis_bandwidth_hz)
+        with self.connect() as conn:
+            version = self._append_target_version(conn, target_id, source=source,
+                                                 note=version_note, **version_fields)
+            label = self._insert_label_row(
+                conn, "amc", task_set_id, target_id, source=source, note=label_note,
+                class_name=extra.pop("class_name"), target_version_id=version["id"],
+                extra=extra)
+        return version, label
+
+    def _amc_label_extra(self, task_set, target, class_state, class_name, window_start,
+                         window_end, analysis_center_hz, analysis_bandwidth_hz):
+        """校验并归一化 AMC 标签字段（不写库）；失败即抛，调用方不会留下写入。"""
+        class_state = _enum(class_state, CLASS_STATES, "类别状态")
         taxonomy = self.get_taxonomy(task_set["taxonomy_id"])
         classes = json.loads(taxonomy["classes_json"])
         class_name = _optional_text(class_name, "类别名称", 100)
@@ -252,17 +288,21 @@ class LabelMixin:
             asset = self.get_asset(target["asset_id"])
             if end > int(asset["sample_count"]):
                 raise ValueError("提取范围不能超出资产采样点数")
-        return self._append_label("amc", task_set_id, target_id, source=source, note=note,
-                                  class_name=class_name, target_version_id=version["id"],
-                                  extra={"class_state": class_state,
-                                         "window_start": start, "window_end": end,
-                                         "analysis_center_hz": _number(
-                                             analysis_center_hz, "分析中心频率"),
-                                         "analysis_bandwidth_hz": _number(
-                                             analysis_bandwidth_hz, "分析带宽", minimum=0.0)})
+        return {"class_name": class_name, "class_state": class_state,
+                "window_start": start, "window_end": end,
+                "analysis_center_hz": _number(analysis_center_hz, "分析中心频率"),
+                "analysis_bandwidth_hz": _number(analysis_bandwidth_hz, "分析带宽",
+                                                 minimum=0.0)}
 
     def _append_label(self, task, task_set_id, target_id, *, source, note, class_name,
                       target_version_id, extra):
+        with self.connect() as conn:
+            return self._insert_label_row(conn, task, task_set_id, target_id,
+                                          source=source, note=note, class_name=class_name,
+                                          target_version_id=target_version_id, extra=extra)
+
+    def _insert_label_row(self, conn, task, task_set_id, target_id, *, source, note,
+                          class_name, target_version_id, extra):
         source = _enum(source, VERSION_SOURCES, "来源")
         note = _optional_text(note, "备注", 500)
         table = LABEL_TABLES[task]
@@ -273,23 +313,23 @@ class LabelMixin:
                            "analysis_bandwidth_hz", "note")}[task]
         values = {"target_version_id": target_version_id, "class_name": class_name,
                   "note": note, **extra}
-        with self.connect() as conn:
-            row = conn.execute(f"SELECT MAX(revision_no) FROM {table} WHERE "
-                               "task_set_id=? AND target_id=?",
-                               (task_set_id, target_id)).fetchone()
-            previous = conn.execute(f"SELECT id FROM {table} WHERE task_set_id=? AND "
-                                    "target_id=? ORDER BY revision_no DESC LIMIT 1",
-                                    (task_set_id, target_id)).fetchone()
-            label_id = uuid.uuid4().hex
-            placeholders = ",".join("?" for _ in range(7 + len(columns)))
-            conn.execute(
-                f"INSERT INTO {table} (id, task_set_id, target_id, revision_no, "
-                f"supersedes_id, source, created_at, {', '.join(columns)}) "
-                f"VALUES ({placeholders})",
-                (label_id, task_set_id, target_id, int(row[0] or 0) + 1,
-                 previous["id"] if previous else None, source, utc_now(),
-                 *[values.get(column) for column in columns]))
-        return self.get_label(task, label_id)
+        row = conn.execute(f"SELECT MAX(revision_no) FROM {table} WHERE "
+                           "task_set_id=? AND target_id=?",
+                           (task_set_id, target_id)).fetchone()
+        previous = conn.execute(f"SELECT id FROM {table} WHERE task_set_id=? AND "
+                                "target_id=? ORDER BY revision_no DESC LIMIT 1",
+                                (task_set_id, target_id)).fetchone()
+        label_id = uuid.uuid4().hex
+        placeholders = ",".join("?" for _ in range(7 + len(columns)))
+        conn.execute(
+            f"INSERT INTO {table} (id, task_set_id, target_id, revision_no, "
+            f"supersedes_id, source, created_at, {', '.join(columns)}) "
+            f"VALUES ({placeholders})",
+            (label_id, task_set_id, target_id, int(row[0] or 0) + 1,
+             previous["id"] if previous else None, source, utc_now(),
+             *[values.get(column) for column in columns]))
+        inserted = conn.execute(f"SELECT * FROM {table} WHERE id=?", (label_id,)).fetchone()
+        return dict(inserted)
 
     def get_label(self, task, label_id):
         task = _enum(task, TASKS, "任务")

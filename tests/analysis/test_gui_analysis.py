@@ -64,7 +64,7 @@ def test_analysis_gui_workflow(tmp_path, monkeypatch):
     window = MainWindow(tmp_path)
     window.show()
     try:
-        assert window.tabs.count() == 10
+        assert window.tabs.count() == 11
         assert not hasattr(window, "sim_button")
         # 演示入口属于“IQ 信号生成”页，不在态势显示页（与侧栅同一父级）。
         generator = window._page_index("IQ 信号生成")
@@ -200,7 +200,7 @@ def test_iq_generation_gui_workflow(tmp_path):
     window = MainWindow(tmp_path)
     window.show()
     try:
-        assert window.tabs.count() == 10
+        assert window.tabs.count() == 11
         window.tabs.setCurrentIndex(window._page_index("IQ 信号生成"))
         assert window.gen_signals.rowCount() == 0
         window.add_iq_signal({"mode": "qpsk", "offset": 100_000.0, "power_dbfs": -10.0,
@@ -755,6 +755,10 @@ def test_data_management_tab_scan_and_cleanup_gating(tmp_path):
         assert window.storage_asset_table.item(0, 0).text() == "（无）"
         assert window.storage_issue_table.item(0, 0).text() == "无"
         assert "没有可清理项" in window.storage_cleanup_hint.text()
+        # 页签计数必须写在自己的页签上（历史上按固定下标写会错位到相邻页签）
+        assert window.storage_tables.tabText(3) == "一致性（0）"
+        assert window.storage_tables.tabText(4) == "可清理项（0）"
+        assert window.storage_tables.tabText(5) == "信号集合"
         # 普通扫描不解锁删除，必须先“预览清理”
         assert not window.storage_cleanup_button.isEnabled()
         window.storage_retention.setValue(0)
@@ -763,6 +767,8 @@ def test_data_management_tab_scan_and_cleanup_gating(tmp_path):
         wait_job(app, window)
         assert window.storage_cleanup_table.rowCount() >= 1
         assert "运行中" in window.storage_cleanup_hint.text()
+        assert window.storage_tables.tabText(4).startswith("可清理项（")
+        assert window.storage_tables.tabText(5) == "信号集合"
         # 预览后仍需勾选才能删除
         assert not window.storage_cleanup_button.isEnabled()
         window.storage_cleanup_table.item(0, 0).setCheckState(QtCore.Qt.CheckState.Checked)

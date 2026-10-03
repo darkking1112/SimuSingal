@@ -184,3 +184,58 @@ def test_coverage_and_progress(tmp_path):
     # AMC 任务进度互不影响：跳频会话不参与 AMC，只有两个 fm 会话
     amc_progress = workspace.task_set_progress(amc["id"])
     assert amc_progress["targets"] == 2 and amc_progress["labeled"] == 0
+
+
+def test_carryover_fields_keep_unedited_values_and_decode_params():
+    from signal_analysis.data.targets import carryover_fields
+    previous = {"signal_type": "emitter", "waveform_mode": "cw", "modulation": "QPSK",
+                "nominal_center_hz": 1.0e5, "nominal_bandwidth_hz": 2.0e4,
+                "symbol_rate_baud": 1000.0, "hop_rate_hz": 300.0, "is_hopping": 1,
+                "snr_db": 12.5, "snr_definition": "inband_snr_v1", "power_dbfs": -9.0,
+                "params_json": '{"a": 1}', "sample_start": 0, "f_low_hz": 1.0}
+    carried = carryover_fields(previous)
+    assert carried["snr_db"] == 12.5 and carried["modulation"] == "QPSK"
+    assert carried["params_json"] == {"a": 1}          # 解码回对象，避免二次转义
+    assert "sample_start" not in carried and "f_low_hz" not in carried
+    assert "snr_db" not in carryover_fields(previous, exclude=("snr_db",))
+    assert carryover_fields(None) == {}
+
+
+def test_amc_annotation_writes_version_and_label_in_one_transaction(tmp_path):
+    workspace = Workspace(tmp_path / "ws")
+    collection, assets, hop, detection, amc = make_task_sets(workspace)
+    target = workspace.list_targets(assets[0]["id"])[0]
+    previous = workspace.append_target_version(target["id"], source="generator",
+                                               sample_start=0, sample_end=100,
+                                               f_low_hz=1.0e4, f_high_hz=2.0e4,
+                                               is_hopping=1, hop_rate_hz=250.0)
+    versions_before = len(workspace.list_target_versions(target["id"]))
+    revisions_before = len(workspace.label_revisions("amc", amc["id"], target["id"]))
+
+    # 类别非法：校验失败，参数版本与标签都不写入（不是「写一半」）
+    with pytest.raises(ValueError, match="字典内名称"):
+        workspace.append_amc_annotation(amc["id"], target["id"], source="manual",
+                                        class_state="known", class_name="not_in_taxonomy",
+                                        snr_db=33.0, sample_start=0, sample_end=100)
+    assert len(workspace.list_target_versions(target["id"])) == versions_before
+    assert len(workspace.label_revisions("amc", amc["id"], target["id"])) == revisions_before
+    assert workspace.current_target_version(target["id"])["snr_db"] is None
+
+    version, label = workspace.append_amc_annotation(
+        amc["id"], target["id"], source="manual", class_state="known", class_name="fm",
+        snr_db=33.0, modulation="FM", sample_start=0, sample_end=100,
+        is_hopping=previous["is_hopping"], hop_rate_hz=previous["hop_rate_hz"])
+    assert version["version_no"] == previous["version_no"] + 1
+    assert version["supersedes_id"] == previous["id"]
+    assert label["class_name"] == "fm" and label["class_state"] == "known"
+    assert label["target_version_id"] == version["id"]
+    assert len(workspace.list_target_versions(target["id"])) == versions_before + 1
+
+    # 参数版本非法（时间范围越界）：同样不留下标签
+    with pytest.raises(ValueError, match="采样点数"):
+        workspace.append_amc_annotation(amc["id"], target["id"], source="manual",
+                                        class_state="known", class_name="fm",
+                                        sample_start=0, sample_end=10 ** 9)
+    assert len(workspace.list_target_versions(target["id"])) == versions_before + 1
+    assert len(workspace.label_revisions("amc", amc["id"], target["id"])) == \
+        revisions_before + 1

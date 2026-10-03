@@ -1,7 +1,9 @@
 # training/ — AI 检测与调制识别模型的训练、导出与验收
 
-桌面「模型训练」已提供数据标注和外部训练入口，使用方法见
-[模型训练工作台](../docs/模型训练工作台.md)。`desktop_worker.py` 编排任务，
+桌面「信号检测训练」和「AMC 识别训练」已提供数据标注和外部训练入口，使用方法见
+[模型训练工作台](../docs/模型训练工作台.md)。`desktop_worker.py` 编排任务：首阶段用
+`signal_analysis.services.training_inputs` / `training_snapshot` 从训练集/验证集集合装配
+本次运行的输入快照（`collection_data/`），随后调用本目录的训练与验收脚本；
 `rtdetr_desktop.py` 调用 lyuwenyu v2，`desktop_evaluate.py` 做独立数值对账和标注框评估。
 这些入口不随 wheel 分发。工作台原生 ONNX 使用 RGB `[0,1]` 输入，适配时显式指定
 `input_scale=1`；不要套用下面通用适配器表中的历史缩放默认值。

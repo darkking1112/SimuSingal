@@ -202,9 +202,17 @@ class AssetMixin:
             raise ValueError("数据记录不存在")
         return dict(row)
 
+    #: 侧栏标签过滤器：任务 → 该任务的标签表。判定为「资产有目标但没有任何该任务标签」。
+    MISSING_LABEL_FILTERS = {"detection": "detection_labels", "amc": "amc_labels"}
+
     def _asset_clauses(self, search="", *, collection_id=None, scattered=False,
-                       include_archived=False):
-        """资产筛选条件列表（不含 WHERE 前缀）与参数。"""
+                       include_archived=False, missing_labels=None):
+        """资产筛选条件列表（不含 WHERE 前缀）与参数。
+
+        ``missing_labels`` 取 ``"detection"`` 或 ``"amc"``：只保留「有目标但没有任何该任务
+        标签」的资产（标签按任意标注集判定，与侧栏只读状态口径一致）；没有目标的资产
+        （纯噪声负样本、已确认无信号）不进入结果，其完整性由覆盖度与完成动作表达。
+        """
         clauses, params = [], []
         if not include_archived:
             clauses.append("assets.archived_at IS NULL")
@@ -219,10 +227,19 @@ class AssetMixin:
             clauses.append("NOT EXISTS (SELECT 1 FROM collection_members m JOIN collections c "
                            "ON c.id=m.collection_id WHERE m.asset_id=assets.id "
                            "AND c.archived_at IS NULL)")
+        if missing_labels is not None:
+            if missing_labels not in self.MISSING_LABEL_FILTERS:
+                raise ValueError("标签过滤只能是 detection 或 amc")
+            table = self.MISSING_LABEL_FILTERS[missing_labels]
+            clauses.append(
+                "EXISTS (SELECT 1 FROM targets t WHERE t.asset_id=assets.id) AND NOT "
+                f"EXISTS (SELECT 1 FROM {table} l JOIN targets t2 ON t2.id=l.target_id "
+                "WHERE t2.asset_id=assets.id)")
         return clauses, params
 
     def list_assets(self, search="", limit=100, offset=0, *, collection_id=None,
-                    scattered=False, include_archived=False, after=None):
+                    scattered=False, include_archived=False, after=None,
+                    missing_labels=None):
         """分页列出资产。
 
         ``collection_id`` 指定时按集合内 ``position`` 顺序；否则按
@@ -232,7 +249,8 @@ class AssetMixin:
             raise ValueError("分页参数不合法")
         clauses, params = self._asset_clauses(search, collection_id=collection_id,
                                               scattered=scattered,
-                                              include_archived=include_archived)
+                                              include_archived=include_archived,
+                                              missing_labels=missing_labels)
         if collection_id is not None:
             if after is not None:
                 raise ValueError("集合内列表不支持键集分页")
@@ -256,10 +274,11 @@ class AssetMixin:
         return [dict(row) for row in rows]
 
     def count_assets(self, search="", *, collection_id=None, scattered=False,
-                     include_archived=False):
+                     include_archived=False, missing_labels=None):
         clauses, params = self._asset_clauses(search, collection_id=collection_id,
                                               scattered=scattered,
-                                              include_archived=include_archived)
+                                              include_archived=include_archived,
+                                              missing_labels=missing_labels)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         with self.connect() as conn:
             return int(conn.execute(f"SELECT count(*) FROM assets {where}",

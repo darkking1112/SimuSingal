@@ -22,7 +22,7 @@
 > 特征本身的公式、物理含义、局限见
 > [调制识别_传统特征与启发式判定](调制识别_传统特征与启发式判定.md)。
 
-共享数值实现：34 维特征及固定顺序转换来自 `algorithms/amc/features.py`；特征网络和原始 IQ 网络共用 `algorithms/dsp/preprocess.py` 的校验、混频、低通和抽取。模型训练、加载与推理在 `algorithms/amc/feature_model.py`；数值实现随核心编译。详细模块依赖见[数值算法模块拆分与回归说明](../数值算法模块拆分与回归说明.md)。
+共享数值实现：34 维特征及固定顺序转换来自 `algorithms/amc/features.py`；特征网络和原始 IQ 网络共用 `algorithms/dsp/preprocess.py` 的校验、混频、低通和抽取。模型训练、加载与推理在 `algorithms/amc/feature_model.py`；数值实现随核心编译。详细模块依赖与数值基线复核见[基础工程实现与文件说明](../基础工程实现与文件说明.md)的「数值模块与算法边界」。
 
 ---
 
