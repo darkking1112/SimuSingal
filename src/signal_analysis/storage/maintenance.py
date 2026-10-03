@@ -2,7 +2,7 @@
 
 本模块刻意只依赖标准库：它不参与 DSP，也不引入 ``numpy``。删除操作的白名单仅限
 ``jobs/`` 的过期任务与无主（catalog 无记录）的文件，**永不触碰** ``assets/`` 中已入库
-的资产、``runs/`` 中已入库的运行目录与 ``exports/``。
+的资产与 ``runs/`` 中已入库的运行目录。
 
 统计口径（与文档 ``docs/数据管理页面.md`` 一致）：
 
@@ -31,10 +31,9 @@ MAX_FILES = 200_000
 MAX_ASSET_ROWS = 500
 MAX_RUN_ROWS = 1000
 MAX_JOB_ROWS = 500
-MAX_EXPORT_ROWS = 500
 MAX_LIST_ROWS = 200
 
-#: 允许删除的顶层子目录；``exports`` 不在其中（导出物本就不入库，无法判定归属）。
+#: 允许删除的顶层子目录。
 CLEANABLE_ROOTS = ("jobs", "assets", "runs")
 #: ``status.json`` 里代表任务已结束的状态。
 TERMINAL_STATES = ("success", "failed", "cancelled")
@@ -56,7 +55,6 @@ CATEGORY_LABELS = {
     "assets": "信号资产",
     "runs": "运行记录",
     "jobs": "任务工件",
-    "exports": "导出文件",
     "catalog": "索引数据库",
     "settings": "页面设置",
 }
@@ -181,7 +179,7 @@ def _catalog_rows(workspace):
     with workspace.connect() as conn:
         assets = [dict(row) for row in conn.execute(
             "SELECT id,name,path,sample_rate,sample_count,created_at,source,label,"
-            "storage_kind,shard_offset,shard_length,shard_id "
+            "storage_kind,storage_format,shard_offset,shard_length,shard_id "
             "FROM assets ORDER BY created_at DESC,id")]
         metadata = {row[0]: row[1] or 0 for row in conn.execute(
             "SELECT asset_id,length(metadata_json) FROM asset_metadata")}
@@ -196,15 +194,34 @@ def _assets_path_column(path):
     return str(Path(path).as_posix())
 
 
+def _sigmf_companion(relative):
+    """SigMF 资产的对文件相对路径（``.sigmf-data`` ↔ ``.sigmf-meta``）。"""
+    path = Path(relative)
+    if path.suffix.lower() == ".sigmf-data":
+        return path.with_suffix(".sigmf-meta")
+    if path.suffix.lower() == ".sigmf-meta":
+        return path.with_suffix(".sigmf-data")
+    return None
+
+
 def _asset_rows(workspace, assets, metadata):
     rows = []
     known = set()
     for asset in assets:
         relative = asset["path"]
         known.add(_assets_path_column(relative))
+        # SigMF 是一对文件：对文件同样算已入库，缺一个即视为缺失，占用按两者之和计。
+        companion = _sigmf_companion(relative) if asset.get("storage_format") == "sigmf" else None
+        if companion is not None:
+            known.add(_assets_path_column(companion))
         path = Path(workspace.root) / relative
-        exists = path.is_file()
-        size = _file_size(path) if exists else 0
+        exists = path.is_file() and (companion is None
+                                    or (Path(workspace.root) / companion).is_file())
+        size = 0
+        if exists:
+            size = _file_size(path)
+            if companion is not None:
+                size += _file_size(Path(workspace.root) / companion)
         kind = str(asset.get("storage_kind") or "file")
         if kind == "shard":
             # 分片资产：文件是共享的，单条只计自己的采样点份额（complex64 = 8 B/点）
@@ -283,22 +300,6 @@ def _job_rows(workspace, now):
             "bytes": int(size), "age_days": round(float(age), 3),
             "has_status": status_path.is_file(),
         })
-    return rows
-
-
-def _export_rows(workspace):
-    folder = Path(workspace.root) / "exports"
-    rows = []
-    for entry in sorted(_scandir(folder), key=lambda item: item.name):
-        try:
-            if not entry.is_file(follow_symlinks=False):
-                continue
-            stat = entry.stat(follow_symlinks=False)
-            rows.append({"name": entry.name, "bytes": stat.st_size,
-                         "modified": datetime.fromtimestamp(
-                             stat.st_mtime, timezone.utc).isoformat()})
-        except OSError:
-            continue
     return rows
 
 
@@ -391,7 +392,7 @@ def build_report(workspace, *, extra_dirs=None, job_retention_days=None):
     warnings = []
 
     categories = []
-    for key in ("assets", "runs", "jobs", "exports"):
+    for key in ("assets", "runs", "jobs"):
         size, count, clipped = _scan_tree(root / key)
         truncated = truncated or clipped
         categories.append({"key": key, "label": CATEGORY_LABELS[key], "bytes": size,
@@ -407,7 +408,6 @@ def build_report(workspace, *, extra_dirs=None, job_retention_days=None):
     asset_rows, asset_paths = _asset_rows(workspace, assets, metadata)
     run_rows, run_ids = _run_rows(workspace, runs)
     job_rows = _job_rows(workspace, now)
-    export_rows = _export_rows(workspace)
     orphan_state = _consistency(workspace, asset_paths, asset_rows, run_ids)
 
     orphan_runs = [{"path": f"runs/{row['id']}", "bytes": row["bytes"], "reason": "源资产已删除"}
@@ -487,8 +487,6 @@ def build_report(workspace, *, extra_dirs=None, job_retention_days=None):
             "runs_truncated": len(run_rows) > MAX_RUN_ROWS,
             "jobs": job_rows[:MAX_JOB_ROWS],
             "jobs_truncated": len(job_rows) > MAX_JOB_ROWS,
-            "exports": export_rows[:MAX_EXPORT_ROWS],
-            "exports_truncated": len(export_rows) > MAX_EXPORT_ROWS,
             "orphan_runs": orphan_runs[:MAX_LIST_ROWS],
         },
         "catalog": {"assets": len(assets), "runs": len(runs),

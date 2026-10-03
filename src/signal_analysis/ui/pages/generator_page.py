@@ -8,7 +8,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from ...core_api import MAX_SAMPLES, plan_signal, spectrum_row
-from ..constants import (EXPORT_FORMATS, IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
+from ..constants import (ASSET_FORMATS, CSV_MAX_SAMPLES, IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
                          IMPORT_COL_FILE, IMPORT_COL_FORMAT, IMPORT_COL_MOD,
                          IMPORT_COL_NAME, IMPORT_COL_POINTS, IMPORT_COL_RATE,
                          IMPORT_COL_STATUS, IMPORT_FILE_FILTER,
@@ -17,8 +17,8 @@ from ..constants import (EXPORT_FORMATS, IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
                          PLAY_MAX_ROWS_PER_TICK, PLAY_WAVE_POINTS, _SCOPE_LABELS,
                          _SOURCE_KIND_LABELS, _VERSION_SOURCE_LABELS)
 from ..dialogs import SignalParamsDialog
-from ..helpers import (_AMC_SOURCE_TEXT, _asset_exports, _asset_format, _comparison_line,
-                       _fmt_hz, _fmt_metric, _fmt_span, _iq_binary_kind, _mirrored_spectrum)
+from ..helpers import (ASSET_FORMAT_TEXT, _AMC_SOURCE_TEXT, _asset_format, _comparison_line,
+                       _fmt_hz, _fmt_metric, _fmt_span, _mirrored_spectrum)
 from ..runner import _run_task
 from ..widgets import UnitSpinBox, _freq_spin, _plain_spin, _unit_row
 from .collection_gen_page import CollectionGenPanel
@@ -44,10 +44,9 @@ class GeneratorPageMixin:
         self.register_task_banner("IQ 信号生成", self.generator_banner)
         single_layout.addWidget(self.generator_banner)
         single_layout.addWidget(self._build_global_row())
-        single_layout.addWidget(self._build_collection_row())
         single_layout.addWidget(self._build_noise_group())
         single_layout.addWidget(self._build_signal_table(), 1)
-        single_layout.addWidget(self._build_export_row())
+        single_layout.addWidget(self._build_asset_row())
         self.gen_result = QtWidgets.QLabel("尚未生成")
         self.gen_result.setWordWrap(True)
         self.gen_result.setStyleSheet(
@@ -77,46 +76,29 @@ class GeneratorPageMixin:
         for widget in (rate_label, rate_row, duration_label, duration_row,
                        self.gen_count_label, seed_label, self.gen_seed):
             row.addWidget(widget)
+        self.gen_initial_labels = QtWidgets.QCheckBox("同时生成初始标注")
+        self.gen_initial_labels.setToolTip(
+            "按目标参考参数写入初始标注（集合无标注集时自动建立默认检测/AMC 标注集）；\n"
+            "需在左侧资产列表选中一个集合，选“全部资产/零散资产”时不写标注")
+        row.addWidget(self.gen_initial_labels)
         row.addStretch()
         self.gen_rate.valueChanged.connect(self.update_gen_count)
         self.gen_duration.valueChanged.connect(self.update_gen_count)
         return group
 
 
-    def _build_collection_row(self):
-        """生成产物的目标集合（新建或追加）与初始标注开关（方案 §7.2）。"""
-        group = QtWidgets.QGroupBox("目标集合")
-        row = QtWidgets.QHBoxLayout(group)
-        self.gen_collection = QtWidgets.QComboBox()
-        self.gen_collection.setToolTip("生成后把资产加入所选集合；选“新建集合…”时填名称（同名沿用）")
-        self.gen_collection.addItem("不加入集合", None)
-        self.gen_collection.addItem("新建集合…", "__new__")
-        self.gen_collection.currentIndexChanged.connect(
-            lambda *_: self._gen_collection_changed())
-        row.addWidget(self.gen_collection, 1)
-        self.gen_collection_name = QtWidgets.QLineEdit()
-        self.gen_collection_name.setPlaceholderText("新集合名称")
-        self.gen_collection_name.setVisible(False)
-        row.addWidget(self.gen_collection_name)
-        self.gen_initial_labels = QtWidgets.QCheckBox("同时生成初始标注")
-        self.gen_initial_labels.setToolTip(
-            "按目标参考参数写入初始标注：集合无标注集时自动建立默认检测/AMC 标注集")
-        row.addWidget(self.gen_initial_labels)
-        return group
+    def _selected_collection(self):
+        """左侧资产列表选中的集合 id；“全部资产/零散资产”返回 None（产物即零散资产）。"""
+        combo = getattr(self, "collection_combo", None)
+        data = combo.currentData() if combo is not None else None
+        return data if isinstance(data, str) and data != "__scattered__" else None
 
-    def _gen_collection_changed(self):
-        self.gen_collection_name.setVisible(self.gen_collection.currentData() == "__new__")
-
-    def _gen_collection_request(self):
-        scope = self.gen_collection.currentData()
-        request = {"collection_id": scope if scope not in (None, "__new__") else None,
-                   "initial_labels": self.gen_initial_labels.isChecked()}
-        if scope == "__new__":
-            name = self.gen_collection_name.text().strip()
-            if not name:
-                raise ValueError("已选择“新建集合”，请填写集合名称")
-            request["collection_name"] = name
-        return request
+    def update_gen_collection_scope(self, *_):
+        """“同时生成初始标注”只在侧栏选中具体集合时可用（标注集挂在集合上）。"""
+        has_collection = self._selected_collection() is not None
+        self.gen_initial_labels.setEnabled(has_collection)
+        if not has_collection:
+            self.gen_initial_labels.setChecked(False)
 
     def _build_noise_group(self):
         """背景噪声底：全带白噪声，只在存在调制信号时可用，按最强调制信号的带内 SNR 定标。
@@ -177,19 +159,20 @@ class GeneratorPageMixin:
         return group
 
 
-    def _build_export_row(self):
-        group = QtWidgets.QGroupBox("资产与导出")
+    def _build_asset_row(self):
+        group = QtWidgets.QGroupBox("资产")
         row = QtWidgets.QHBoxLayout(group)
         row.addWidget(QtWidgets.QLabel("信号名称"))
         self.gen_name = QtWidgets.QLineEdit()
         self.gen_name.setPlaceholderText("留空自动命名，如：IQ 生成 · QPSK + AM")
         row.addWidget(self.gen_name, 1)
-        row.addWidget(QtWidgets.QLabel("导出格式"))
-        self.gen_export_format = QtWidgets.QComboBox()
-        for label, fmt in EXPORT_FORMATS:
-            self.gen_export_format.addItem(label, fmt)
-        self.gen_export_format.currentIndexChanged.connect(self.update_gen_controls)
-        row.addWidget(self.gen_export_format)
+        row.addWidget(QtWidgets.QLabel("资产格式"))
+        self.gen_asset_format = QtWidgets.QComboBox()
+        self.gen_asset_format.setToolTip("生成结果的落盘编码，直接决定 assets/ 下资产文件的后缀与内容")
+        for label, fmt in ASSET_FORMATS:
+            self.gen_asset_format.addItem(label, fmt)
+        self.gen_asset_format.currentIndexChanged.connect(self.update_gen_controls)
+        row.addWidget(self.gen_asset_format)
         row.addWidget(QtWidgets.QLabel("字节序"))
         self.gen_endian = QtWidgets.QComboBox()
         self.gen_endian.addItem("小端", "little")
@@ -203,6 +186,10 @@ class GeneratorPageMixin:
         return group
 
 
+    def _max_gen_samples(self):
+        """当前格式允许的采样点数：CSV 体积大、读写慢，单独收紧上限。"""
+        return CSV_MAX_SAMPLES if self.gen_asset_format.currentData() == "csv" else MAX_SAMPLES
+
     def update_gen_controls(self, *_):
         # 背景噪声底以最强调制信号为参考：没有调制信号（或只有自定义噪声行）时整组不可用。
         has_modulation = any(spec["mode"] != "noise" for spec in self.iq_signals)
@@ -210,8 +197,7 @@ class GeneratorPageMixin:
         active_noise = self.gen_noise_enabled.isChecked() and has_modulation
         self.gen_snr.setEnabled(active_noise)
         self.gen_noise_hint.setVisible(not has_modulation)
-        fmt = self.gen_export_format.currentData()
-        self.gen_endian.setEnabled(fmt in ("iq16", "iq32"))
+        self.gen_endian.setEnabled(self.gen_asset_format.currentData() in ("iq16", "iq32"))
         self._suggest_name()
         self.update_gen_count()
 
@@ -219,9 +205,10 @@ class GeneratorPageMixin:
     def update_gen_count(self, *_):
         rate = self.gen_rate.value()
         count = int(round(rate * self.gen_duration.value()))
-        valid = 1 <= count <= MAX_SAMPLES
+        limit = self._max_gen_samples()
+        valid = 1 <= count <= limit
         color = "#23374d" if valid else "#c0392b"
-        self.gen_count_label.setText(f"预计 {count:,} 个复采样（上限 {MAX_SAMPLES:,}）")
+        self.gen_count_label.setText(f"预计 {count:,} 个复采样（上限 {limit:,}）")
         self.gen_count_label.setStyleSheet(f"color:{color};")
         if self.iq_signals:
             for row in range(self.gen_signals.rowCount()):
@@ -330,29 +317,26 @@ class GeneratorPageMixin:
         rate = self.gen_rate.value()
         duration = self.gen_duration.value()
         count = int(round(rate * duration))
-        if not 1 <= count <= MAX_SAMPLES:
-            self.status.setText(f"采样点数 {count:,} 超出 1～{MAX_SAMPLES:,} 范围，请调整采样率或持续时间")
+        limit = self._max_gen_samples()
+        if not 1 <= count <= limit:
+            hint = "（CSV 资产上限更低）" if limit != MAX_SAMPLES else ""
+            self.status.setText(f"采样点数 {count:,} 超出 1～{limit:,} 范围{hint}，请调整采样率或持续时间")
             return
         noise = None
         if self.gen_noise_enabled.isChecked() and any(
                 spec["mode"] != "noise" for spec in self.iq_signals):
             # 背景噪声是全带白噪声（带宽 = 采样率），只发带内 SNR。
             noise = {"enabled": True, "snr_db": self.gen_snr.value()}
-        export = None
-        fmt = self.gen_export_format.currentData()
-        if fmt:
-            export = {"format": fmt, "endian": self.gen_endian.currentData()}
-        try:
-            collection = self._gen_collection_request()
-        except ValueError as exc:
-            self.status.setText(str(exc))
-            return
+        collection_id = self._selected_collection()
         self.start_job("generate", owner="IQ 信号生成", label="生成信号",
                        cancel_text="取消本次生成",
                        sample_rate=rate, duration=duration,
                        seed=int(self.gen_seed.value()), signals=self.iq_signals,
                        noise=noise, name=self.gen_name.text().strip() or None,
-                       export=export, **collection)
+                       collection_id=collection_id,
+                       initial_labels=bool(collection_id) and self.gen_initial_labels.isChecked(),
+                       storage_format=self.gen_asset_format.currentData(),
+                       endian=self.gen_endian.currentData())
 
 
     def show_generation_result(self, result):
@@ -383,16 +367,14 @@ class GeneratorPageMixin:
             elif noise["power_dbfs"] is not None:
                 lines.append(f"  背景噪声：带宽 {_fmt_hz(noise['bandwidth'])} · "
                              f"总功率 {noise['power_dbfs']:.1f} dBFS{psd_text}")
-        if result["export_path"]:
-            lines.append(f"导出文件：{result['export_path']}（格式 {result['export_format']}）")
-            if result.get("export_data_path"):
-                lines.append(f"IQ 数据文件：{result['export_data_path']}")
+        lines.append(f"资产文件：{result['asset_path']}"
+                     f"（格式 {ASSET_FORMAT_TEXT.get(result.get('storage_format'), result.get('storage_format'))}）")
         targets = result.get("targets") or {}
         if targets.get("sessions"):
             lines.append(f"目标参考参数：会话 {targets['sessions']} 个"
                          + (f" · 逐跳 {targets['hops']} 个" if targets.get("hops") else ""))
         if result.get("collection_id"):
             labels = result.get("initial_labels") or 0
-            lines.append(f"目标集合：{result['collection_name']}"
+            lines.append(f"已加入集合：{result['collection_name']}"
                          + (f" · 初始标注 {labels} 条" if labels else ""))
         self.gen_result.setText("\n".join(lines))

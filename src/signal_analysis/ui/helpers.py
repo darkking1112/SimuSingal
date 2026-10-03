@@ -1,4 +1,4 @@
-"""界面格式化与导出辅助：频率/时长/指标格式化、资产格式与导出物描述、频谱镜像判断。"""
+"""界面格式化辅助：频率/时长/指标格式化、资产存储格式描述、频谱镜像判断。"""
 
 from pathlib import Path
 
@@ -30,63 +30,24 @@ _SOURCE_FORMAT_TEXT = {".npy": "NPY", ".csv": "CSV（无表头 I,Q）",
                        ".bin": "交织 IQ 二进制", ".raw": "交织 IQ 二进制",
                        ".iq": "交织 IQ 二进制",
                        ".sigmf-meta": "SigMF 双文件", ".sigmf-data": "SigMF 双文件"}
-_STORAGE_FORMAT_TEXT = "工作区 NPY（complex64 复基带 IQ）"
-# 导出物后缀到导出格式名的还原，键与 dataio.write_samples 的 fmt 一一对应。
-_EXPORT_FORMAT_TEXT = {".sigmf-meta": "SigMF 双文件", ".sigmf-data": "SigMF 双文件",
-                       ".npy": "NPY", ".csv": "CSV（无表头 I,Q）",
-                       ".bin": "交织 IQ 二进制"}
+#: 资产存储格式 → 状态栏与生成结果区的文案；键与 ``data.io.FORMAT_EXTENSIONS`` 一致。
+ASSET_FORMAT_TEXT = {"npy": "NPY（complex64 复基带 IQ）", "csv": "CSV（两列 I,Q）",
+                     "iq16": "交织 IQ · int16", "iq32": "交织 IQ · float32",
+                     "sigmf": "SigMF 双文件"}
 
 
 def _asset_format(asset):
     """资产本体格式与原始来源：内置生成的数据没有外部源文件，导入的带原路径后缀。"""
+    fmt = str(asset.get("storage_format") or "npy")
+    text = ASSET_FORMAT_TEXT.get(fmt) or f"{fmt} 文件"
+    if fmt in ("iq16", "iq32"):
+        text += "（大端）" if str(asset.get("endian")) == "big" else "（小端）"
     source = str(asset.get("source") or "")
     if source.startswith("generated:"):
-        return f"{_STORAGE_FORMAT_TEXT} ← 内置生成 {source.split(':', 1)[1]}"
+        return f"工作区 {text} ← 内置生成 {source.split(':', 1)[1]}"
     suffix = Path(source).suffix.lower()
     origin = _SOURCE_FORMAT_TEXT.get(suffix) or (f"{suffix.lstrip('.')} 文件" if suffix else "未知来源")
-    return f"{_STORAGE_FORMAT_TEXT} ← 导入 {origin}"
-
-
-def _iq_binary_kind(size, sample_count):
-    """反推交织 IQ 的量化类型：int16 每复采样 4 B、float32 为 8 B。"""
-    if sample_count and size == 4 * sample_count:
-        return "int16"
-    if sample_count and size == 8 * sample_count:
-        return "float32"
-    return "类型未知"
-
-
-def _asset_exports(exports_root, asset):
-    """资产在 ``exports/`` 下的导出物，已格式化为“格式（exports/文件名）”。
-
-    导出物按 ``<asset_id>.<ext>`` 命名，所以按前缀匹配即可，不递归、不依赖内存
-    状态（重启后仍能显示）。SigMF 是一对文件，按一次导出计，只报元数据那一个，
-    免得同一份导出在状态栏里出现两条。目录不存在或读不动时返回空列表，不影响
-    状态栏其余字段。
-    """
-    prefix = f"{asset['id']}."
-    try:
-        entries = [entry for entry in Path(exports_root).iterdir()
-                   if entry.is_file() and entry.name.startswith(prefix)]
-    except OSError:
-        return []
-    names = {entry.name for entry in entries}
-    sample_count = int(asset["sample_count"])
-    found = []
-    for entry in sorted(entries, key=lambda item: item.name):
-        suffix = entry.suffix.lower()
-        if suffix == ".sigmf-data":
-            paired = entry.name.removesuffix(".sigmf-data") + ".sigmf-meta"
-            if paired in names:
-                continue  # 与同名元数据成对，按一次导出计
-        label = _EXPORT_FORMAT_TEXT.get(suffix) or f"{suffix.lstrip('.') or '无后缀'} 文件"
-        if suffix == ".bin":
-            try:
-                label += f" · {_iq_binary_kind(entry.stat().st_size, sample_count)}"
-            except OSError:
-                label += " · 类型未知"
-        found.append(f"{label}（exports/{entry.name}）")
-    return found
+    return f"工作区 {text} ← 导入 {origin}"
 
 
 def _mirrored_spectrum(values):

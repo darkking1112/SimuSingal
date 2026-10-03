@@ -10,7 +10,7 @@ import pyqtgraph as pg
 from ...core_api import MAX_SAMPLES, plan_signal, spectrum_row
 from ...storage.maintenance import RUN_KIND_LABELS, format_bytes, read_settings, write_settings
 from ...data import Workspace
-from ..constants import (EXPORT_FORMATS, IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
+from ..constants import (IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
                          IMPORT_COL_FILE, IMPORT_COL_FORMAT, IMPORT_COL_MOD,
                          IMPORT_COL_NAME, IMPORT_COL_POINTS, IMPORT_COL_RATE,
                          IMPORT_COL_STATUS, IMPORT_FILE_FILTER,
@@ -18,8 +18,8 @@ from ..constants import (EXPORT_FORMATS, IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
                          IMPORT_SUFFIXES, MODE_CHOICES, MODE_SHORT, PLAY_MAX_ROWS,
                          PLAY_MAX_ROWS_PER_TICK, PLAY_WAVE_POINTS, _SCOPE_LABELS,
                          _SOURCE_KIND_LABELS, _VERSION_SOURCE_LABELS)
-from ..helpers import (_asset_exports, _asset_format, _fmt_hz, _fmt_metric, _fmt_span,
-                       _iq_binary_kind, _mirrored_spectrum)
+from ..helpers import (_asset_format, _fmt_hz, _fmt_metric, _fmt_span,
+                       _mirrored_spectrum)
 from ..runner import _run_task
 
 
@@ -80,8 +80,8 @@ class DataPageMixin:
         intro = QtWidgets.QLabel(
             "把 IQ 生成、检测、分析、调制识别与训练相关的结果统一盘点：按目录统计占用，核对索引与磁盘"
             "是否一致（未入库文件、缺失文件、孤儿运行目录、源资产已删除的运行记录），并列出可安全清理的"
-            "条目。清理只覆盖“已结束且超过保留天数”的任务工件与无主文件；已入库的信号资产、运行目录与 "
-            "exports/ 永远不在可删范围内。扫描与导出本身是只读的，不会写入运行记录。额外目录（如 training/data、"
+            "条目。清理只覆盖“已结束且超过保留天数”的任务工件与无主文件；已入库的信号资产与运行目录"
+            "永远不在可删范围内。扫描与导出本身是只读的，不会写入运行记录。额外目录（如 training/data、"
             "training/runs 或模型目录）只参与容量统计，不做索引一致性检查。"
         )
         intro.setWordWrap(True)
@@ -166,7 +166,6 @@ class DataPageMixin:
             ["类型", "占用", "索引冗余", "创建时间", "源资产", "结果文件"])
         self.storage_job_table = self._make_table(
             ["任务", "动作", "状态", "占用", "结束时间", "年龄(天)"])
-        self.storage_export_table = self._make_table(["文件", "占用", "修改时间"])
         self.storage_issue_table = self._make_table(["问题", "路径", "占用", "说明"])
         self.storage_cleanup_table = self._make_table(
             ["选择", "类别", "路径", "占用", "判定依据"], editable=True)
@@ -174,7 +173,6 @@ class DataPageMixin:
         for widget, title in ((self.storage_asset_table, "信号资产"),
                               (self.storage_run_table, "运行记录"),
                               (self.storage_job_table, "任务工件"),
-                              (self.storage_export_table, "导出文件"),
                               (self.storage_issue_table, "一致性"),
                               (self.storage_cleanup_table, "可清理项")):
             self.storage_tables.addTab(widget, title)
@@ -474,10 +472,6 @@ class DataPageMixin:
                     for item in tables["jobs"]]
         self._set_rows(self.storage_job_table, job_rows or [("（无）", "", "", "0 B", "", "")])
 
-        export_rows = [(item["name"], format_bytes(item["bytes"]),
-                        self._time_text(item["modified"])) for item in tables["exports"]]
-        self._set_rows(self.storage_export_table, export_rows or [("（无）", "0 B", "")])
-
         consistency = report["consistency"]
         issues = []
         for item in consistency["orphan_files"]:
@@ -540,8 +534,7 @@ class DataPageMixin:
                        for item in report["categories"] if item["bytes"]) or "（工作区为空）",
             f"索引冗余 {format_bytes(report['catalog']['index_bytes'])}（结果 JSON 在 SQLite 与磁盘各存一份）· "
             f"资产 {report['catalog']['assets']} · 运行 {report['catalog']['runs']} · "
-            f"任务 {self._count_text(len(report['tables']['jobs']), report['tables']['jobs_truncated'])} · "
-            f"导出 {self._count_text(len(report['tables']['exports']), report['tables']['exports_truncated'])}"
+            f"任务 {self._count_text(len(report['tables']['jobs']), report['tables']['jobs_truncated'])}"
         ]
         for row in report.get("extra_dirs") or []:
             overview.append(f"　额外目录 {row['path']} "
@@ -570,7 +563,7 @@ class DataPageMixin:
         answer = QtWidgets.QMessageBox.question(
             self, "确认清理",
             f"将永久删除 {len(paths)} 个条目，共 {format_bytes(total)}：\n\n{listing}\n\n"
-            "已入库的信号资产、运行目录与 exports/ 不在可删范围内；该操作不可撤销。",
+            "已入库的信号资产与运行目录不在可删范围内；该操作不可撤销。",
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
             QtWidgets.QMessageBox.StandardButton.No)
         if answer != QtWidgets.QMessageBox.StandardButton.Yes:

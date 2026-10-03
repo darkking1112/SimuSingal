@@ -52,21 +52,45 @@ def test_import_official_integer_scaling(tmp_path, endian):
 
 
 def test_generate_import_service_metadata(tmp_path):
+    """SigMF 资产直接落在 assets/ 下（不再有 exports/ 副本），仍可被导入页读回。"""
     result = execute({"workspace": str(tmp_path / "workspace"), "action": "generate",
                       "sample_rate": 48000, "duration": .01, "signals": [], "seed": 9,
                       "noise": {"enabled": True, "power_dbfs": -20, "bandwidth": 48000},
-                      "export": {"format": "sigmf"}})
+                      "storage_format": "sigmf"})
     store = Workspace(tmp_path / "workspace")
+    assert result["storage_format"] == "sigmf"
+    assert result["asset_path"].endswith(".sigmf-data")
+    assert not (store.root / "exports").exists()
     assert store.get_metadata(result["id"])["generation"]["seed"] == 9
-    imported = execute({"workspace": str(store.root), "action": "import",
-                        "path": result["export_path"]})
+    meta_path = (store.root / result["asset_path"]).with_suffix(".sigmf-meta")
+    assert meta_path.is_file()
+    imported = execute({"workspace": str(store.root), "action": "import", "path": str(meta_path)})
     assert imported["sample_rate"] == 48000
     assert "sigmf" in store.get_metadata(imported["id"])
     np.testing.assert_array_equal(store.load_samples(imported["id"])[1],
                                   store.load_samples(result["id"])[1])
     with pytest.raises(ValueError, match="采样率"):
         execute({"workspace": str(store.root), "action": "import",
-                 "path": result["export_path"], "sample_rate": 100})
+                 "path": str(meta_path), "sample_rate": 100})
+
+
+def test_legacy_export_key_maps_to_storage_format(tmp_path):
+    """旧的 ``export`` 规格键仍然可用，等价于 ``storage_format``。"""
+    workspace = tmp_path / "workspace"
+    legacy = execute({"workspace": str(workspace), "action": "generate",
+                      "sample_rate": 48000, "duration": .01, "signals": [], "seed": 3,
+                      "noise": {"enabled": True, "power_dbfs": -20, "bandwidth": 48000},
+                      "export": {"format": "iq16", "endian": "big"}})
+    assert legacy["storage_format"] == "iq16" and legacy["endian"] == "big"
+    assert legacy["asset_path"].endswith(".bin")
+    store = Workspace(workspace)
+    assert (store.root / legacy["asset_path"]).is_file()
+    # 旧版的“不导出”空格式等价于默认的 NPY 资产
+    plain = execute({"workspace": str(workspace), "action": "generate",
+                     "sample_rate": 48000, "duration": .01, "signals": [], "seed": 4,
+                     "noise": {"enabled": True, "power_dbfs": -20, "bandwidth": 48000},
+                     "export": {"format": ""}})
+    assert plain["storage_format"] == "npy" and plain["asset_path"].endswith(".npy")
 
 
 @pytest.mark.parametrize("change", ["missing_rate", "multi_channel", "external", "truncated", "missing", "bad_json"])

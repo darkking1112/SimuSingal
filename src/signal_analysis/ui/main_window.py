@@ -24,7 +24,7 @@ from .pages.hops_page import HopsPageMixin
 from .pages.amc_page import AmcPageMixin
 from .pages.history_page import HistoryPageMixin
 from .pages.data_page import DataPageMixin
-from .constants import (EXPORT_FORMATS, IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
+from .constants import (IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
                         IMPORT_COL_FILE, IMPORT_COL_FORMAT, IMPORT_COL_MOD,
                         IMPORT_COL_NAME, IMPORT_COL_POINTS, IMPORT_COL_RATE,
                         IMPORT_COL_SNR, IMPORT_COL_STATUS, IMPORT_FILE_FILTER,
@@ -34,8 +34,8 @@ from .constants import (EXPORT_FORMATS, IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
                         _SOURCE_KIND_LABELS, _VERSION_SOURCE_LABELS)
 
 
-from .helpers import (_AMC_SOURCE_TEXT, _asset_exports, _asset_format, _comparison_line,
-                      _fmt_hz, _fmt_metric, _fmt_span, _iq_binary_kind, _mirrored_spectrum)
+from .helpers import (_AMC_SOURCE_TEXT, _asset_format, _comparison_line,
+                      _fmt_hz, _fmt_metric, _fmt_span, _mirrored_spectrum)
 from .runner import _run_task
 from .widgets import UnitSpinBox, _freq_spin, _plain_spin, _unit_row
 
@@ -356,23 +356,11 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             self.import_collection.setCurrentIndex(scope_index if scope_index >= 0 else 0)
             self.import_collection.blockSignals(False)
             self._import_collection_changed()
-        if hasattr(self, "gen_collection"):
-            previous_scope = self.gen_collection.currentData()
-            self.gen_collection.blockSignals(True)
-            self.gen_collection.clear()
-            self.gen_collection.addItem("不加入集合", None)
-            self.gen_collection.addItem("新建集合…", "__new__")
-            for collection in self.workspace.list_collections():
-                self.gen_collection.addItem(collection["name"], collection["id"])
-            scope_index = (self.gen_collection.findData(previous_scope)
-                           if previous_scope else 0)
-            self.gen_collection.setCurrentIndex(scope_index if scope_index >= 0 else 0)
-            self.gen_collection.blockSignals(False)
-            self._gen_collection_changed()
         if hasattr(self, "gen_panel"):
             self.gen_panel.refresh_collections()
         if hasattr(self, "training_page"):
             self.training_page.refresh_collections()
+        self.update_gen_collection_scope()
 
     def _asset_scope(self):
         data = self.collection_combo.currentData()
@@ -390,6 +378,7 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
     def refresh_assets(self, *_):
         selected = self.selected_asset()
         scope = self._asset_scope()
+        self.update_gen_collection_scope()
         total = self.workspace.count_assets(self.search.text(), **scope)
         self.asset_limit = int(self.page_size.currentText())
         pages = max(1, -(-total // self.asset_limit))
@@ -464,11 +453,11 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             self.target_list.clear()
 
     def _asset_status_text(self, asset):
-        """状态栏摘要：文件名 / 相对位置 / 大小 / 资产（工作区存储格式）/ 导出。
+        """状态栏摘要：文件名 / 相对位置 / 大小 / 资产（工作区存储格式与来源）。
 
         路径一律相对工作目录，不重复写出工作目录本身；文件缺失时明确提示而不是
-        抛异常。资产与导出分开写：前者是工作区里的存储本体（独立 NPY 或分片记录），
-        后者是 ``exports/`` 下本次实际生成的副本（没有就写“无”）。
+        抛异常。资产格式按 catalog 登记的 ``storage_format``/``endian`` 描述，
+        SigMF 资产的两个文件只报一次。
         """
         path = self.workspace.root / asset["path"]
         shard = asset.get("storage_kind") == "shard"
@@ -482,11 +471,9 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             size = "文件缺失"
         rate = float(asset["sample_rate"])
         duration = _fmt_span(asset["sample_count"] / rate) if rate else "--"
-        exports = _asset_exports(self.workspace.root / "exports", asset)
         return (f"文件名 {asset['name']}  ·  位置 {asset['path']}  ·  "
                 f"大小 {size}（{asset['sample_count']:,} 复采样 @ {rate:g} Hz · {duration}）  ·  "
-                f"资产：{_asset_format(asset)}  ·  "
-                f"导出：{'、'.join(exports) if exports else '无'}")
+                f"资产：{_asset_format(asset)}")
 
 
     def adopt_page_result(self, page):

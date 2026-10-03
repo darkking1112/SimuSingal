@@ -74,8 +74,36 @@ def test_report_counts_match_disk(tmp_path):
     assert categories["jobs"]["files"] == 2  # status.json + worker.log
     assert report["totals"]["bytes"] == report["totals"]["workspace_bytes"]
     assert report["totals"]["files"] == sum(item["files"] for item in report["categories"])
+    # 导出概念已移除：报告里既没有 exports 分类，也没有导出物表
+    assert "exports" not in categories
+    assert "exports" not in report["tables"]
     # JSON 必须可安全序列化（无 NaN/Infinity），否则 result.json 写入会失败
     json.dumps(report, ensure_ascii=False, allow_nan=False)
+
+
+def test_sigmf_asset_pair_counts_as_one_asset(tmp_path):
+    """SigMF 资产是一对文件：占用按两者之和计，不算未入库文件，缺一个即报缺失。"""
+    workspace = Workspace(tmp_path / "ws")
+    asset = workspace.add_samples(np.ones(64, dtype=np.complex64), 48_000.0, "配对样本",
+                                  storage_format="sigmf")
+    meta = (workspace.root / asset["path"]).with_suffix(".sigmf-meta")
+    data = workspace.root / asset["path"]
+    assert meta.is_file() and data.is_file()
+
+    report = build_report(workspace)
+    instances = report["consistency"]
+    assert instances["orphan_files"] == []  # 元数据文件不能算“未入库文件”
+    assert instances["missing_files"] == []
+    row = next(item for item in report["tables"]["assets"] if item["id"] == asset["id"])
+    assert row["exists"] is True
+    assert row["bytes"] == meta.stat().st_size + data.stat().st_size
+    categories = {item["key"]: item for item in report["categories"]}
+    assert categories["assets"]["files"] == 2  # 一对文件按两个文件计占用
+
+    # 元数据文件缺失：缺一个就当这条资产生效文件缺失
+    meta.unlink()
+    broken = build_report(workspace)["consistency"]
+    assert [item["path"] for item in broken["missing_files"]] == [asset["path"]]
 
 
 def test_report_groups_runs_by_kind_and_index_redundancy(tmp_path):
@@ -169,12 +197,12 @@ def test_apply_cleanup_deletes_only_candidates(tmp_path):
     assert entries[-1]["removed"] and entries[-1]["bytes"] == result["bytes"]
 
 
-@pytest.mark.parametrize("bad", ["../secret", "/etc/passwd", "exports/keep.bin",
+@pytest.mark.parametrize("bad", ["../secret", "/etc/passwd", "training/keep.bin",
                                 "runs", "assets/../runs", "  ", "C:/tmp/x"])
 def test_apply_cleanup_rejects_unsafe_targets(tmp_path, bad):
     workspace = Workspace(tmp_path / "ws")
     make_asset(workspace)
-    exported = workspace.root / "exports" / "keep.bin"
+    exported = workspace.root / "training" / "keep.bin"
     exported.parent.mkdir()
     exported.write_bytes(b"0" * 32)
 

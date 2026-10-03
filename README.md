@@ -48,15 +48,15 @@ python -m signal_analysis export RUN_ID report.html
 
 界面"IQ 信号生成"页，用于生成测试检测、参数估计与调制识别算法的 IQ 基带信号：支持 AM、FM、SSB、2ASK、QPSK、16QAM、64QAM 与跳频信号（FH-2FSK 模拟遥控链路、FH-OFDM 模拟图传链路）。IQ 为复基带记录，不设置载频，"频点"指基带频率偏移。可设置信号持续时间、采样率、随机种子、每信号功率（dBFS）、目标带宽、频点、跳速、符号速率等；自动按调制样式与目标带宽推导消息带宽、频偏、滚降成形等参数。支持一次 IQ 中包含最多 16 种信号并独立设置参数，以及全带白噪声底（按最强调制信号的带内 SNR 定标）与"自定义噪声"样式（全带白噪声，只填功率，可单独生成纯噪声记录）。
 
-噪声为**带内信噪比**：界面固定全带白噪声（带宽 = 采样率），噪声功率在该带宽内均匀分布（功率谱密度 $`N0 = P_{noise} / B_{noise} `$ ），信号的带内噪声取 $`N0 × 该信号与噪声带的重叠带宽`$，因此某信号的带内 $SNR = 其平均功率 ÷（`N0 × 重叠带宽`）$。界面填写的 `snr_db` 指**最强调制信号**（调制信号中实测平均功率最大者；自定义噪声行不参与）的带内 SNR，其余信号按各自带宽与噪声带的重叠折算，结果记录在摘要的 `signals[].snr_inband_db` 中；由于一个场景只有一片噪声底（$SNR_i = P_i/(N0·B_i)$ 只有一个自由度），**各信号 SNR 不能独立指定**，其余信号可能低于填写值（窄带信号反而更高）。若算法接口收窄了噪声带宽（`noise.bandwidth`）且未覆盖参考信号的占用频带会直接报错；完全落在噪声带外的信号实测无噪，`snr_inband_db` 记 `null`。$`N0`$ 为**双侧**功率谱密度（`P_noise = N0 × B_noise`），与频谱仪单边 dBm/Hz 相差 3 dB。纯噪声（无信号）改用"自定义噪声"样式按绝对总功率（dBFS）生成。摘要同时给出 `noise.power_dbfs_per_hz`、`noise.snr_definition`（当前为 `inband_snr_v1`）与 `noise.snr_reference_index` 以便复核。可导出 NPY、CSV（两列 I,Q）或交织 IQ 二进制（int16/float32、大小端可选）。
+噪声为**带内信噪比**：界面固定全带白噪声（带宽 = 采样率），噪声功率在该带宽内均匀分布（功率谱密度 $`N0 = P_{noise} / B_{noise} `$ ），信号的带内噪声取 $`N0 × 该信号与噪声带的重叠带宽`$，因此某信号的带内 $SNR = 其平均功率 ÷（`N0 × 重叠带宽`）$。界面填写的 `snr_db` 指**最强调制信号**（调制信号中实测平均功率最大者；自定义噪声行不参与）的带内 SNR，其余信号按各自带宽与噪声带的重叠折算，结果记录在摘要的 `signals[].snr_inband_db` 中；由于一个场景只有一片噪声底（$SNR_i = P_i/(N0·B_i)$ 只有一个自由度），**各信号 SNR 不能独立指定**，其余信号可能低于填写值（窄带信号反而更高）。若算法接口收窄了噪声带宽（`noise.bandwidth`）且未覆盖参考信号的占用频带会直接报错；完全落在噪声带外的信号实测无噪，`snr_inband_db` 记 `null`。$`N0`$ 为**双侧**功率谱密度（`P_noise = N0 × B_noise`），与频谱仪单边 dBm/Hz 相差 3 dB。纯噪声（无信号）改用"自定义噪声"样式按绝对总功率（dBFS）生成。摘要同时给出 `noise.power_dbfs_per_hz`、`noise.snr_definition`（当前为 `inband_snr_v1`）与 `noise.snr_reference_index` 以便复核。资产格式可选 NPY（complex64）、CSV（两列 I,Q）、交织 IQ 二进制（int16/float32、大小端可选）与 SigMF 双文件。
 
 ```bash
 python -m signal_analysis --workspace /tmp/iqws generate spec.json
 ```
 
-`spec.json` 形如 `{"sample_rate": 1e6, "duration": 0.2, "seed": 0, "noise": {"enabled": true, "bandwidth": 1e6, "snr_db": 20}, "signals": [{"mode": "qpsk", "offset": 100000, "power_dbfs": -10, "bandwidth": 200000}], "name": "QPSK测试", "export": {"format": "iq16", "endian": "little"}}`，生成结果保存为工作目录内数据资产并可同时导出到 `exports/`。
+`spec.json` 形如 `{"sample_rate": 1e6, "duration": 0.2, "seed": 0, "noise": {"enabled": true, "bandwidth": 1e6, "snr_db": 20}, "signals": [{"mode": "qpsk", "offset": 100000, "power_dbfs": -10, "bandwidth": 200000}], "name": "QPSK测试", "storage_format": "iq16", "endian": "little"}`，生成结果直接按 `storage_format` 落盘为工作目录内的数据资产（`assets/<id>.<ext>`），不再有单独的导出目录；旧的 `"export": {"format": ...}` 键仍然接受。`storage_format` 可选 `npy`（默认）/`csv`/`iq16`/`iq32`/`sigmf`，`endian` 只对交织 IQ 二进制生效。
 
-SigMF 双文件读写使用正式依赖 `sigmf==1.11.1`：在生成页选择“SigMF 双文件”，或把上述规格中的 `export` 改为 `{"format": "sigmf"}`。输出为同名 `.sigmf-meta`（元数据）与 `.sigmf-data`（小端 complex float32 IQ），两者须一起保存和分发。已有环境更新依赖可运行 `python -m pip install -e ".[gui]"`。
+SigMF 双文件读写使用正式依赖 `sigmf==1.11.1`：在生成页把“资产格式”选为“SigMF 双文件”，或把上述规格中的 `storage_format` 改为 `"sigmf"`。输出为同名 `.sigmf-meta`（元数据）与 `.sigmf-data`（小端 complex float32 IQ），两者一起作为**同一条资产**保存在 `assets/` 下。已有环境更新依赖可运行 `python -m pip install -e ".[gui]"`。
 
 GUI 导入可选择 `.sigmf-meta` 或 `.sigmf-data`，自动读取采样率。CLI 示例：
 
@@ -157,10 +157,10 @@ python -m signal_analysis amc-iq-manifest onnx/iq.onnx iq_manifest.json \
 
 界面“数据管理”页（在“跳频参数”之后、“运行记录”之前）盘点工作目录的占用并给出安全清理：
 
-* 按 `assets/`、`runs/`、`jobs/`、`exports/`、`catalog.sqlite3`、页面设置分别统计字节与文件数，另可把 `training/data`、`training/runs` 或模型目录加为**额外目录**（只统计容量，不建索引）；
+* 按 `assets/`、`runs/`、`jobs/`、`catalog.sqlite3`、页面设置分别统计字节与文件数，另可把 `training/data`、`training/runs` 或模型目录加为**额外目录**（只统计容量，不建索引）；
 * 核对索引与磁盘是否一致：未入库文件、入库但文件缺失、未入库运行目录、原子写 `.tmp` 残留、源资产已删除；
 * 按“任务保留天数”列出可清理的**过期任务**与**无主文件**，需先“预览清理”再逐条勾选才能删除，删除前二次确认；
-  已入库的信号资产、运行目录与 `exports/` **永不删除**，运行中任务一律跳过；
+  已入库的信号资产与运行目录**永不删除**，运行中任务一律跳过；
 * **扫描与导出都是只读的**，不写入运行记录（不会让工作目录越扫越大）；每次清理往 `maintenance.log` 追加一行审计记录。
 
 统计口径、报告字段、清理规则与已知局限见 [`docs/数据管理页面.md`](docs/数据管理页面.md)。

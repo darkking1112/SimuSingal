@@ -35,6 +35,64 @@ def test_asset_persistence_label_and_tampering(tmp_path):
         reopened.load_samples(asset["id"])
 
 
+@pytest.mark.parametrize("fmt, endian, suffix, tolerance", [
+    ("npy", "little", ".npy", 0.0),
+    ("csv", "little", ".csv", 0.0),
+    ("iq16", "little", ".bin", 1 / 32768),
+    ("iq32", "big", ".bin", 0.0),
+    ("sigmf", "little", ".sigmf-data", 0.0),
+])
+def test_asset_storage_formats_roundtrip(tmp_path, fmt, endian, suffix, tolerance):
+    """资产按选中的格式落盘在 assets/ 下（不再有 exports/），读回数值与生成时的样本一致。"""
+    store = Workspace(tmp_path)
+    rng = np.random.default_rng(7)
+    samples = ((rng.normal(size=256) + 1j * rng.normal(size=256)) * 0.2).astype(np.complex64)
+    asset = store.add_samples(samples, 1_000_000, f"资产-{fmt}", storage_format=fmt,
+                              endian=endian)
+    assert asset["storage_format"] == fmt
+    assert asset["path"].endswith(suffix)
+    assert not (store.root / "exports").exists()
+    files = (store.root / "assets").glob(f"{asset['id']}.*")
+    expected_files = 2 if fmt == "sigmf" else 1
+    assert len(list(files)) == expected_files
+    loaded = store.load_samples(asset["id"])[1]
+    # 拷出内存映射再比数值：Windows 上被映射的文件无法写坏（这正是下面的校验用例）
+    back = np.array(loaded, dtype=np.complex64)
+    del loaded
+    assert back.size == samples.size
+    assert float(np.max(np.abs(back - samples))) <= tolerance
+    # 校验口径一致：改动载荷一律报“缺失或校验失败”
+    (store.root / asset["path"]).write_bytes(b"damaged")
+    with pytest.raises(ValueError, match="校验"):
+        store.load_samples(asset["id"])
+
+
+def test_sigmf_asset_requires_both_files(tmp_path):
+    """SigMF 资产是一对文件：缺元数据文件即视为缺失（摘要与占用都记在数据文件上）。"""
+    store = Workspace(tmp_path)
+    asset = store.add_samples(np.ones(16, dtype=np.complex64), 1000, "配对",
+                              storage_format="sigmf")
+    meta = (store.root / asset["path"]).with_suffix(".sigmf-meta")
+    assert meta.is_file()
+    meta.unlink()
+    with pytest.raises(ValueError, match="缺失或校验失败"):
+        store.resolve_asset(asset)
+
+
+def test_add_samples_validates_storage_format(tmp_path):
+    store = Workspace(tmp_path)
+    with pytest.raises(ValueError, match="不支持的资产格式"):
+        store.add_samples(np.ones(4), 100, "坏格式", storage_format="parquet")
+    with pytest.raises(ValueError, match="字节序"):
+        store.add_samples(np.ones(4), 100, "坏字节序", storage_format="iq16", endian="middle")
+    # 非二进制格式的字节序无意义：归一小端，不报错
+    asset = store.add_samples(np.ones(4), 100, "csv", storage_format="csv", endian="big")
+    assert asset["storage_format"] == "csv" and asset["endian"] == "little"
+    # 默认仍是独立 NPY（导入/集合生成/衍生路径行为不变）
+    default = store.add_samples(np.ones(4), 100, "默认")
+    assert default["storage_format"] == "npy" and default["path"].endswith(".npy")
+
+
 def test_run_roundtrip_and_escaped_report(tmp_path):
     store = Workspace(tmp_path / "data")
     asset = store.add_samples([1], 100, "sample")

@@ -14,7 +14,9 @@ pytest.importorskip("pyqtgraph")
 from PySide6 import QtWidgets
 
 from signal_analysis.ui import MainWindow
-from signal_analysis.ui.pages.collection_gen_page import CollectionGenPanel, SignalParamsDialog
+from signal_analysis.ui.pages import collection_gen_page
+from signal_analysis.ui.pages.collection_gen_page import (CollectionGenPanel, ProjectParamsDialog,
+                                                          TorchSigParamsDialog, params_dialog)
 from signal_analysis.algorithms.generation.recipes import check_generator_support, validate_recipe
 
 
@@ -38,7 +40,7 @@ def window(tmp_path):
 
 
 @pytest.mark.gui
-def test_generation_page_is_a_form_with_greyed_impairments(window):
+def test_generation_page_is_a_form_with_engine_specific_dialogs(window):
     app, widget = window
     panel = widget.gen_panel
     assert isinstance(panel, CollectionGenPanel)
@@ -48,9 +50,6 @@ def test_generation_page_is_a_form_with_greyed_impairments(window):
     sections = generator.findChild(QtWidgets.QTabWidget, "gen_sections")
     assert sections is not None and sections.count() == 2
     assert sections.tabText(1) == "信号集合生成"
-    # 损伤先显示但置灰；接口在 impairments 里
-    assert panel.impairment_checks and not any(
-        check.isEnabled() for check in panel.impairment_checks.values())
     # 默认：检测=逐跳（会话+逐跳目标）、AMC 勾选
     recipe = panel.recipe()
     assert recipe["labels"] == {"detection": "per_hop_v1", "amc": True}
@@ -60,9 +59,106 @@ def test_generation_page_is_a_form_with_greyed_impairments(window):
     # 页面上没有可手写 JSON 的编辑框；明细在配置弹框里
     assert not any(not item.isReadOnly()
                    for item in panel.findChildren(QtWidgets.QPlainTextEdit))
-    dialog = SignalParamsDialog(panel, panel.settings, "project")
-    assert dialog.windowTitle() == "生成参数 · 信号与采样"
-    dialog.reject()
+    # 页面上不再有损伤分组：它属于项目引擎的配置弹框
+    assert not hasattr(panel, "impairment_checks")
+
+
+@pytest.mark.gui
+def test_config_dialog_depends_on_engine(window):
+    """“配置…”按引擎打开不同弹框：损伤项只在项目引擎那个里，且全部置灰（尚未实现）。"""
+    app, widget = window
+    panel = widget.gen_panel
+
+    project = params_dialog(panel, panel.settings, "project")
+    assert isinstance(project, ProjectParamsDialog)
+    assert project.windowTitle() == "生成参数 · 信号与采样（项目引擎）"
+    assert project.impairment_checks and not any(
+        check.isEnabled() for check in project.impairment_checks.values())
+    assert list(project.impairment_checks) == ["cfo", "phase_noise", "multipath", "iq_imbalance"]
+    # 项目引擎专属：调制轮换、功率、跳速与损伤
+    assert project.modes.count() == 9 and hasattr(project, "hop_low")
+    # TorchSig 专属的东西不在这个弹框里
+    assert not hasattr(project, "generators") and not hasattr(project, "mapping")
+    project.reject()
+
+    torchsig = params_dialog(panel, panel.settings, "torchsig")
+    assert isinstance(torchsig, TorchSigParamsDialog)
+    assert torchsig.windowTitle() == "生成参数 · 信号与采样（TorchSig）"
+    # TorchSig 没有跳频，也没有 impairments 组（扰动只有 0/1/2 三档）
+    assert not hasattr(torchsig, "impairment_checks")
+    assert not hasattr(torchsig, "hop_low") and not hasattr(torchsig, "modes")
+    assert torchsig.impairment.currentData() is None and torchsig.generators.text() == "all"
+    torchsig.reject()
+
+    # 未知引擎退回项目引擎，不会崩
+    assert isinstance(params_dialog(panel, panel.settings, "unknown"), ProjectParamsDialog)
+
+
+@pytest.mark.gui
+def test_config_button_opens_the_dialog_of_the_current_engine(window, monkeypatch):
+    app, widget = window
+    panel = widget.gen_panel
+    opened = []
+
+    class _Recorder:
+        def __init__(self, parent, settings, engine):
+            opened.append(engine)
+
+        def exec(self):
+            return QtWidgets.QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(collection_gen_page, "params_dialog",
+                        lambda parent, settings, engine: _Recorder(parent, settings, engine))
+    panel.configure_signals()
+    panel.engine.setCurrentIndex(panel.engine.findData("torchsig"))
+    panel.configure_signals()
+    panel.engine.setCurrentIndex(panel.engine.findData("project"))
+    panel.configure_signals()
+    assert opened == ["project", "torchsig", "project"]
+
+
+@pytest.mark.gui
+def test_config_dialog_values_are_applied_per_engine(window, monkeypatch):
+    """确认后按引擎写回表单：项目引擎回写调制/功率/跳速，TorchSig 回写信号族/扰动/映射。"""
+    app, widget = window
+    panel = widget.gen_panel
+
+    class _Accepted:
+        def __init__(self, values):
+            self._values = values
+
+        def exec(self):
+            return QtWidgets.QDialog.DialogCode.Accepted
+
+        def values(self):
+            return dict(self._values)
+
+    project_values = {"rate": 2_000_000.0, "duration": (0.1, 0.2), "signals": (1, 1),
+                      "snr": (0.0, 10.0), "bandwidth_ratio": (0.05, 0.4),
+                      "modes": ["qpsk"], "balanced": False,
+                      "power": (-20.0, -8.0), "hop": (50.0, 50.0)}
+    monkeypatch.setattr(collection_gen_page, "params_dialog",
+                        lambda *args: _Accepted(project_values))
+    panel.configure_signals()
+    assert panel.settings["modes"] == ["qpsk"] and not panel.settings["balanced"]
+    assert panel.settings["hop"] == (50.0, 50.0) and panel.settings["rate"] == 2_000_000.0
+    # TorchSig 的设置不被项目引擎的弹框动到
+    assert panel.settings["torchsig"] == {"generators": "all", "impairment": None,
+                                          "mapping": ""}
+
+    torchsig_values = {"rate": 500_000.0, "duration": (0.1, 0.2), "signals": (1, 2),
+                       "snr": (5.0, 15.0), "bandwidth_ratio": (0.1, 0.2),
+                       "torchsig": {"generators": "qpsk,ook", "impairment": 1},
+                       "torchsig_mapping": "/tmp/map.json"}
+    monkeypatch.setattr(collection_gen_page, "params_dialog",
+                        lambda *args: _Accepted(torchsig_values))
+    panel.configure_signals()
+    assert panel.settings["torchsig"] == {"generators": "qpsk,ook", "impairment": 1,
+                                          "mapping": "/tmp/map.json"}
+    # 项目引擎的设置保持不变（两套设置共存，按引擎各取所需）
+    assert panel.settings["modes"] == ["qpsk"] and panel.settings["rate"] == 500_000.0
+    panel.engine.setCurrentIndex(panel.engine.findData("torchsig"))
+    assert "qpsk,ook" in panel.signal_summary.text()
 
 
 @pytest.mark.gui

@@ -12,8 +12,28 @@ IQ_EXTENSIONS = (".bin", ".raw", ".iq")
 IQ_DTYPES = ("int16", "float32")
 IQ_ENDIANS = ("little", "big")
 
-_EXTENSIONS = {"npy": ".npy", "csv": ".csv", "iq16": ".bin", "iq32": ".bin",
-               "sigmf": ".sigmf-meta"}
+#: 格式名 → 默认扩展名；资产落盘与 :func:`write_samples` 共用同一张表。
+FORMAT_EXTENSIONS = {"npy": ".npy", "csv": ".csv", "iq16": ".bin", "iq32": ".bin",
+                     "sigmf": ".sigmf-meta"}
+
+#: 交织 IQ 二进制格式名 → 读回时的数据类型。
+BINARY_DTYPES = {"iq16": "int16", "iq32": "float32"}
+
+
+def resolve_storage_format(storage_format="npy", endian="little"):
+    """校验并规范化资产存储格式；非二进制格式的字节序一律归为小端（无意义）。
+
+    生成服务、资产落盘与 CLI 规格共用同一处校验，错误信息只有一份。
+    """
+    fmt = str(storage_format or "npy")
+    if fmt not in FORMAT_EXTENSIONS:
+        raise ValueError(f"不支持的资产格式：{fmt}，可选：{', '.join(FORMAT_EXTENSIONS)}")
+    order = str(endian or "little")
+    if fmt in BINARY_DTYPES:
+        if order not in IQ_ENDIANS:
+            raise ValueError(f"字节序必须为：{'、'.join(IQ_ENDIANS)}")
+        return fmt, order
+    return fmt, "little"
 
 
 def _check_file(path):
@@ -81,11 +101,11 @@ def write_samples(path, samples, fmt, endian="little", *, sample_rate=None,
     if fmt == "sigmf":
         return write_sigmf(path, samples, sample_rate, description, generation)
     data = validate_samples(samples)
-    if fmt not in _EXTENSIONS:
-        raise ValueError(f"不支持的文件格式：{fmt}，可选：{', '.join(_EXTENSIONS)}")
+    if fmt not in FORMAT_EXTENSIONS:
+        raise ValueError(f"不支持的文件格式：{fmt}，可选：{', '.join(FORMAT_EXTENSIONS)}")
     path = Path(path).expanduser()
     if not path.suffix:
-        path = path.with_suffix(_EXTENSIONS[fmt])
+        path = path.with_suffix(FORMAT_EXTENSIONS[fmt])
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     try:

@@ -5,7 +5,11 @@
 * 界面是**表单**，配方（``gen_recipe_v1``）只是内部存储格式，用来保证可复现；
   生成时执行器自动把配方存进集合；
 * 参数较多，明细放在**配置弹框**里（“信号与采样”），页面上只保留基本项、摘要与操作；
-* 损伤项由 :mod:`signal_analysis.algorithms.generation.impairments` 声明，未实现的整组置灰（实现后自动启用）；
+  两个引擎各有自己的弹框（:class:`ProjectParamsDialog` / :class:`TorchSigParamsDialog`），
+  按“生成引擎”下拉切换，“配置…”按钮打开的就是其中对应的那一个；
+* **损伤项只属于项目引擎弹框**（TorchSig 没有损伤，只有 ``impairment_level`` 的 0/1/2 三档
+  扰动，那是另一回事）；损伤项由 :mod:`signal_analysis.algorithms.generation.impairments`
+  声明，未实现的置灰（实现后自动启用），勾选后写进配方的 ``impairments`` 组；
 * JSON 导入/导出放在“高级”里，页面不需要手写或编辑 JSON；
 * 检测标注粒度默认逐跳（``per_hop_v1``）：项目引擎生成跳频样式时同时写会话与逐跳目标；
 * TorchSig 只能在 Linux 下生成，Windows 上直接提示；bundle 导入任何平台都能用。
@@ -16,9 +20,8 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtWidgets
 
-from ...algorithms.generation import impairments
 from ...core_api import MODE_NAMES
-from ...algorithms.generation.impairments import IMPAIRMENTS, RESERVED_SIGNAL_PARAMETERS
+from ...algorithms.generation.impairments import IMPAIRMENTS
 from ...algorithms.generation.recipes import check_generator_support, validate_recipe
 from ...integrations.torchsig import is_linux, load_mapping, read_env, write_env
 
@@ -34,98 +37,38 @@ def _line(lo, hi, unit="", digits=3):
     return f"{text} {unit}".strip()
 
 
-class SignalParamsDialog(QtWidgets.QDialog):
-    """“信号与采样”配置弹框：项目引擎与 TorchSig 共用，按引擎显示对应项。"""
+class _ParamsDialog(QtWidgets.QDialog):
+    """“配置…”弹框的公共骨架：两个引擎共有的记录级/信号级区间与确定/取消按钮。
 
-    def __init__(self, parent, settings, engine):
+    引擎不同、可配项也不同（TorchSig 没有跳频、没有损伤，扰动只有 0/1/2 三档），
+    所以按引擎分成两个子类，由 :func:`params_dialog` 挑当前引擎那一个。
+    """
+
+    def __init__(self, parent, title):
         super().__init__(parent)
-        self.setWindowTitle("生成参数 · 信号与采样")
-        self.engine = engine
-        layout = QtWidgets.QVBoxLayout(self)
-        form = QtWidgets.QFormLayout()
-        layout.addLayout(form)
+        self.setWindowTitle(title)
+        self._layout = QtWidgets.QVBoxLayout(self)
+        self.form = QtWidgets.QFormLayout()
+        self._layout.addLayout(self.form)
 
+    def _add_common_fields(self, settings):
+        """两引擎共有的区间：采样率、时长、每条信号数、SNR、带宽占比。"""
         self.rate = QtWidgets.QDoubleSpinBox()
         self.rate.setRange(1e3, 1e9)
         self.rate.setDecimals(0)
         self.rate.setValue(float(settings["rate"]))
-        self.rate.setToolTip("单条录制的采样率（Hz）；TorchSig 引擎用这一个值")
-        form.addRow("采样率（Hz）", self.rate)
+        self.rate.setToolTip("单条录制的采样率（Hz）")
+        self.form.addRow("采样率（Hz）", self.rate)
         self.duration_low, self.duration_high = self._range_row(
-            form, "时长（s）", settings["duration"], 1e-3, 3600.0, 3)
+            "时长（s）", settings["duration"], 1e-3, 3600.0, 3)
         self.count_low, self.count_high = self._range_row(
-            form, "每条的信号数", settings["signals"], 0, 16, 0)
+            "每条的信号数", settings["signals"], 0, 16, 0)
         self.snr_low, self.snr_high = self._range_row(
-            form, "SNR（dB）", settings["snr"], -60.0, 120.0, 1)
+            "SNR（dB）", settings["snr"], -60.0, 120.0, 1)
         self.bandwidth_low, self.bandwidth_high = self._range_row(
-            form, "带宽占比（%）", settings["bandwidth_ratio"], 0.5, 100.0, 2)
+            "带宽占比（%）", settings["bandwidth_ratio"], 0.5, 100.0, 2)
 
-        self.modes = QtWidgets.QListWidget()
-        self.modes.setToolTip("参与轮换的调制类型；类别均衡时按样本序号轮换保证配比")
-        for key, label in MODE_LABELS:
-            item = QtWidgets.QListWidgetItem(f"{label}（{key}）")
-            item.setData(QtCore.Qt.ItemDataRole.UserRole, key)
-            item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(QtCore.Qt.CheckState.Checked if key in settings["modes"]
-                               else QtCore.Qt.CheckState.Unchecked)
-            self.modes.addItem(item)
-        form.addRow("调制类型", self.modes)
-        self.balanced = QtWidgets.QCheckBox("类别均衡（balanced：按序号轮换）")
-        self.balanced.setChecked(bool(settings["balanced"]))
-        form.addRow("", self.balanced)
-        self.power_low, self.power_high = self._range_row(
-            form, "功率（dBFS）", settings["power"], -200.0, 0.0, 1)
-        self.hop_low, self.hop_high = self._range_row(
-            form, "跳速（hop/s）", settings["hop"], 0.1, 1e6, 2)
-        form.addRow(QtWidgets.QLabel("跳速只作用于跳频样式（FH-2FSK / FH-OFDM）。"))
-
-        self.generators = QtWidgets.QLineEdit(settings["torchsig"]["generators"])
-        self.generators.setToolTip("signal_generators 参数：all 或逗号分隔的类名")
-        form.addRow("TorchSig 信号族", self.generators)
-        self.impairment = QtWidgets.QComboBox()
-        self.impairment.addItem("不加扰动（IQ 与元数据严格对应）", None)
-        for level, label in ((0, "0 · 理想"), (1, "1 · 有线"), (2, "2 · 无线")):
-            self.impairment.addItem(label, level)
-        index = self.impairment.findData(settings["torchsig"]["impairment"])
-        self.impairment.setCurrentIndex(max(index, 0))
-        form.addRow("TorchSig 扰动档位", self.impairment)
-        self.mapping = QtWidgets.QLineEdit(settings["torchsig"]["mapping"])
-        self.mapping.setPlaceholderText("{\"TorchSig 类名\": \"A09 类别\"} 的 JSON 文件")
-        choose_mapping = QtWidgets.QPushButton("选择…")
-        choose_mapping.clicked.connect(self._choose_mapping)
-        row = QtWidgets.QWidget()
-        box = QtWidgets.QHBoxLayout(row)
-        box.setContentsMargins(0, 0, 0, 0)
-        box.addWidget(self.mapping, 1)
-        box.addWidget(choose_mapping)
-        form.addRow("类别映射 JSON", row)
-
-        for widget in (self.modes, self.balanced, self.power_low, self.power_high,
-                       self.hop_low, self.hop_high):
-            self._set_enabled(widget, engine == "project")
-        for widget in (self.generators, self.impairment, self.mapping, row):
-            self._set_enabled(widget, engine == "torchsig")
-
-        note = QtWidgets.QLabel(
-            "项目引擎：数字样式的符号率由带宽与滚降系数推导；独立符号率与损伤项"
-            "（频偏 / 相位噪声 / IQ 不平衡 / 多径）尚未实现，页面置灰，用到即报错。")
-        note.setWordWrap(True)
-        layout.addWidget(note)
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok
-                                             | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    @staticmethod
-    def _set_enabled(widget, enabled):
-        if isinstance(widget, tuple):
-            for item in widget:
-                item.setEnabled(enabled)
-        else:
-            widget.setEnabled(enabled)
-
-    def _range_row(self, form, title, values, low, high, decimals):
+    def _range_row(self, title, values, low, high, decimals):
         row = QtWidgets.QWidget()
         box = QtWidgets.QHBoxLayout(row)
         box.setContentsMargins(0, 0, 0, 0)
@@ -139,8 +82,134 @@ class SignalParamsDialog(QtWidgets.QDialog):
         box.addWidget(left)
         box.addWidget(QtWidgets.QLabel("～"))
         box.addWidget(right)
-        form.addRow(title, row)
+        self.form.addRow(title, row)
         return left, right
+
+    def _common_values(self):
+        def pair(low, high):
+            return (low.value(), high.value())
+
+        return {"rate": self.rate.value(),
+                "duration": pair(self.duration_low, self.duration_high),
+                "signals": pair(self.count_low, self.count_high),
+                "snr": pair(self.snr_low, self.snr_high),
+                "bandwidth_ratio": (self.bandwidth_low.value() / 100.0,
+                                    self.bandwidth_high.value() / 100.0)}
+
+    def _add_note(self, text):
+        note = QtWidgets.QLabel(text)
+        note.setWordWrap(True)
+        self._layout.addWidget(note)
+
+    def _add_buttons(self):
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok
+                                             | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        self._layout.addWidget(buttons)
+
+
+class ProjectParamsDialog(_ParamsDialog):
+    """项目引擎的“信号与采样”配置弹框：调制轮换、功率/跳速与损伤项。
+
+    损伤项按 :mod:`signal_analysis.algorithms.generation.impairments` 的声明渲染，
+    未实现的置灰（在该模块里实现后自动启用）。配方里一旦出现 ``impairments`` 组，
+    ``check_generator_support`` 与执行器都会直接报错，不静默忽略。
+    """
+
+    def __init__(self, parent, settings):
+        super().__init__(parent, "生成参数 · 信号与采样（项目引擎）")
+        self._add_common_fields(settings)
+        self.modes = QtWidgets.QListWidget()
+        self.modes.setToolTip("参与轮换的调制类型；类别均衡时按样本序号轮换保证配比")
+        for key, label in MODE_LABELS:
+            item = QtWidgets.QListWidgetItem(f"{label}（{key}）")
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, key)
+            item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(QtCore.Qt.CheckState.Checked if key in settings["modes"]
+                               else QtCore.Qt.CheckState.Unchecked)
+            self.modes.addItem(item)
+        self.form.addRow("调制类型", self.modes)
+        self.balanced = QtWidgets.QCheckBox("类别均衡（balanced：按序号轮换）")
+        self.balanced.setChecked(bool(settings["balanced"]))
+        self.form.addRow("", self.balanced)
+        self.power_low, self.power_high = self._range_row(
+            "功率（dBFS）", settings["power"], -200.0, 0.0, 1)
+        self.hop_low, self.hop_high = self._range_row(
+            "跳速（hop/s）", settings["hop"], 0.1, 1e6, 2)
+        self.form.addRow(QtWidgets.QLabel("跳速只作用于跳频样式（FH-2FSK / FH-OFDM）。"))
+        self.form.addRow(self._build_impairment_group())
+        self._add_note("数字样式的符号率由带宽与滚降系数推导；独立符号率与损伤项"
+                       "（频偏 / 相位噪声 / IQ 不平衡 / 多径）尚未实现，置灰，用到即报错。")
+        self._add_buttons()
+
+    def _build_impairment_group(self):
+        """损伤项：按 impairments 声明渲染，未实现的置灰，实现后自动启用。
+
+        放在本弹框里而不是页面上：损伤是项目引擎独有的能力（TorchSig 只有
+        ``impairment_level`` 的 0/1/2 三档扰动，不对应这里的任何一项）。
+        参数的取值编辑器随实现一起补，当前只做“有 / 没有”的声明。
+        """
+        group = QtWidgets.QGroupBox("损伤（实现后启用；接口已预留）")
+        grid = QtWidgets.QGridLayout(group)
+        self.impairment_checks = {}
+        for column, item in enumerate(IMPAIRMENTS.values()):
+            check = QtWidgets.QCheckBox(item.label)
+            check.setEnabled(item.implemented)
+            check.setToolTip(item.reason if not item.implemented
+                             else f"{item.summary}；施加顺序：{item.stage}")
+            self.impairment_checks[item.name] = check
+            grid.addWidget(check, 0, column)
+        grid.addWidget(QtWidgets.QLabel("全部未实现时置灰；配方里用到会直接报错，不静默忽略"),
+                       1, 0, 1, len(IMPAIRMENTS))
+        return group
+
+    def values(self):
+        values = self._common_values()
+        values.update({
+            "modes": [self.modes.item(index).data(QtCore.Qt.ItemDataRole.UserRole)
+                      for index in range(self.modes.count())
+                      if self.modes.item(index).checkState() == QtCore.Qt.CheckState.Checked],
+            "balanced": self.balanced.isChecked(),
+            "power": (self.power_low.value(), self.power_high.value()),
+            "hop": (self.hop_low.value(), self.hop_high.value()),
+        })
+        return values
+
+
+class TorchSigParamsDialog(_ParamsDialog):
+    """TorchSig 引擎的“信号与采样”配置弹框：信号族、扰动档位与类别映射。
+
+    没有跳频、也没有 ``impairments`` 组：扰动只有 ``impairment_level`` 的 0/1/2 三档，
+    因此损伤项只出现在项目引擎的弹框里。
+    """
+
+    def __init__(self, parent, settings):
+        super().__init__(parent, "生成参数 · 信号与采样（TorchSig）")
+        self._add_common_fields(settings)
+        self.generators = QtWidgets.QLineEdit(settings["torchsig"]["generators"])
+        self.generators.setToolTip("signal_generators 参数：all 或逗号分隔的类名")
+        self.form.addRow("TorchSig 信号族", self.generators)
+        self.impairment = QtWidgets.QComboBox()
+        self.impairment.addItem("不加扰动（IQ 与元数据严格对应）", None)
+        for level, label in ((0, "0 · 理想"), (1, "1 · 有线"), (2, "2 · 无线")):
+            self.impairment.addItem(label, level)
+        index = self.impairment.findData(settings["torchsig"]["impairment"])
+        self.impairment.setCurrentIndex(max(index, 0))
+        self.form.addRow("TorchSig 扰动档位", self.impairment)
+        self.mapping = QtWidgets.QLineEdit(settings["torchsig"]["mapping"])
+        self.mapping.setPlaceholderText("{\"TorchSig 类名\": \"A09 类别\"} 的 JSON 文件")
+        choose_mapping = QtWidgets.QPushButton("选择…")
+        choose_mapping.clicked.connect(self._choose_mapping)
+        row = QtWidgets.QWidget()
+        box = QtWidgets.QHBoxLayout(row)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.addWidget(self.mapping, 1)
+        box.addWidget(choose_mapping)
+        self.form.addRow("类别映射 JSON", row)
+        self._add_note("TorchSig 引擎没有跳频，也没有损伤项（扰动只有 0/1/2 三档）；"
+                       "生成需在 Linux 下进行，其他平台可导入 TorchSig bundle。")
+        self._add_buttons()
 
     def _choose_mapping(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "类别映射 JSON", "",
@@ -149,26 +218,22 @@ class SignalParamsDialog(QtWidgets.QDialog):
             self.mapping.setText(path)
 
     def values(self):
-        def pair(low, high):
-            return (low.value(), high.value())
-
-        modes = [self.modes.item(index).data(QtCore.Qt.ItemDataRole.UserRole)
-                 for index in range(self.modes.count())
-                 if self.modes.item(index).checkState() == QtCore.Qt.CheckState.Checked]
-        return {
-            "rate": self.rate.value(),
-            "duration": pair(self.duration_low, self.duration_high),
-            "signals": pair(self.count_low, self.count_high),
-            "snr": pair(self.snr_low, self.snr_high),
-            "bandwidth_ratio": (self.bandwidth_low.value() / 100.0,
-                                self.bandwidth_high.value() / 100.0),
-            "modes": modes, "balanced": self.balanced.isChecked(),
-            "power": pair(self.power_low, self.power_high),
-            "hop": pair(self.hop_low, self.hop_high),
+        values = self._common_values()
+        values.update({
             "torchsig": {"generators": self.generators.text().strip() or "all",
                          "impairment": self.impairment.currentData()},
             "torchsig_mapping": self.mapping.text().strip(),
-        }
+        })
+        return values
+
+
+#: 生成引擎 → “配置…”弹框类；新增引擎时在这里补一项即可。
+PARAMS_DIALOGS = {"project": ProjectParamsDialog, "torchsig": TorchSigParamsDialog}
+
+
+def params_dialog(parent, settings, engine):
+    """按“生成引擎”返回对应的“配置…”弹框实例。"""
+    return PARAMS_DIALOGS.get(engine, ProjectParamsDialog)(parent, settings)
 
 
 class TorchSigEnvDialog(QtWidgets.QDialog):
@@ -285,7 +350,6 @@ class CollectionGenPanel(QtWidgets.QWidget):
         layout.addWidget(self._build_basic_group())
         layout.addWidget(self._build_signal_group())
         layout.addWidget(self._build_labels_group())
-        layout.addWidget(self._build_impairment_group())
         layout.addWidget(self._build_action_group())
         self.preview = QtWidgets.QPlainTextEdit()
         self.preview.setReadOnly(True)
@@ -352,6 +416,9 @@ class CollectionGenPanel(QtWidgets.QWidget):
         self.signal_summary.setWordWrap(True)
         row.addWidget(self.signal_summary, 1)
         self.signal_button = QtWidgets.QPushButton("配置…")
+        self.signal_button.setToolTip("按“生成引擎”打开对应的配置弹框：\n"
+                                      "项目引擎（调制轮换、功率、跳速、损伤）／"
+                                      "TorchSig（信号族、扰动档位、类别映射）")
         self.signal_button.clicked.connect(self.configure_signals)
         row.addWidget(self.signal_button)
         return group
@@ -378,22 +445,6 @@ class CollectionGenPanel(QtWidgets.QWidget):
         self.amc.setChecked(bool(self.settings["amc"]))
         row.addWidget(self.amc)
         row.addStretch()
-        return group
-
-    def _build_impairment_group(self):
-        """损伤（折叠）：未实现的项置灰，实现在 impairments 里完成后自动启用。"""
-        group = QtWidgets.QGroupBox("损伤（实现后启用；接口已预留）")
-        group.setCheckable(False)
-        row = QtWidgets.QHBoxLayout(group)
-        self.impairment_checks = {}
-        for item in IMPAIRMENTS.values():
-            check = QtWidgets.QCheckBox(item.label)
-            check.setEnabled(item.implemented)
-            check.setToolTip(item.reason if not item.implemented
-                             else f"{item.summary}；施加顺序：{item.stage}")
-            self.impairment_checks[item.name] = check
-            row.addWidget(check)
-        row.addWidget(QtWidgets.QLabel("（全部未实现，置灰；配方里用到会直接报错，不静默忽略）"), 1)
         return group
 
     def _build_action_group(self):
@@ -461,12 +512,19 @@ class CollectionGenPanel(QtWidgets.QWidget):
                             if torchsig and not is_linux() else "就绪")
 
     def configure_signals(self):
-        dialog = SignalParamsDialog(self, self.settings, self.engine.currentData())
-        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-            values = dialog.values()
-            self.settings.update(values)
-            self.settings["torchsig"]["mapping"] = values["torchsig_mapping"]
-            self._sync()
+        """“配置…”按当前引擎打开对应的弹框（项目引擎 / TorchSig 各一个）。"""
+        dialog = params_dialog(self, self.settings, self.engine.currentData())
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+        options = values.pop("torchsig", None)
+        if isinstance(options, dict):
+            self.settings["torchsig"].update(options)
+        mapping = values.pop("torchsig_mapping", None)
+        if mapping is not None:
+            self.settings["torchsig"]["mapping"] = mapping
+        self.settings.update(values)
+        self._sync()
 
     def open_environment(self):
         if self.env_dialog is None:

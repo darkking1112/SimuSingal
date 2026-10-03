@@ -57,14 +57,17 @@ def _asset_row(asset_id, name, source, metadata_json=None, count=10_000, rate=20
 
 def test_fresh_workspace_uses_latest_schema(tmp_path):
     workspace = Workspace(tmp_path / "ws")
-    assert workspace.schema_version == 3
+    assert workspace.schema_version == 4
     marker = json.loads((workspace.root / "project.json").read_text(encoding="utf-8"))
-    assert marker == {"project": "signal_analysis", "schema": 3}
+    assert marker == {"project": "signal_analysis", "schema": 4}
     with workspace.connect() as conn:
         tables = {row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 3
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(assets)")}
+    assert version == 4
+    # 资产存储格式列（v4）：文件编码 + 字节序
+    assert {"storage_format", "endian"} <= columns
     for table in ("assets", "asset_shards", "collections", "collection_members",
                   "targets", "target_versions", "taxonomies", "task_sets",
                   "detection_labels", "amc_labels", "asset_coverage", "recipes",
@@ -82,7 +85,7 @@ def test_legacy_database_upgrade_backup_and_idempotence(tmp_path):
         _asset_row("c" * 32, "衍生样本", "parent:" + "b" * 32),
     ])
     workspace = Workspace(root)
-    assert workspace.schema_version == 3
+    assert workspace.schema_version == 4
     # 迁移前自动备份
     backups = list((root / "backups").glob("catalog-v1-*.sqlite3"))
     assert len(backups) == 1
@@ -90,6 +93,9 @@ def test_legacy_database_upgrade_backup_and_idempotence(tmp_path):
     assets = {asset["id"]: asset for asset in workspace.list_assets(limit=10)}
     assert set(assets) == {"a" * 32, "b" * 32, "c" * 32}
     assert assets["a" * 32]["path"] == f"assets/{'a' * 32}.npy"
+    # 老资产本来就是独立 NPY：新列补上默认值即可，无需回填文件
+    assert assets["a" * 32]["storage_format"] == "npy"
+    assert assets["a" * 32]["endian"] == "little"
     assert assets["a" * 32]["source_kind"] == "generated"
     assert assets["b" * 32]["source_kind"] == "imported"
     assert assets["c" * 32]["source_kind"] == "derived"
@@ -108,7 +114,7 @@ def test_legacy_database_upgrade_backup_and_idempotence(tmp_path):
     assert placeholder[0]["current"]["f_low_hz"] is None
     # 再次打开不重复迁移、不重复备份
     reopened = Workspace(root)
-    assert reopened.schema_version == 3
+    assert reopened.schema_version == 4
     assert len(list((root / "backups").glob("*.sqlite3"))) == 1
     assert len(reopened.list_targets("a" * 32)) == 1
     assert len(reopened.list_targets("b" * 32)) == 1
@@ -137,6 +143,6 @@ def test_malformed_metadata_falls_back_to_placeholder(tmp_path):
     conn.commit()
     conn.close()
     workspace = Workspace(root)
-    assert workspace.schema_version == 3
+    assert workspace.schema_version == 4
     assert workspace.list_targets("d" * 32)[0]["current"]["source"] == "import"
     assert len(list((root / "backups").glob("catalog-v1-*.sqlite3"))) == 1

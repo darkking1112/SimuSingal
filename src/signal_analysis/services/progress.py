@@ -8,6 +8,31 @@ import json
 import time
 from pathlib import Path
 
+#: 原子替换进度文件的重试次数与间隔。父进程每 0.2 s 打开一次 ``progress.json`` 读，
+#: 每次读句柄只存活几十微秒；Windows 上 ``os.replace`` 撞上这个读句柄会以
+#: ``WinError 5``（拒绝访问）/``WinError 32``（共享冲突）失败——重试几十毫秒即可
+#: 错开，否则整个任务会因为一条进度写不进去而崩掉。
+_REPLACE_ATTEMPTS = 6
+_REPLACE_DELAY_S = 0.02
+#: 允许重试的 Windows 错误码：ERROR_ACCESS_DENIED / ERROR_SHARING_VIOLATION。
+_SHARING_WINERRORS = (5, 32)
+
+
+def _is_sharing_error(exc):
+    return isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in _SHARING_WINERRORS
+
+
+def _replace_with_retry(temporary, path):
+    """原子替换 ``temporary`` → ``path``；被并发读句柄挡住时短暂重试。"""
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            temporary.replace(path)
+            return
+        except OSError as exc:
+            if not _is_sharing_error(exc) or attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_REPLACE_DELAY_S * (attempt + 1))
+
 
 class Reporter:
     """进度与取消通道：worker 写 ``progress.json``，父进程写 ``cancel.flag``。"""
@@ -27,7 +52,7 @@ class Reporter:
         temporary = path.with_suffix(".tmp")
         payload = {"done": int(done), "total": int(total), "message": message, **extra}
         temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(path)
+        _replace_with_retry(temporary, path)
 
     def cancelled(self):
         return self.directory is not None and (self.directory / "cancel.flag").exists()

@@ -6,7 +6,7 @@
 
 import json
 
-from .schema import _ASSET_COLUMNS_V3, _SCHEMA_V3
+from .schema import _ASSET_COLUMNS_V3, _ASSET_COLUMNS_V4, _SCHEMA_V3
 from .utils import _classify_source, _ensure_columns
 
 
@@ -17,7 +17,13 @@ class MigrationMixin:
         return super().schema_migrations() + [
             (2, "信号资产表", self._migration_assets_v2),
             (3, "信号集合与统一标注表", self._migration_unified_v3),
+            (4, "资产存储格式", self._migration_asset_format_v4),
         ]
+
+    @staticmethod
+    def _migration_asset_format_v4(conn):
+        """资产文件编码与字节序：老资产全部是独立 NPY，默认值即正确值，无需回填。"""
+        _ensure_columns(conn, "assets", _ASSET_COLUMNS_V4)
 
     @staticmethod
     def _migration_assets_v2(conn):

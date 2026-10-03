@@ -10,6 +10,8 @@ from common.storage import file_digest, utc_now
 from ..core_api import validate_rate, validate_samples
 from ..storage.schema import SOURCE_KINDS
 from ..storage.utils import _classify_source, _enum, _number, _optional_text
+from .io import (BINARY_DTYPES, FORMAT_EXTENSIONS, read_samples,
+                 resolve_storage_format, write_samples)
 
 
 class ShardWriter:
@@ -106,10 +108,11 @@ class ShardWriter:
 
 
 class AssetMixin:
-    """资产（独立 NPY / 分片）的登记、检索、读取与备注。"""
+    """资产（独立文件 / 分片）的登记、检索、读取与备注。"""
 
     def _insert_asset(self, conn, *, asset_id, name, relative, digest, rate, count,
                       source, source_kind, sample_kind, dtype, storage_kind,
+                      storage_format="npy", endian="little",
                       shard_id=None, shard_offset=None, shard_length=None,
                       origin_group_id=None, parent_asset_id=None, rf_center_hz=None,
                       capture_started_at=None, created_by=None):
@@ -117,22 +120,34 @@ class AssetMixin:
         conn.execute(
             "INSERT INTO assets (id, name, path, sha256, sample_rate, sample_count, "
             "created_at, source, label, source_kind, sample_kind, dtype, storage_kind, "
-            "shard_id, shard_offset, shard_length, origin_group_id, parent_asset_id, "
-            "rf_center_hz, capture_started_at, created_by, updated_at, archived_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+            "storage_format, endian, shard_id, shard_offset, shard_length, "
+            "origin_group_id, parent_asset_id, rf_center_hz, capture_started_at, "
+            "created_by, updated_at, archived_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
             (asset_id, name, relative, digest, rate, count, now, str(source), "",
-             source_kind, sample_kind, dtype, storage_kind, shard_id, shard_offset,
-             shard_length, origin_group_id or asset_id, parent_asset_id, rf_center_hz,
-             capture_started_at, created_by, now))
+             source_kind, sample_kind, dtype, storage_kind, storage_format, endian,
+             shard_id, shard_offset, shard_length, origin_group_id or asset_id,
+             parent_asset_id, rf_center_hz, capture_started_at, created_by, now))
+
+    def _remove_asset_files(self, asset_id):
+        """删除本次写入的资产文件，含 SigMF 对文件与原子写残留。"""
+        for path in (self.root / "assets").glob(f"{asset_id}.*"):
+            path.unlink(missing_ok=True)
 
     def add_samples(self, samples, sample_rate, name, source="generated", *, metadata=None,
                     source_kind=None, origin_group_id=None, parent_asset_id=None,
-                    rf_center_hz=None, capture_started_at=None, created_by=None):
-        """新增一条独立 NPY 资产；带生成摘要时同时登记目标与参考参数版本。"""
+                    rf_center_hz=None, capture_started_at=None, created_by=None,
+                    storage_format="npy", endian="little"):
+        """新增一条独立资产；带生成摘要时同时登记目标与参考参数版本。
+
+        ``storage_format`` 决定资产文件的编码（``npy``/``csv``/``iq16``/``iq32``/``sigmf``），
+        ``endian`` 只对交织 IQ 二进制生效；逻辑 dtype 一律按 complex64 登记。
+        """
         data = validate_samples(samples)
         rate = validate_rate(sample_rate)
         if not isinstance(name, str) or not name.strip() or len(name) > 200:
             raise ValueError("名称应为 1～200 个字符")
+        fmt, order = resolve_storage_format(storage_format, endian)
         inferred_kind, inferred_parent = _classify_source(source)
         kind = _enum(source_kind or inferred_kind, SOURCE_KINDS, "来源分类")
         parent = parent_asset_id or inferred_parent
@@ -141,20 +156,22 @@ class AssetMixin:
                 exists = conn.execute("SELECT 1 FROM assets WHERE id=?", (parent,)).fetchone()
             if not exists:
                 raise ValueError("父资产不存在")
+        generation = metadata.get("generation") if isinstance(metadata, dict) else None
         asset_id = uuid.uuid4().hex
-        relative = f"assets/{asset_id}.npy"
-        destination = self.root / relative
-        temporary = destination.with_suffix(".tmp")
+        destination = self.root / "assets" / f"{asset_id}{FORMAT_EXTENSIONS[fmt]}"
         try:
-            with temporary.open("wb") as stream:
-                np.save(stream, data, allow_pickle=False)
-            temporary.replace(destination)
+            written = write_samples(destination, data, fmt, order, sample_rate=rate,
+                                    description=name, generation=generation)
+            # SigMF 的载荷在数据文件上，元数据文件由同名后缀推导。
+            payload = written if fmt != "sigmf" else written.with_suffix(".sigmf-data")
+            relative = payload.relative_to(self.root).as_posix()
             with self.connect() as conn:
                 self._insert_asset(
                     conn, asset_id=asset_id, name=name, relative=relative,
-                    digest=file_digest(destination), rate=rate, count=data.size,
+                    digest=file_digest(payload), rate=rate, count=data.size,
                     source=source, source_kind=kind, sample_kind="complex",
                     dtype="complex64", storage_kind="file",
+                    storage_format=fmt, endian=order,
                     origin_group_id=origin_group_id, parent_asset_id=parent,
                     rf_center_hz=_number(rf_center_hz, "射频中心"),
                     capture_started_at=_optional_text(capture_started_at, "采集时间", 64),
@@ -163,13 +180,11 @@ class AssetMixin:
                     conn.execute("INSERT INTO asset_metadata VALUES (?,?)",
                                  (asset_id, json.dumps(metadata, ensure_ascii=False,
                                                        allow_nan=False)))
-                    generation = metadata.get("generation") if isinstance(metadata, dict) else None
                     if isinstance(generation, dict):
                         self._register_generation_targets(conn, asset_id, generation,
                                                           int(data.size), float(rate))
         except BaseException:
-            temporary.unlink(missing_ok=True)
-            destination.unlink(missing_ok=True)
+            self._remove_asset_files(asset_id)
             raise
         return self.get_asset(asset_id)
 
@@ -264,13 +279,21 @@ class AssetMixin:
         return self.get_asset(asset_id)
 
     def resolve_asset(self, asset):
-        """独立 NPY 资产的文件路径；分片资产必须走 :meth:`load_samples`。"""
+        """独立资产的文件路径与校验；SigMF 指向 ``.sigmf-data`` 并核对同一对元数据。
+
+        分片资产必须走 :meth:`load_samples`。
+        """
         if asset.get("storage_kind", "file") != "file":
             raise ValueError("分片资产没有独立文件，请通过 load_samples 读取")
         path = (self.root / asset["path"]).resolve()
         if not path.is_relative_to(self.root / "assets"):
             raise ValueError("资产路径越界")
-        if not path.is_file() or file_digest(path) != asset["sha256"]:
+        if not path.is_file():
+            raise ValueError("资产文件缺失或校验失败")
+        if str(asset.get("storage_format") or "npy") == "sigmf" and \
+                not path.with_suffix(".sigmf-meta").is_file():
+            raise ValueError("资产文件缺失或校验失败")
+        if file_digest(path) != asset["sha256"]:
             raise ValueError("资产文件缺失或校验失败")
         return path
 
@@ -289,10 +312,17 @@ class AssetMixin:
         return path, shard
 
     def load_samples(self, asset_id):
+        """按资产登记的存储格式返回 ``(asset, samples)``；NPY 保持内存映射读取。"""
         asset = self.get_asset(asset_id)
         kind = asset.get("storage_kind", "file")
         if kind == "file":
-            return asset, np.load(self.resolve_asset(asset), mmap_mode="r", allow_pickle=False)
+            path = self.resolve_asset(asset)
+            fmt = str(asset.get("storage_format") or "npy")
+            if fmt == "npy":
+                return asset, np.load(path, mmap_mode="r", allow_pickle=False)
+            # CSV / 交织 IQ / SigMF 无法内存映射：按登记格式整体读入并校验。
+            return asset, read_samples(path, binary_dtype=BINARY_DTYPES.get(fmt),
+                                       endian=str(asset.get("endian") or "little"))
         if kind == "shard":
             path, _ = self._shard_record(asset)
             offset = int(asset["shard_offset"])

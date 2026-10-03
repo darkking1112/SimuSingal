@@ -8,10 +8,12 @@ MODE_CHOICES = [("am", "AM 调幅"), ("fm", "FM 调频"), ("ssb", "SSB 单边带
 MODE_SHORT = {"am": "AM", "fm": "FM", "ssb": "SSB", "ask2": "2ASK", "qpsk": "QPSK",
               "qam16": "16QAM", "qam64": "64QAM", "fh_rc": "FH遥控", "fh_video": "FH图传",
               "noise": "噪声"}
-EXPORT_FORMATS = [("不导出（仅内部资产 .npy）", ""), ("NPY 格式 (.npy)", "npy"),
-                  ("CSV 两列 I,Q (.csv)", "csv"), ("交织 IQ · int16 (.bin)", "iq16"),
+ASSET_FORMATS = [("NPY 格式 (.npy)", "npy"), ("CSV 两列 I,Q (.csv)", "csv"),
+                  ("交织 IQ · int16 (.bin)", "iq16"),
                   ("交织 IQ · float32 (.bin)", "iq32"),
                   ("SigMF 双文件 (.sigmf-meta + .sigmf-data)", "sigmf")]
+#: CSV 资产体积约为 NPY 的 4 倍且读取受 512 MiB 上限约束：生成页单独收紧采样点上限。
+CSV_MAX_SAMPLES = 2_000_000
 #: 目标粒度与来源分类的界面文案（与 storage 枚举一一对应）。
 _SCOPE_LABELS = {"whole_record": "整条记录", "session": "会话", "hop": "单跳",
                  "segment": "片段"}

@@ -31,7 +31,12 @@ def worker_command(request_path, response_path, worker_module):
 
 
 def _read_progress(path):
-    """读取 worker 写的进度文件；不存在或正在替换时返回 None（下次再读）。"""
+    """读取 worker 写的进度文件；不存在或正在替换时返回 None（下次再读）。
+
+    worker 侧用原子替换写这个文件，所以这里可能读到"文件不存在"（替换的空档）——
+    如实返回 None，让父进程下一次轮询再读。反向的干扰（父进程的读句柄让 worker 的
+    替换失败）由 :mod:`signal_analysis.services.progress` 的重试兜住。
+    """
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):

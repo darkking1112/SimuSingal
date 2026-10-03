@@ -36,18 +36,23 @@ def test_sigmf_generate_import_gui(tmp_path, monkeypatch):
         window.refresh_assets()
         window.assets.setCurrentRow(0)
         assert window.selected_asset()["sample_rate"] == 12345
-        index = window.gen_export_format.findData("sigmf")
+        index = window.gen_asset_format.findData("sigmf")
         assert index >= 0
-        window.gen_export_format.setCurrentIndex(index)
+        window.gen_asset_format.setCurrentIndex(index)
         assert not window.gen_endian.isEnabled()
         window.gen_duration.setValue(.01)
         window.add_iq_signal({"mode": "qpsk", "offset": 0.0, "power_dbfs": -10.0,
                               "bandwidth": 100_000.0})
         window.generate_iq_clicked()
         wait_job(app, window)
-        assert len(list((tmp_path / "exports").glob("*.sigmf-meta"))) == 1
-        assert len(list((tmp_path / "exports").glob("*.sigmf-data"))) == 1
-        assert ".sigmf-data" in window.gen_result.text()
+        # SigMF 资产就是 assets/ 下的一对文件，没有 exports/ 副本
+        assets = tmp_path / "assets"
+        assert len(list(assets.glob("*.sigmf-meta"))) == 1
+        assert len(list(assets.glob("*.sigmf-data"))) == 1
+        assert not (tmp_path / "exports").exists()
+        assert window.last_result["storage_format"] == "sigmf"
+        assert "资产文件：assets/" in window.gen_result.text()
+        assert "SigMF 双文件" in window.gen_result.text()
     finally:
         window.close()
         app.processEvents()
@@ -202,8 +207,9 @@ def test_iq_generation_gui_workflow(tmp_path):
                               "bandwidth": 100_000.0})
         assert window.gen_signals.rowCount() == 1
         assert "QPSK" in window.gen_name.text()
-        # 二进制导出走完整 write_samples 路径。
-        window.gen_export_format.setCurrentIndex(3)  # iq16
+        # 二进制资产走完整 write_samples 路径。
+        window.gen_asset_format.setCurrentIndex(
+            window.gen_asset_format.findData("iq16"))
         assert window.gen_endian.isEnabled()
         window.generate_button.click()
         wait_job(app, window)
@@ -211,10 +217,41 @@ def test_iq_generation_gui_workflow(tmp_path):
         assert window.assets.count() == 1
         assert window.assets.currentItem().data(0x0100)["id"] == window.last_result["id"]
         assert "已生成资产" in window.gen_result.text()
-        assert window.last_result["export_format"] == "iq16"
-        export = tmp_path / "exports" / f"{window.last_result['id']}.bin"
-        assert export.exists()
-        assert export.stat().st_size > 0
+        assert window.last_result["storage_format"] == "iq16"
+        asset = tmp_path / window.last_result["asset_path"]
+        assert asset.suffix == ".bin"
+        # int16 交织 IQ：每个复采样 4 B
+        assert asset.stat().st_size == 4 * window.last_result["summary"]["sample_count"]
+        assert not (tmp_path / "exports").exists()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.gui
+def test_csv_asset_format_lowers_sample_limit(tmp_path):
+    """CSV 资产体积大且读端有 512 MiB 上限：生成页把采样点上限收紧并给出可读提示。"""
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(tmp_path)
+    window.show()
+    try:
+        assert "上限 16,000,000" in window.gen_count_label.text()
+        window.gen_asset_format.setCurrentIndex(window.gen_asset_format.findData("csv"))
+        assert "上限 2,000,000" in window.gen_count_label.text()
+        window.add_iq_signal({"mode": "fm", "offset": 0.0, "power_dbfs": -6.0,
+                              "bandwidth": 40_000.0})
+        window.gen_rate.setValue(1_000_000.0)
+        window.gen_duration.setValue(3.0)  # 3,000,000 点 > CSV 上限
+        assert "上限 2,000,000" in window.gen_count_label.text()
+        window.generate_iq_clicked()
+        assert window.active_job is None
+        assert "超出" in window.status.text() and "CSV" in window.status.text()
+        # 换回 NPY 后上限恢复，且不再被拦
+        window.gen_asset_format.setCurrentIndex(window.gen_asset_format.findData("npy"))
+        window.gen_duration.setValue(.01)
+        window.generate_iq_clicked()
+        wait_job(app, window)
+        assert window.last_result["storage_format"] == "npy"
     finally:
         window.close()
         app.processEvents()
@@ -795,8 +832,7 @@ def test_asset_selection_reports_file_in_status_bar(tmp_path):
         assert f"{asset['sample_rate']:g} Hz" in text
         assert "资产：" in text and "complex64" in text
         assert "内置生成 iq_noise_v1" in text  # 内置生成的数据没有外部源文件
-        # 默认导出格式为“不导出”，所以导出字段如实写“无”
-        assert "导出：无" in text
+        assert "导出" not in text  # 导出概念已移除：状态栏只描述资产本体
         assert window.status_detail.isVisible()
         # 完整文本保留在 text()/tooltip，界面只显示省略后的字符串
         assert window.status_detail.toolTip() == text
@@ -844,16 +880,11 @@ def test_asset_status_reports_imported_source_format(tmp_path, monkeypatch):
         app.processEvents()
 
 
-def _export_label(text):
-    """从状态栏第二行取出“导出：”字段（到行尾）。"""
-    return text.split("导出：", 1)[1]
-
-
 @pytest.mark.gui
-def test_asset_status_reports_export_files(tmp_path, monkeypatch):
-    """导出字段从 exports/ 下按 <asset_id>.* 现扫现算：SigMF 成对文件只计一条，
+def test_asset_status_reports_storage_format(tmp_path, monkeypatch):
+    """状态栏“资产：”按 catalog 登记的存储格式描述：NPY / SigMF / 交织 IQ（含字节序）。
 
-    没有导出物写“无”，且重启后（无内存状态）依然能显示。
+    格式取自登记值而不是现扫磁盘，切换选择后必须跟着变。
     """
     from signal_analysis.data.io import write_samples
 
@@ -861,7 +892,6 @@ def test_asset_status_reports_export_files(tmp_path, monkeypatch):
     window = MainWindow(tmp_path)
     window.show()
     try:
-        # 先造一个没有导出物的资产
         samples = np.exp(2j * np.pi * 0.01 * np.arange(4096)).astype(np.complex64)
         source = write_samples(tmp_path / "reference", samples, "npy", sample_rate=250_000)
         execute({"workspace": str(tmp_path), "action": "import", "path": str(source),
@@ -869,10 +899,10 @@ def test_asset_status_reports_export_files(tmp_path, monkeypatch):
         window.refresh_assets()
         window.assets.setCurrentRow(0)
         imported = window.selected_asset()
-        assert _export_label(window.status_detail.text()) == "无"
+        assert "工作区 NPY（complex64 复基带 IQ）" in window.status_detail.text()
 
-        # SigMF 双文件是按“一次导出”计的：只报元数据那条，不重复报 .sigmf-data
-        window.gen_export_format.setCurrentIndex(window.gen_export_format.findData("sigmf"))
+        # SigMF 是一对文件，状态栏只报一次（位置指向 .sigmf-data）
+        window.gen_asset_format.setCurrentIndex(window.gen_asset_format.findData("sigmf"))
         window.gen_duration.setValue(.01)
         window.add_iq_signal({"mode": "qpsk", "offset": 0.0, "power_dbfs": -10.0,
                               "bandwidth": 100_000.0})
@@ -880,57 +910,47 @@ def test_asset_status_reports_export_files(tmp_path, monkeypatch):
         wait_job(app, window)
         generated = window.selected_asset()
         assert generated["id"] != imported["id"]
-        exports = _export_label(window.status_detail.text())
-        assert exports.count("SigMF 双文件") == 1
-        assert f"exports/{generated['id']}.sigmf-meta" in exports
-        assert ".sigmf-data" not in exports
+        text = window.status_detail.text()
+        assert text.count("SigMF 双文件") == 1
+        assert generated["path"].endswith(".sigmf-data")
 
-        # 换回没有导出物的那个资产，字段要跟着变（不是缓存的一次性快照）
+        # 换回导入的那个资产，字段要跟着变（不是缓存的一次性快照）
         for row in range(window.assets.count()):
             item = window.assets.item(row)
             if item.data(QtCore.Qt.ItemDataRole.UserRole)["id"] == imported["id"]:
                 window.assets.setCurrentItem(item)
                 break
-        assert _export_label(window.status_detail.text()) == "无"
+        assert "工作区 NPY" in window.status_detail.text()
 
-        # int16 交织二进制无法从后缀判断量化类型，按字节数反推
-        window.gen_export_format.setCurrentIndex(window.gen_export_format.findData("iq16"))
+        # 交织 IQ 的字节序来自登记值（大端要如实写出来）
+        window.gen_asset_format.setCurrentIndex(window.gen_asset_format.findData("iq16"))
+        window.gen_endian.setCurrentIndex(window.gen_endian.findData("big"))
         window.generate_iq_clicked()
         wait_job(app, window)
-        exports = _export_label(window.status_detail.text())
-        assert "交织 IQ 二进制 · int16" in exports
-        assert "exports/" in exports and ".bin" in exports
+        text = window.status_detail.text()
+        assert "工作区 交织 IQ · int16（大端）" in text
     finally:
         window.close()
         app.processEvents()
 
 
-def test_asset_exports_helper_reads_disk_state(tmp_path):
-    """_asset_exports 只看磁盘：目录缺失、无匹配、成对 SigMF、无宿主名字段都安全。"""
-    from signal_analysis.ui import _asset_exports, _iq_binary_kind
+def test_asset_format_helper_reports_registered_format():
+    """_asset_format 只读登记值：格式 + 字节序 + 来源，不猜后缀、不碰磁盘。"""
+    from signal_analysis.ui import ASSET_FORMAT_TEXT, _asset_format
 
-    root = tmp_path / "exports"
-    asset = {"id": "a" * 32, "sample_count": 100}
-    assert _asset_exports(root, asset) == []  # 目录还不存在
-    root.mkdir()
-    assert _asset_exports(root, asset) == []  # 空目录
-    # 别人资产的导出物不能被串到本资产名下
-    (root / f"{'b' * 32}.csv").write_bytes(b"0,0\n")
-    assert _asset_exports(root, asset) == []
-    # SigMF 成对：只报元数据；只有数据文件（半成品）时如实报出来
-    (root / f"{asset['id']}.sigmf-meta").write_text("{}")
-    (root / f"{asset['id']}.sigmf-data").write_bytes(b"\0" * 800)
-    assert _asset_exports(root, asset) == [f"SigMF 双文件（exports/{asset['id']}.sigmf-meta）"]
-    (root / f"{asset['id']}.sigmf-meta").unlink()
-    assert _asset_exports(root, asset) == [f"SigMF 双文件（exports/{asset['id']}.sigmf-data）"]
-    # 未知后缀不隐藏，照原样列出来（多个导出物按文件名排序，.dat 在 .sigmf-data 之前）
-    (root / f"{asset['id']}.dat").write_bytes(b"\0")
-    assert _asset_exports(root, asset) == [
-        f"dat 文件（exports/{asset['id']}.dat）",
-        f"SigMF 双文件（exports/{asset['id']}.sigmf-data）",
-    ]
-    # 每复采样 4 B = int16、8 B = float32，对不上就说“类型未知”
-    assert _iq_binary_kind(400, 100) == "int16"
-    assert _iq_binary_kind(800, 100) == "float32"
-    assert _iq_binary_kind(123, 100) == "类型未知"
-    assert _iq_binary_kind(800, 0) == "类型未知"  # 零采样不猜
+    assert ASSET_FORMAT_TEXT["sigmf"] == "SigMF 双文件"
+    base = {"source": "generated:iq_qpsk_v1"}
+    assert _asset_format({**base, "storage_format": "npy", "endian": "little"}) == (
+        "工作区 NPY（complex64 复基带 IQ） ← 内置生成 iq_qpsk_v1")
+    assert _asset_format({**base, "storage_format": "csv"}) == (
+        "工作区 CSV（两列 I,Q） ← 内置生成 iq_qpsk_v1")
+    assert _asset_format({**base, "storage_format": "iq16", "endian": "big"}) == (
+        "工作区 交织 IQ · int16（大端） ← 内置生成 iq_qpsk_v1")
+    assert _asset_format({**base, "storage_format": "sigmf"}) == (
+        "工作区 SigMF 双文件 ← 内置生成 iq_qpsk_v1")
+    # 导入的资产带原始来源后缀；缺列的老资产按 NPY 兜底
+    assert _asset_format({"source": "/data/记录.sigmf-meta", "storage_format": "npy"}) == (
+        "工作区 NPY（complex64 复基带 IQ） ← 导入 SigMF 双文件")
+    assert _asset_format({"source": ""}) == "工作区 NPY（complex64 复基带 IQ） ← 导入 未知来源"
+    assert _asset_format({"source": "x.bin", "storage_format": "weird"}) == (
+        "工作区 weird 文件 ← 导入 交织 IQ 二进制")

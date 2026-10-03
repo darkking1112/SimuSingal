@@ -19,6 +19,11 @@ LABEL_TABLES = {"detection": "detection_labels", "amc": "amc_labels"}
 _MODULATION_NAMES = {"am": "AM", "fm": "FM", "ssb": "SSB", "ask2": "2ASK",
                      "qpsk": "QPSK", "qam16": "16QAM", "qam64": "64QAM"}
 
+_ASSET_COLUMNS_V4 = {
+    "storage_format": "TEXT NOT NULL DEFAULT 'npy'",
+    "endian": "TEXT NOT NULL DEFAULT 'little'",
+}
+
 _ASSET_COLUMNS_V3 = {
     "source_kind": "TEXT NOT NULL DEFAULT ''",
     "sample_kind": "TEXT NOT NULL DEFAULT 'complex'",

@@ -80,6 +80,49 @@ def test_sidebar_collection_filter_and_detail(tmp_path):
 
 
 @pytest.mark.gui
+def test_sidebar_collection_scope_drives_generation(tmp_path):
+    """生成页不再自带目标集合：产物按左侧选中项归属，零散时不写初始标注。"""
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(tmp_path)
+    window.show()
+    try:
+        collection = window.workspace.create_collection("生成目标集")
+        window.refresh_collections()
+        window.add_iq_signal({"mode": "fm", "offset": 0.0, "power_dbfs": -6.0,
+                              "bandwidth": 40_000.0})
+        window.gen_duration.setValue(.01)
+        # 生成页不再自带目标集合下拉与导出格式：目标集合只能用左侧选中项
+        assert not hasattr(window, "gen_collection")
+        assert not hasattr(window, "gen_export_format")
+
+        # 侧栏选“全部资产/零散资产”：不入集合，初始标注不可用
+        window.collection_combo.setCurrentIndex(0)
+        assert not window.gen_initial_labels.isEnabled()
+        window.gen_initial_labels.setChecked(True)  # 置灰前的勾选会被清掉
+        window.generate_iq_clicked()
+        wait_job(app, window)
+        scattered = window.last_result
+        assert scattered["collection_id"] is None and scattered["initial_labels"] == 0
+        assert window.workspace.list_collections()[0]["asset_count"] == 0
+
+        # 侧栏选中集合：产物入集合，初始标注生效
+        index = window.collection_combo.findData(collection["id"])
+        window.collection_combo.setCurrentIndex(index)
+        assert window.gen_initial_labels.isEnabled()
+        window.gen_initial_labels.setChecked(True)
+        window.generate_iq_clicked()
+        wait_job(app, window)
+        joined = window.last_result
+        assert joined["collection_id"] == collection["id"]
+        assert joined["collection_name"] == "生成目标集"
+        assert joined["initial_labels"] > 0
+        assert window.workspace.list_collections()[0]["asset_count"] == 1
+        assert "已加入集合" in window.gen_result.text()
+    finally:
+        window.close()
+
+
+@pytest.mark.gui
 def test_sidebar_paging_controls(tmp_path):
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = MainWindow(tmp_path)

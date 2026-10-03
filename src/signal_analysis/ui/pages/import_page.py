@@ -13,7 +13,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ...core_api import MAX_SAMPLES, plan_signal, spectrum_row
 from ...services.imports import import_signal_name
-from ..constants import (EXPORT_FORMATS, IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
+from ..constants import (IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
                          IMPORT_COL_FILE, IMPORT_COL_FORMAT, IMPORT_COL_MOD,
                          IMPORT_COL_NAME, IMPORT_COL_POINTS, IMPORT_COL_RATE,
                          IMPORT_COL_SNR, IMPORT_COL_STATUS, IMPORT_FILE_FILTER,
@@ -22,8 +22,8 @@ from ..constants import (EXPORT_FORMATS, IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
                          PLAY_MAX_ROWS_PER_TICK, PLAY_WAVE_POINTS, _SCOPE_LABELS,
                          _SOURCE_KIND_LABELS, _VERSION_SOURCE_LABELS)
 from ..dialogs import SignalParamsDialog
-from ..helpers import (_asset_exports, _asset_format, _fmt_hz, _fmt_metric, _fmt_span,
-                       _iq_binary_kind, _mirrored_spectrum)
+from ..helpers import (_asset_format, _fmt_hz, _fmt_metric, _fmt_span,
+                       _mirrored_spectrum)
 from ..runner import _run_task
 from ..widgets import UnitSpinBox, _freq_spin, _plain_spin, _unit_row
 
