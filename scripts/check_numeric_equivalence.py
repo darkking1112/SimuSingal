@@ -53,10 +53,14 @@ def snapshot():
 
     rate = 1_000_000.0
     for index, mode in enumerate(iqgen.MODES):
-        spec = {"mode": mode, "offset": 100_000.0, "bandwidth": 100_000.0,
-                "power_dbfs": -10.0}
+        spec = ({"mode": "noise", "power_dbfs": -10.0} if mode == "noise" else
+                {"mode": mode, "offset": 100_000.0, "bandwidth": 100_000.0,
+                 "power_dbfs": -10.0})
+        # 带内 SNR 需要调制信号做参考；自定义噪声（noise）单独成行时按绝对功率定标。
+        noise = ({"bandwidth": rate, "power_dbfs": -20.0} if mode == "noise"
+                 else {"bandwidth": rate, "snr_db": 20.0})
         x, generation = iqgen.generate_iq(rate, 0.05, [spec],
-                                     noise={"bandwidth": rate, "snr_db": 20.0}, seed=index)
+                                     noise=noise, seed=index)
         results[mode + "/generation"] = encode((x, generation))
         record(mode + "/plan", iqgen.plan_signal, spec, rate)
         record(mode + "/analysis", dsp.analyze, x, rate)

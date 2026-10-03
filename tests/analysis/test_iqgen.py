@@ -132,7 +132,7 @@ def test_inband_snr_from_spectral_density():
 
 def test_noise_band_must_cover_strongest_signal():
     # 信号位于 100 kHz 附近、占用带宽约 96 kHz，50 kHz 噪声带宽无法覆盖。
-    with pytest.raises(ValueError, match="未覆盖最强信号"):
+    with pytest.raises(ValueError, match="未覆盖最强调制信号"):
         generate_iq(RATE, 0.05, [dict(BASE, mode="qpsk")],
                     noise={"bandwidth": 50_000.0, "snr_db": 20.0}, seed=22)
 
@@ -177,6 +177,61 @@ def test_noise_bandwidth_limits_spectrum():
     inband = psd[np.abs(frequencies) <= 100_000.0].sum()
     outband = psd[np.abs(frequencies) > 150_000.0].sum()
     assert inband > 1000 * outband
+
+
+def test_custom_noise_is_full_band_white():
+    """自定义噪声是全带白噪声：只填功率，频点 0、带宽 = 采样率，可复现、不参与带内 SNR。"""
+    spec = {"mode": "noise", "power_dbfs": -13.0}
+    plan = plan_signal(spec, RATE)
+    assert (plan["mode"], plan["offset"], plan["bandwidth"], plan["bandwidth_actual"]) == \
+        ("noise", 0.0, RATE, RATE)
+    samples, summary = generate_iq(RATE, 0.2, [spec], seed=30)
+    entry = summary["signals"][0]
+    assert entry["noise_kind"] == "white"
+    assert entry["snr_inband_db"] is None
+    assert samples.dtype == np.complex64 and samples.size == 200_000
+    assert np.isfinite(samples).all()
+    assert measured_power(samples) == pytest.approx(-13.0, abs=0.5)
+    # 全带：低频段与高频段的平均功率谱密度同量级（不是带限噪声）。
+    psd = np.abs(np.fft.fftshift(np.fft.fft(samples))) ** 2
+    frequencies = np.fft.fftshift(np.fft.fftfreq(samples.size, 1 / RATE))
+    low = psd[np.abs(frequencies) <= 50_000.0].mean()
+    high = psd[np.abs(frequencies) >= 400_000.0].mean()
+    assert 0.5 < low / high < 2.0
+    again, _ = generate_iq(RATE, 0.2, [spec], seed=30)
+    np.testing.assert_array_equal(samples, again)
+
+
+def test_custom_noise_rejects_offset_and_bandwidth():
+    """全带白噪声没有频点/带宽自由度：给了就报错，不静默忽略。"""
+    for extra in ({"offset": 100_000.0}, {"bandwidth": 100_000.0}):
+        with pytest.raises(ValueError, match="全带白噪声"):
+            plan_signal({"mode": "noise", "power_dbfs": -13.0, **extra}, RATE)
+    # 与固定值一致时接受（等价写法）
+    assert plan_signal({"mode": "noise", "offset": 0.0, "bandwidth": RATE},
+                       RATE)["bandwidth_actual"] == RATE
+
+
+def test_custom_noise_row_is_not_snr_reference():
+    """带内 SNR 的参考只在调制信号里选：噪声行功率再大也不参与。"""
+    loud_noise = {"mode": "noise", "power_dbfs": -3.0}
+    quiet = dict(BASE, mode="qpsk", offset=0.0, power_dbfs=-20.0)
+    _, summary = generate_iq(RATE, 0.2, [loud_noise, quiet],
+                             noise={"bandwidth": RATE, "snr_db": 20.0}, seed=31)
+    assert summary["noise"]["snr_reference_index"] == 1
+    assert summary["signals"][0]["snr_inband_db"] is None
+    assert summary["signals"][1]["snr_inband_db"] == pytest.approx(20.0, abs=0.2)
+
+
+def test_noise_floor_requires_modulation_signal():
+    """带内 SNR 需要调制信号做参考；纯噪声改走绝对功率。"""
+    spec = {"mode": "noise", "power_dbfs": -13.0}
+    with pytest.raises(ValueError, match="至少一个调制信号"):
+        generate_iq(RATE, 0.05, [spec], noise={"snr_db": 20.0}, seed=32)
+    _, summary = generate_iq(RATE, 0.05, [spec], noise={"power_dbfs": -20.0}, seed=32)
+    assert summary["noise"]["snr_db"] is None
+    assert summary["noise"]["snr_reference_index"] is None
+    assert summary["signals"][0]["noise_kind"] == "white"
 
 
 def test_fh_remote_control_hops_and_frequencies():

@@ -323,10 +323,13 @@ def check_generator_support(recipe):
             raise ValueError(f"{engine} 引擎不支持参数：{group}.{' / '.join(unknown)}")
     if engine == "project":
         modes = literal_values((recipe.get("signals") or {}).get("mode") or {"fixed": None})
-        bad = [item for item in (modes or []) if item not in MODES]
+        # 集合轮换只用 9 种调制样式：自定义噪声（noise）只服务于“单个信号生成”页，
+        # 放进配方会让检测标签里出现“纯噪声目标”。
+        allowed_modes = [key for key in MODES if key != "noise"]
+        bad = [item for item in (modes or []) if item not in allowed_modes]
         if bad:
             raise ValueError(f"signals.mode 含不支持的样式：{' / '.join(map(str, bad))}；"
-                             f"可选：{', '.join(MODES)}")
+                             f"可选：{', '.join(allowed_modes)}")
     else:
         record = recipe.get("record") or {}
         for key, label in (("sample_rate_hz", "采样率"), ("duration_s", "时长")):

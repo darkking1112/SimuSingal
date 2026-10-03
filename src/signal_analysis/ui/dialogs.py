@@ -1,5 +1,7 @@
 """对话框：“信号与采样”配置弹框（SignalParamsDialog，生成页使用）。"""
 
+import math
+
 from PySide6 import QtWidgets
 
 from ..core_api import plan_signal
@@ -21,14 +23,18 @@ class SignalParamsDialog(QtWidgets.QDialog):
         self.setWindowTitle(f"信号参数 · {MODE_SHORT[mode]}")
         form = QtWidgets.QFormLayout(self)
         offset_row, self.offset = _freq_spin(-rate / 2, rate / 2, spec.get("offset", rate * 0.1), 2)
-        form.addRow("频点（基带偏移）", offset_row)
         power_row, self.power = _plain_spin(-200.0, 0.0, spec.get("power_dbfs", -10.0), 1, "dBFS")
-        form.addRow("功率", power_row)
         bw_row, self.bandwidth = _freq_spin(1.0, rate, spec.get("bandwidth", rate / 10.0), 2)
-        if mode in ("fh_rc", "fh_video"):
-            form.addRow(QtWidgets.QLabel("整体频带范围（含最外侧信道边缘）"), bw_row)
+        if mode == "noise":
+            # 自定义噪声是全带白噪声：频点固定 0、带宽固定采样率，所以只填功率。
+            form.addRow("功率", power_row)
         else:
-            form.addRow("目标带宽", bw_row)
+            form.addRow("频点（基带偏移）", offset_row)
+            form.addRow("功率", power_row)
+            if mode in ("fh_rc", "fh_video"):
+                form.addRow(QtWidgets.QLabel("整体频带范围（含最外侧信道边缘）"), bw_row)
+            else:
+                form.addRow("目标带宽", bw_row)
         if mode == "am":
             self.depth = _plain_spin(0.01, 1.0, spec.get("depth", 0.8), 2)
             form.addRow("调制深度", self.depth)
@@ -58,6 +64,11 @@ class SignalParamsDialog(QtWidgets.QDialog):
         elif mode in ("qpsk", "qam16", "qam64"):
             self.alpha = _plain_spin(0.05, 1.0, spec.get("alpha", 0.35), 2)
             form.addRow("滚降系数 α", self.alpha)
+        elif mode == "noise":
+            note = QtWidgets.QLabel("自定义噪声为全带白噪声：频点固定 0、带宽固定为采样率，只填功率；"
+                                    "不参与「背景噪声」的带内 SNR 折算。")
+            note.setWordWrap(True)
+            form.addRow(note)
         elif mode in ("fh_rc", "fh_video"):
             hop_row, self.hop_rate = _plain_spin(
                 0.001, rate, spec.get("hop_rate", 100.0 if mode == "fh_rc" else 50.0), 1, "hop/s")
@@ -181,6 +192,9 @@ class SignalParamsDialog(QtWidgets.QDialog):
             common["hop_bandwidth"] = bw_spin.value()
 
     def spec(self):
+        if self.mode == "noise":
+            # 全带白噪声：频点/带宽由 plan_signal 固定（0 与采样率），只提交功率。
+            return {"mode": "noise", "power_dbfs": self.power.value()}
         common = {"mode": self.mode, "offset": self.offset.value(),
                   "power_dbfs": self.power.value(), "bandwidth": self.bandwidth.value()}
         if self.mode == "am":
@@ -247,6 +261,9 @@ class SignalParamsDialog(QtWidgets.QDialog):
         elif mode in ("ask2", "qpsk", "qam16", "qam64"):
             text = (f"{plan['pulse'].upper()}，符号速率 {_fmt_hz(plan['symbol_rate'])}，"
                     f"每符号 {plan['sps']} 个采样 → 实际带宽 {_fmt_hz(plan['bandwidth_actual'])}")
+        elif mode == "noise":
+            text = (f"全带白噪声，带宽 = 采样率 {_fmt_hz(self.rate)}，"
+                    f"功率谱密度 {plan['power_dbfs'] - 10.0 * math.log10(self.rate):.1f} dBFS/Hz")
         elif mode == "fh_rc":
             text = (f"{len(plan['hop_points'])} 个频点，中心跨度 {_fmt_hz(plan['hop_span'])}，"
                     f"单跳带宽 {_fmt_hz(plan['hop_bandwidth'])} → 整体频带范围 {_fmt_hz(plan['bandwidth_actual'])}；"

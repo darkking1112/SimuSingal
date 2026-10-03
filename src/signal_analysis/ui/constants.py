@@ -3,9 +3,11 @@
 MODE_CHOICES = [("am", "AM 调幅"), ("fm", "FM 调频"), ("ssb", "SSB 单边带"),
                 ("ask2", "2ASK 二进制幅移键控"), ("qpsk", "QPSK 四相相移键控"),
                 ("qam16", "16QAM 正交幅度调制"), ("qam64", "64QAM 正交幅度调制"),
-                ("fh_rc", "跳频 · 遥控链路 (FH-2FSK)"), ("fh_video", "跳频 · 图传链路 (FH-OFDM)")]
+                ("fh_rc", "跳频 · 遥控链路 (FH-2FSK)"), ("fh_video", "跳频 · 图传链路 (FH-OFDM)"),
+                ("noise", "自定义噪声（全带白噪声）")]
 MODE_SHORT = {"am": "AM", "fm": "FM", "ssb": "SSB", "ask2": "2ASK", "qpsk": "QPSK",
-              "qam16": "16QAM", "qam64": "64QAM", "fh_rc": "FH遥控", "fh_video": "FH图传"}
+              "qam16": "16QAM", "qam64": "64QAM", "fh_rc": "FH遥控", "fh_video": "FH图传",
+              "noise": "噪声"}
 EXPORT_FORMATS = [("不导出（仅内部资产 .npy）", ""), ("NPY 格式 (.npy)", "npy"),
                   ("CSV 两列 I,Q (.csv)", "csv"), ("交织 IQ · int16 (.bin)", "iq16"),
                   ("交织 IQ · float32 (.bin)", "iq32"),

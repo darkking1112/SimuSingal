@@ -41,6 +41,8 @@ def test_sigmf_generate_import_gui(tmp_path, monkeypatch):
         window.gen_export_format.setCurrentIndex(index)
         assert not window.gen_endian.isEnabled()
         window.gen_duration.setValue(.01)
+        window.add_iq_signal({"mode": "qpsk", "offset": 0.0, "power_dbfs": -10.0,
+                              "bandwidth": 100_000.0})
         window.generate_iq_clicked()
         wait_job(app, window)
         assert len(list((tmp_path / "exports").glob("*.sigmf-meta"))) == 1
@@ -64,6 +66,10 @@ def test_analysis_gui_workflow(tmp_path, monkeypatch):
         analysis = window._page_index("态势显示")
         assert window.tabs.widget(generator).isAncestorOf(window.generate_button)
         assert not window.tabs.widget(analysis).isAncestorOf(window.generate_button)
+        # 背景噪声以最强调制信号为参考，因此这里必须先添加一个调制信号（纯噪声请用“自定义噪声”样式）
+        # 用 AM 保证分析页走“非数字信号”分支（时频图而非星座图）
+        window.add_iq_signal({"mode": "am", "offset": 0.0, "power_dbfs": -10.0,
+                              "bandwidth": 100_000.0})
         window.generate_iq_clicked()
         wait_job(app, window)
         assert window.assets.count() == 1
@@ -209,6 +215,66 @@ def test_iq_generation_gui_workflow(tmp_path):
         export = tmp_path / "exports" / f"{window.last_result['id']}.bin"
         assert export.exists()
         assert export.stat().st_size > 0
+    finally:
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.gui
+def test_noise_group_requires_modulation_signal(tmp_path):
+    """背景噪声以最强调制信号为参考：没有调制信号（含只有噪声行）时整组禁用。"""
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(tmp_path)
+    window.show()
+    try:
+        window.tabs.setCurrentIndex(window._page_index("IQ 信号生成"))
+        assert not window.gen_noise_enabled.isEnabled()
+        assert not window.gen_snr.isEnabled()
+        assert not hasattr(window, "gen_noise_bw")  # 全带白噪声：界面上没有噪声带宽
+        assert window.gen_noise_hint.isVisible()
+        # 只有自定义噪声行时仍算“没有调制信号”
+        window.add_iq_signal({"mode": "noise", "power_dbfs": -15.0})
+        assert not window.gen_noise_enabled.isEnabled()
+        assert not window.gen_snr.isEnabled()
+        # 加入调制信号后整组启用
+        window.add_iq_signal({"mode": "qpsk", "offset": 0.0, "power_dbfs": -10.0,
+                              "bandwidth": 100_000.0})
+        assert window.gen_noise_enabled.isEnabled()
+        assert window.gen_snr.isEnabled()
+        assert not window.gen_noise_hint.isVisible()
+        assert "QPSK" in window.gen_name.text() and "噪声" in window.gen_name.text()
+        window.gen_snr.setValue(15.0)
+        window.gen_duration.setValue(0.02)
+        window.generate_button.click()
+        wait_job(app, window)
+        summary = window.last_result["summary"]
+        assert [entry["mode"] for entry in summary["signals"]] == ["noise", "qpsk"]
+        # 参考仍是最强调制信号（#2），噪声行不给带内 SNR
+        assert summary["noise"]["snr_reference_index"] == 1
+        assert summary["signals"][0]["snr_inband_db"] is None
+        assert summary["signals"][1]["snr_inband_db"] == pytest.approx(15.0, abs=0.2)
+    finally:
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.gui
+def test_custom_noise_only_record_generates(tmp_path):
+    """只有自定义噪声行也能生成纯噪声资产，且不发送背景噪声参数。"""
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(tmp_path)
+    window.show()
+    try:
+        window.tabs.setCurrentIndex(window._page_index("IQ 信号生成"))
+        window.gen_duration.setValue(0.01)
+        window.add_iq_signal({"mode": "noise", "power_dbfs": -18.0})
+        window.generate_button.click()
+        wait_job(app, window)
+        assert window.last_result["kind"] == "generate"
+        summary = window.last_result["summary"]
+        assert [entry["mode"] for entry in summary["signals"]] == ["noise"]
+        assert summary["noise"]["enabled"] is False
+        assert window.assets.count() == 1
     finally:
         window.close()
         app.processEvents()
@@ -712,6 +778,8 @@ def test_asset_selection_reports_file_in_status_bar(tmp_path):
     window.show()
     try:
         assert not window.status_detail.isVisible()  # 未选数据时不占位
+        # 纯噪声记录改用“自定义噪声”样式（背景噪声需要调制信号做参考）
+        window.add_iq_signal({"mode": "noise", "power_dbfs": -18.0})
         window.generate_iq_clicked()
         wait_job(app, window)
         window.assets.setCurrentRow(0)
@@ -806,6 +874,8 @@ def test_asset_status_reports_export_files(tmp_path, monkeypatch):
         # SigMF 双文件是按“一次导出”计的：只报元数据那条，不重复报 .sigmf-data
         window.gen_export_format.setCurrentIndex(window.gen_export_format.findData("sigmf"))
         window.gen_duration.setValue(.01)
+        window.add_iq_signal({"mode": "qpsk", "offset": 0.0, "power_dbfs": -10.0,
+                              "bandwidth": 100_000.0})
         window.generate_iq_clicked()
         wait_job(app, window)
         generated = window.selected_asset()

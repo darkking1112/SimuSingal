@@ -25,7 +25,8 @@ from ...integrations.torchsig import is_linux, load_mapping, read_env, write_env
 ENGINE_CHOICES = (("项目引擎", "project"), ("TorchSig（仅 Linux）", "torchsig"))
 DETECTION_CHOICES = (("会话级（一个会话一个框）", "session_v1"),
                      ("逐跳（一跳一个框；默认）", "per_hop_v1"))
-MODE_LABELS = list(MODE_NAMES.items())
+#: 集合轮换只用 9 种调制样式；自定义噪声（noise）只服务于“单个信号生成”页。
+MODE_LABELS = [(key, label) for key, label in MODE_NAMES.items() if key != "noise"]
 
 
 def _line(lo, hi, unit="", digits=3):

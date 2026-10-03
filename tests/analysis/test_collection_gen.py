@@ -64,6 +64,10 @@ def test_unsupported_parameters_fail_before_generation():
     with pytest.raises(ValueError, match="不支持的样式"):
         check_generator_support(make_recipe(signals={**make_recipe()["signals"],
                                                      "mode": {"fixed": "bpsk"}}))
+    # 自定义噪声只服务于“单个信号生成”页，不进集合配方（否则检测标签会出现纯噪声目标）
+    with pytest.raises(ValueError, match="不支持的样式"):
+        check_generator_support(make_recipe(signals={**make_recipe()["signals"],
+                                                     "mode": {"fixed": "noise"}}))
     torchsig = make_recipe(engine="torchsig", signals={"count": {"fixed": 1}},
                            hopping={"hop_rate_hz": {"fixed": 10}},
                            labels={"detection": "session_v1"})

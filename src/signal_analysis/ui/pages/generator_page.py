@@ -119,26 +119,27 @@ class GeneratorPageMixin:
         return request
 
     def _build_noise_group(self):
+        """背景噪声底：全带白噪声，只在存在调制信号时可用，按最强调制信号的带内 SNR 定标。
+
+        纯噪声记录请用“添加样式 → 自定义噪声”，那是独立信号行（只填功率），与这里的噪声底互不影响。
+        """
         group = QtWidgets.QGroupBox("背景噪声")
         row = QtWidgets.QHBoxLayout(group)
         self.gen_noise_enabled = QtWidgets.QCheckBox("启用")
         self.gen_noise_enabled.setChecked(True)
+        self.gen_noise_enabled.setToolTip("背景噪声底为全带白噪声（带宽 = 采样率），以最强调制信号为参考；\n"
+                                          "没有调制信号时整组不可用，纯噪声请添加“自定义噪声”样式")
         self.gen_noise_enabled.toggled.connect(self.update_gen_controls)
         row.addWidget(self.gen_noise_enabled)
-        row.addWidget(QtWidgets.QLabel("噪声带宽"))
-        noise_bw_row, self.gen_noise_bw = _freq_spin(1.0, 1e9, 1_000_000.0, 2)
-        self.gen_noise_bw.setToolTip("双侧带限带宽；等于采样率时为全带白噪声")
-        row.addWidget(noise_bw_row)
-        row.addWidget(QtWidgets.QLabel("带内 SNR（参考：最强信号）"))
+        row.addWidget(QtWidgets.QLabel("带内 SNR（参考：最强调制信号）"))
         snr_row, self.gen_snr = _plain_spin(-10.0, 80.0, 20.0, 1, "dB")
-        self.gen_snr.setToolTip("参考信号（实测平均功率最大者）的带内 SNR = 其平均功率 ÷ 同带宽内的噪声功率；\n"
-                                "噪声按双侧功率谱密度 N0 折算，其余信号按各自带宽折算、可能低于填写值\n"
-                                "（窄带信号反而更高）；噪声带宽须覆盖参考信号的占用频带")
+        self.gen_snr.setToolTip("最强调制信号（实测平均功率最大的调制信号）的带内 SNR = 其平均功率 ÷ 同带宽内的噪声功率；\n"
+                                "噪声为全带白噪声，按双侧功率谱密度 N0 折算，其余信号按各自带宽折算、可能低于填写值\n"
+                                "（窄带信号反而更高）")
         row.addWidget(snr_row)
-        row.addWidget(QtWidgets.QLabel("噪声功率（无信号时）"))
-        noise_power_row, self.gen_noise_power = _plain_spin(-200.0, 0.0, -20.0, 1, "dBFS")
-        self.gen_noise_power.setEnabled(False)
-        row.addWidget(noise_power_row)
+        self.gen_noise_hint = QtWidgets.QLabel("需先添加调制信号；纯噪声请用“添加样式 → 自定义噪声”")
+        self.gen_noise_hint.setStyleSheet("color:#7a8798;")
+        row.addWidget(self.gen_noise_hint)
         row.addStretch()
         return group
 
@@ -164,7 +165,7 @@ class GeneratorPageMixin:
         bar.addStretch()
         layout.addLayout(bar)
         self.gen_signals = QtWidgets.QTableWidget(0, 5)
-        self.gen_signals.setHorizontalHeaderLabels(["调制样式", "频点", "功率", "带宽", "参数摘要"])
+        self.gen_signals.setHorizontalHeaderLabels(["样式", "频点", "功率", "带宽", "参数摘要"])
         self.gen_signals.horizontalHeader().setStretchLastSection(True)
         self.gen_signals.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.gen_signals.horizontalHeader().setSectionResizeMode(
@@ -203,9 +204,12 @@ class GeneratorPageMixin:
 
 
     def update_gen_controls(self, *_):
-        has_signals = bool(self.iq_signals)
-        self.gen_snr.setEnabled(self.gen_noise_enabled.isChecked() and has_signals)
-        self.gen_noise_power.setEnabled(self.gen_noise_enabled.isChecked() and not has_signals)
+        # 背景噪声底以最强调制信号为参考：没有调制信号（或只有自定义噪声行）时整组不可用。
+        has_modulation = any(spec["mode"] != "noise" for spec in self.iq_signals)
+        self.gen_noise_enabled.setEnabled(has_modulation)
+        active_noise = self.gen_noise_enabled.isChecked() and has_modulation
+        self.gen_snr.setEnabled(active_noise)
+        self.gen_noise_hint.setVisible(not has_modulation)
         fmt = self.gen_export_format.currentData()
         self.gen_endian.setEnabled(fmt in ("iq16", "iq32"))
         self._suggest_name()
@@ -249,6 +253,9 @@ class GeneratorPageMixin:
                     f"占用带宽 ≈ {_fmt_hz(plan['bandwidth_actual'])}")
         if plan["mode"] == "ssb":
             return f"{plan['side'].upper()} · 实际带宽 {_fmt_hz(plan['bandwidth_actual'])}"
+        if plan["mode"] == "noise":
+            psd = plan["power_dbfs"] - 10.0 * np.log10(self.gen_rate.value())
+            return f"全带白噪声 · 功率谱密度 {psd:.1f} dBFS/Hz"
         if plan["mode"] in ("ask2", "qpsk", "qam16", "qam64"):
             return (f"{plan['pulse'].upper()} α={plan['alpha']:g} · 符号速率 {_fmt_hz(plan['symbol_rate'])} · "
                     f"实际带宽 {_fmt_hz(plan['bandwidth_actual'])}")
@@ -306,9 +313,16 @@ class GeneratorPageMixin:
         mode_item = QtWidgets.QTableWidgetItem(MODE_SHORT.get(spec["mode"], spec["mode"]))
         mode_item.setData(QtCore.Qt.ItemDataRole.UserRole, dict(spec))
         self.gen_signals.setItem(row, 0, mode_item)
-        self.gen_signals.setItem(row, 1, QtWidgets.QTableWidgetItem(_fmt_hz(spec.get("offset", 0))))
+        if spec.get("mode") == "noise":
+            # 自定义噪声是全带白噪声，没有频点/带宽可填。
+            offset_text = "—"
+            bandwidth_text = f"全带（{_fmt_hz(self.gen_rate.value())}）"
+        else:
+            offset_text = _fmt_hz(spec.get("offset", 0))
+            bandwidth_text = _fmt_hz(spec.get("bandwidth", 0))
+        self.gen_signals.setItem(row, 1, QtWidgets.QTableWidgetItem(offset_text))
         self.gen_signals.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{spec.get('power_dbfs', -10):g} dBFS"))
-        self.gen_signals.setItem(row, 3, QtWidgets.QTableWidgetItem(_fmt_hz(spec.get("bandwidth", 0))))
+        self.gen_signals.setItem(row, 3, QtWidgets.QTableWidgetItem(bandwidth_text))
         self.gen_signals.setItem(row, 4, QtWidgets.QTableWidgetItem(self._describe_signal(spec)))
 
 
@@ -320,12 +334,10 @@ class GeneratorPageMixin:
             self.status.setText(f"采样点数 {count:,} 超出 1～{MAX_SAMPLES:,} 范围，请调整采样率或持续时间")
             return
         noise = None
-        if self.gen_noise_enabled.isChecked():
-            noise = {"enabled": True, "bandwidth": self.gen_noise_bw.value()}
-            if self.iq_signals:
-                noise["snr_db"] = self.gen_snr.value()
-            else:
-                noise["power_dbfs"] = self.gen_noise_power.value()
+        if self.gen_noise_enabled.isChecked() and any(
+                spec["mode"] != "noise" for spec in self.iq_signals):
+            # 背景噪声是全带白噪声（带宽 = 采样率），只发带内 SNR。
+            noise = {"enabled": True, "snr_db": self.gen_snr.value()}
         export = None
         fmt = self.gen_export_format.currentData()
         if fmt:
@@ -350,6 +362,10 @@ class GeneratorPageMixin:
                  f"时长 {summary['duration_s']:g} s · 峰值 {summary['peak_dbfs']:.1f} dBFS"]
         for entry in summary["signals"]:
             style = MODE_SHORT.get(entry["mode"], entry["mode"])
+            if entry["mode"] == "noise":
+                lines.append(f"  {style}：全带白噪声（带宽 = 采样率）· "
+                             f"功率 {entry['power_dbfs']:g} dBFS（实测 {entry['power_dbfs_actual']:.2f} dBFS）")
+                continue
             line = (f"  {style}：频点 {_fmt_hz(entry['offset'])} · 目标功率 {entry['power_dbfs']:g} dBFS"
                     f"（实测 {entry['power_dbfs_actual']:.2f} dBFS）· 目标带宽 {_fmt_hz(entry['bandwidth'])}")
             if entry.get("snr_inband_db") is not None:

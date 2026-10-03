@@ -16,8 +16,10 @@ def add_generated(workspace, mode="fm", seed=1, name=None, snr=15.0, signals=Non
     if signals is None:
         signals = [{"mode": mode, "offset": 0.0, "bandwidth": 50_000.0,
                     "power_dbfs": -6.0}]
-    samples, summary = generate_iq(200_000.0, 0.05, signals,
-                                   {"enabled": True, "snr_db": snr}, seed)
+    # 带内 SNR 需要调制信号做参考；纯噪声记录按绝对功率定标（负样本口径）。
+    noise = ({"enabled": True, "snr_db": snr} if signals else
+             {"enabled": True, "power_dbfs": -20.0})
+    samples, summary = generate_iq(200_000.0, 0.05, signals, noise, seed)
     return workspace.add_samples(samples, 200_000.0, name or f"数据{seed}",
                                  f"generated:iq_{mode}_v1",
                                  metadata={"generation": summary})

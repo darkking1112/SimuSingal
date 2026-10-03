@@ -1,4 +1,4 @@
-"""测试 IQ 生成：九种调制样式、参数规划与带限噪声。
+"""测试 IQ 生成：九种调制样式、自定义白噪声、参数规划与噪声底。
 
 仅依赖标准库、NumPy 与其他底层数值模块，可随数值核心进行 Cython 编译。
 """
@@ -15,13 +15,13 @@ from ..dsp.base import (
 MAX_SIGNALS = 16
 
 
-MODES = ("am", "fm", "ssb", "ask2", "qpsk", "qam16", "qam64", "fh_rc", "fh_video")
+MODES = ("am", "fm", "ssb", "ask2", "qpsk", "qam16", "qam64", "fh_rc", "fh_video", "noise")
 
 
 MODE_NAMES = {
     "am": "AM", "fm": "FM", "ssb": "SSB", "ask2": "2ASK", "qpsk": "QPSK",
     "qam16": "16QAM", "qam64": "64QAM", "fh_rc": "跳频·遥控(FH-2FSK)",
-    "fh_video": "跳频·图传(FH-OFDM)",
+    "fh_video": "跳频·图传(FH-OFDM)", "noise": "噪声",
 }
 
 
@@ -503,7 +503,8 @@ def _synthesize(plan, rate, count, t, rng):
 
     返回：(signal, info)：复数波形及样式专用参数字典。
 
-    算法与边界：AM、FM、SSB、线性数字调制与遥控跳频分别分派；其余已校验样式进入图传跳频。此内部入口依赖 plan 已合法，不重复总体验证。
+    算法与边界：AM、FM、SSB、线性数字调制、自定义白噪声与两类跳频分别分派；此内部入口依赖 plan
+    已合法，不重复总体验证。
     """
     mode = plan["mode"]
     if mode == "am":
@@ -514,9 +515,15 @@ def _synthesize(plan, rate, count, t, rng):
         return _single_sideband(rng, t, count, rate, plan)
     if mode in ("ask2", "qpsk", "qam16", "qam64"):
         return _linear_digital(rng, t, count, rate, plan)
+    if mode == "noise":
+        # 全带白噪声：直接复高斯抽样，再按目标平均功率统一缩放。
+        base = rng.standard_normal(count) + 1j * rng.standard_normal(count)
+        return _scale_power(base, plan["power_dbfs"]), {"noise_kind": "white"}
     if mode == "fh_rc":
         return _fh_remote_control(rng, t, count, rate, plan)
-    return _fh_video_link(rng, t, count, rate, plan)
+    if mode == "fh_video":
+        return _fh_video_link(rng, t, count, rate, plan)
+    raise ValueError(f"未实现的调制样式合成：{mode}")
 
 
 def plan_signal(spec, sample_rate):
@@ -572,6 +579,13 @@ def plan_signal(spec, sample_rate):
         resolved.update(alpha=alpha, pulse=pulse, sps=int(sps),
                         symbol_rate=symbol_rate,
                         bandwidth_actual=symbol_rate * (1 + alpha) if pulse == "rrc" else symbol_rate)
+    elif mode == "noise":
+        # 自定义噪声就是全带白噪声：频点固定 0、带宽固定采样率，只需给功率。
+        # 多了 offset / bandwidth 直接报错（不静默忽略），也不参与带内 SNR 折算。
+        if spec.get("offset") not in (None, 0, 0.0) or spec.get("bandwidth") not in (None, rate):
+            raise ValueError("自定义噪声为全带白噪声：频点固定 0、带宽固定为采样率，不能再指定；"
+                             "只需给出功率 power_dbfs")
+        resolved.update(offset=0.0, bandwidth=rate, bandwidth_actual=rate)
     elif mode == "fh_rc":
         points, hop_bw, span = _hop_points(spec, rate, offset, bandwidth, mode)
         hop_rate = _finite(spec.get("hop_rate", 100.0), "跳速", 0.0, rate)
@@ -586,7 +600,7 @@ def plan_signal(spec, sample_rate):
         resolved.update(hop_rate=hop_rate, hop_points=list(points),
                         hop_bandwidth=hop_bw, hop_span=span, deviation=deviation,
                         symbol_rate=symbol_rate, bandwidth_actual=span + hop_bw)
-    else:  # 图传跳频样式 fh_video。
+    elif mode == "fh_video":  # 图传跳频样式。
         points, hop_bw, span = _hop_points(spec, rate, offset, bandwidth, mode)
         hop_rate = _finite(spec.get("hop_rate", 50.0), "跳速", 0.0, rate)
         subcarriers = int(spec.get("subcarriers", 64))
@@ -605,20 +619,23 @@ def plan_signal(spec, sample_rate):
                         subcarrier_spacing=rate / n_fft,
                         occupied_bandwidth=(subcarriers - 1) * rate / n_fft,
                         bandwidth_actual=span + hop_bw)
+    else:
+        raise ValueError(f"未实现的调制样式规划：{mode}")
     return resolved
 
 
 def generate_iq(sample_rate, duration, signals, noise=None, seed=0):
     """生成多信号叠加的 IQ 记录及可复核真值摘要。
 
-    参数：sample_rate 为 Hz，duration 为秒；signals 为最多 16 项参数字典列表；noise 可配置带宽 Hz、参考信号（实测平均功率最大者）的带内 snr_db
+    参数：sample_rate 为 Hz，duration 为秒；signals 为最多 16 项参数字典列表（mode 为 "noise" 的项是自定义
+    白噪声，只有功率，带宽固定采样率，不参与带内 SNR 折算）；noise 可配置带宽 Hz（默认采样率即全带）、参考信号（最强调制信号，实测平均功率最大者）的带内 snr_db
     或纯噪声 power_dbfs；seed 为 32 位非负整数。
 
     返回：(samples, summary)：连续 complex64 一维 IQ 与 iq_generator_v1
     摘要，包含逐信号实际功率、占用带宽、随机种子和噪声口径。
 
     算法与边界：逐信号先规划，按固定顺序派生独立随机流并叠加 complex128 波形，最后转换 complex64。背景噪声按
-    N0=P_ref/(B_ref·10^(SNR/10)) 定标；噪声带宽须覆盖参考信号（实测平均功率最大者）频带，其余信号带内 SNR 由 P_k/(N0·B_k) 导出、可能低于填写值。仅启用噪声时允许空信号列表；无信号且无噪声、点数超限或配置无效均报错，不削峰。
+    N0=P_ref/(B_ref·10^(SNR/10)) 定标，参考信号只在调制信号中选；界面固定全带（带宽 = 采样率），接口传入较窄噪声带宽时须覆盖参考信号频带，其余信号带内 SNR 由 P_k/(N0·B_k) 导出、可能低于填写值，自定义噪声行的 snr_inband_db 恒为 null。仅有噪声行时带内 SNR 无参考，改按 power_dbfs 定标（缺省 -20 dBFS）。仅启用噪声时允许空信号列表；无信号且无噪声、点数超限或配置无效均报错，不削峰。
     """
     rate = validate_rate(sample_rate)
     duration_s = _finite(duration, "持续时间", 0.0, 3600.0)
@@ -663,10 +680,14 @@ def generate_iq(sample_rate, duration, signals, noise=None, seed=0):
         if not 0 < noise_bandwidth <= rate:
             raise ValueError("噪声带宽必须大于 0 且不超过采样率")
         half_band = noise_bandwidth / 2.0
-        if summaries:
+        # 带内 SNR 的参考信号只在调制信号里选：自定义噪声行不是链路，不参与参考。
+        candidates = [index for index, entry in enumerate(summaries)
+                      if entry["mode"] != "noise"]
+        if candidates:
             # 参考信号取实测平均功率最大者；带内 SNR 定义要求噪声频带
             # 完整覆盖其占用频带，否则无法按功率谱密度折算。
-            reference_index = int(np.argmax([entry["power_dbfs_actual"] for entry in summaries]))
+            reference_index = max(candidates,
+                                  key=lambda index: summaries[index]["power_dbfs_actual"])
             reference = summaries[reference_index]
             snr_db = _finite(noise.get("snr_db", 20.0), "带内信噪比", -60.0, 120.0)
             low, high = occupied_interval(reference["offset"], reference["bandwidth_actual"],
@@ -674,12 +695,16 @@ def generate_iq(sample_rate, duration, signals, noise=None, seed=0):
             if low < -half_band or high > half_band:
                 label = MODE_NAMES.get(reference["mode"], reference["mode"])
                 raise ValueError(
-                    f"噪声带宽 {noise_bandwidth:g} Hz 未覆盖最强信号（{label}）的占用频带 "
+                    f"噪声带宽 {noise_bandwidth:g} Hz 未覆盖最强调制信号（{label}）的占用频带 "
                     f"{low:g}～{high:g} Hz，无法折算带内信噪比；请增大噪声带宽或调整该信号")
             # N0 = P_ref / (B_ref · 10^(SNR/10))，噪声总功率 P_n = N0 · B_n。
             noise_psd = (10 ** (reference["power_dbfs_actual"] / 10.0)
                          / (reference["bandwidth_actual"] * 10 ** (snr_db / 10.0)))
             noise_power = noise_psd * noise_bandwidth
+        elif noise.get("snr_db") is not None:
+            # 只有自定义噪声行时没有参考链路，带内 SNR 无定义，只能按绝对功率定标。
+            raise ValueError("背景噪声需要至少一个调制信号作为参考；仅有噪声时请使用自定义噪声"
+                             "（mode=\"noise\"，填功率）或改填噪声绝对功率 power_dbfs")
         else:
             noise_power = 10 ** (_finite(noise.get("power_dbfs", -20.0), "噪声功率", -200.0, 0.0) / 10.0)
             noise_psd = noise_power / noise_bandwidth
@@ -687,6 +712,9 @@ def generate_iq(sample_rate, duration, signals, noise=None, seed=0):
             record += _band_noise(rng, count, rate, half_band) * np.sqrt(noise_power)
     for entry in summaries:
         entry["snr_inband_db"] = None
+        if entry["mode"] == "noise":
+            # 自定义噪声行本身就是噪声，不构成“信号 ÷ 噪声”的链路口径。
+            continue
         low, high = occupied_interval(entry["offset"], entry["bandwidth_actual"],
                                       entry["mode"], entry.get("side"))
         overlap = min(high, half_band) - max(low, -half_band)
