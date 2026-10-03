@@ -383,12 +383,18 @@ def test_service_detect_run_carries_truth_and_metrics(tmp_path):
 
 
 def test_service_detect_without_generator_truth(tmp_path):
-    """导入/演示数据没有真值：只给检测结果，不编造误差指标。"""
+    """无生成器真值的资产只给检测结果，不编造误差指标。"""
+    from signal_analysis.data import Workspace
     from signal_analysis.services import execute
 
-    demo = execute({"workspace": str(tmp_path), "action": "demo", "sample_rate": 48000.0,
-                    "count": 8192})
-    run = execute({"workspace": str(tmp_path), "action": "detect", "asset_id": demo["id"]})
+    rate, count = 48000.0, 8192
+    rng = np.random.default_rng(7)
+    t = np.arange(count) / rate
+    samples = (np.exp(2j * np.pi * rate / 16 * t) + 0.35 * np.exp(-2j * np.pi * rate / 8 * t)
+               + 0.025 * (rng.standard_normal(count) + 1j * rng.standard_normal(count)))
+    asset = Workspace(tmp_path).add_samples(samples.astype(np.complex64), rate,
+                                            "无真值记录", "import:manual")
+    run = execute({"workspace": str(tmp_path), "action": "detect", "asset_id": asset["id"]})
     assert "truth" not in run and "metrics" not in run
     assert run["summary"]["detections"]
 
@@ -396,11 +402,19 @@ def test_service_detect_without_generator_truth(tmp_path):
 def test_cli_detect_prints_contract(tmp_path, capsys):
     import json
     from signal_analysis.cli import main
+    from signal_analysis.data import Workspace
 
-    root = str(tmp_path / "store")
-    assert main(["--workspace", root, "demo", "--sample-rate", "48000", "--count", "8192"]) == 0
-    asset_id = json.loads(capsys.readouterr().out)["id"]
-    assert main(["--workspace", root, "detect", asset_id, "--nfft", "256",
+    root = tmp_path / "store"
+    spec = tmp_path / "scene.json"
+    spec.write_text(json.dumps({"sample_rate": 48000.0, "duration": 0.2, "seed": 0,
+                                "noise": {"enabled": True, "bandwidth": 48000.0, "snr_db": 20},
+                                "signals": [{"mode": "qpsk", "offset": 12000.0,
+                                             "bandwidth": 6000.0, "power_dbfs": -8.0}]}),
+                    encoding="utf-8")
+    assert main(["--workspace", str(root), "generate", str(spec)]) == 0
+    capsys.readouterr()
+    asset_id = Workspace(root).list_assets()[0]["id"]
+    assert main(["--workspace", str(root), "detect", asset_id, "--nfft", "256",
                  "--threshold-db", "6", "--min-bandwidth", "200"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["kind"] == "detect"

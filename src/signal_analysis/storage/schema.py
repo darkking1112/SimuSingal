@@ -15,7 +15,7 @@ DETECTION_SEMANTICS = ("session_v1", "per_hop_v1")
 TASKS = ("detection", "amc")
 LABEL_TABLES = {"detection": "detection_labels", "amc": "amc_labels"}
 
-#: 生成器样式 → 规范调制名；跳频与演示样式没有单一调制名（NULL = 未知）。
+#: 生成器样式 → 规范调制名；跳频样式没有单一调制名（NULL = 未知）。
 _MODULATION_NAMES = {"am": "AM", "fm": "FM", "ssb": "SSB", "ask2": "2ASK",
                      "qpsk": "QPSK", "qam16": "16QAM", "qam64": "64QAM"}
 

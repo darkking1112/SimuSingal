@@ -9,12 +9,12 @@ IMPORT_CHUNK = 500
 def _budgets(action):
     """按动作给出 ``(timeout, cancel_grace)``。
 
-    - 16M 样本的生成/演示（同一点数上限）可能明显超过默认 30 s 子进程超时；
+    - 16M 样本的生成可能明显超过默认 30 s 子进程超时；
     - 数据盘点/清理要遍历整棵工作区目录树，同样放宽；
     - 集合生成/训练集导出/批量导入是长任务：取消给 120 s 优雅收尾（封存已写
       数据并返回部分结果），而不是直接终止子进程。
     """
-    if action in ("generate", "demo"):
+    if action == "generate":
         return 600.0, 0.0
     if action in ("generate_collection", "torchsig_import", "export_training_data",
                   "torchsig_probe", "import_files", "import_inspect"):

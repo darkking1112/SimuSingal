@@ -118,7 +118,7 @@ def _parse_args(argv=None):
                         help=f"可选调制样式，默认全部：{', '.join(DEFAULT_MODES)}")
     parser.add_argument("--max-signals", type=int, default=3, help="单场景最多信号数，默认 3")
     parser.add_argument("--snr-range", type=_pair, default=(-5.0, 30.0),
-                        help="最强信号带内信噪比区间（dB），默认 -5,30")
+                        help="参考信号（场景内实测平均功率最大者）的带内信噪比区间（dB），默认 -5,30")
     parser.add_argument("--snr-bias", type=float, default=0.0,
                         help="带内信噪比分布向低端倾斜的程度（0～1），默认 0 = 均匀分布；"
                              "越大低信噪比样本越多（补难例）：0.5 时均值约从 12.5 dB 降到 "
@@ -233,7 +233,7 @@ def _scene_rate(rng, args):
 
 
 def _sample_snr(rng, args):
-    """目标的带内信噪比（定义在最强信号上）。
+    """目标的带内信噪比（参考信号＝场景内实测平均功率最大者）。
 
     ``--snr-bias 0``（默认）是与历史一致的均匀分布且不额外消耗随机数；
     ``--snr-bias > 0`` 对均匀分位做幂变换 ``u ** (1 + bias)``：任何阈值上的低端
@@ -265,8 +265,8 @@ def _scene(rng, args, rate):
     signals = []
     for rank, index in enumerate(order):
         low, high, width = slots[int(index)]
-        # 最强信号功率定在 0 dBFS，其余按 0.5～6 dB 递减，让 noise.snr_db
-        # （定义在最强信号上）就是本场景的目标带内信噪比
+        # 最强信号功率定在 0 dBFS，其余按 0.5～6 dB 递减，使它成为参考信号，
+        # noise.snr_db（定义在参考信号上）就是本场景的目标带内信噪比
         power = 0.0 if rank == 0 else -float(rng.uniform(0.5, 6.0))
         signals.append(_signal_spec(rng, modes[rank % len(modes)], low, high, width, power, args))
     noise = {"enabled": True, "bandwidth": float(rate), "snr_db": _sample_snr(rng, args)}

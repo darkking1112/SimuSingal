@@ -583,9 +583,11 @@ def test_service_iq_truth_is_explicitly_not_applicable(tmp_path, tiny_model):
     assert run["truth"]["available"] is False and run["truth"]["count"] == 2
     assert run["truth_hit"] is None
     # 没有生成器真值
-    demo = run_job({"workspace": str(workspace), "action": "demo", "count": 4096})
+    untracked = Workspace(workspace).add_samples(
+        np.exp(2j * np.pi * 0.03 * np.arange(4096)).astype(np.complex64),
+        48000.0, "无真值记录", "import:manual")
     run = run_job({"workspace": str(workspace), "action": "amc_iq_classify",
-                   "asset_id": demo["id"], "model": str(manifest_path)})
+                   "asset_id": untracked["id"], "model": str(manifest_path)})
     assert run["truth"]["available"] is False and "没有生成器真值" in run["truth"]["reason"]
     assert run["truth_hit"] is None
 

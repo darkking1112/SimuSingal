@@ -13,6 +13,15 @@ from signal_analysis.tasks import JobError, run_job
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _generate_request(workspace, count):
+    """构造恰好 ``count`` 个复采样的生成请求（供 worker 测试取资产用）。"""
+    rate = 256_000.0
+    return {"workspace": str(workspace), "action": "generate", "sample_rate": rate,
+            "duration": count / rate, "seed": 0,
+            "signals": [{"mode": "am", "offset": 0.0, "bandwidth": 20_000.0,
+                         "power_dbfs": -6.0}]}
+
+
 @pytest.fixture(scope="module")
 def demo_library(tmp_path_factory):
     if not shutil.which("cmake"):
@@ -28,7 +37,7 @@ def demo_library(tmp_path_factory):
 
 
 def test_worker_analysis_and_persisted_failure(tmp_path):
-    request = {"workspace": str(tmp_path), "action": "demo", "count": 256}
+    request = _generate_request(tmp_path, 256)
     asset = run_job(request)
     result = run_job({**request, "action": "analyze", "asset_id": asset["id"]})
     assert result["summary"]["sample_count"] == 256
@@ -42,7 +51,7 @@ def test_cancelled_job(tmp_path):
     cancelled = threading.Event()
     cancelled.set()
     with pytest.raises(JobError) as caught:
-        run_job({"workspace": str(tmp_path), "action": "demo"}, cancel=cancelled)
+        run_job(_generate_request(tmp_path, 256), cancel=cancelled)
     assert caught.value.code == "cancelled"
 
 
@@ -90,4 +99,4 @@ def test_native_failures_are_isolated(tmp_path, behavior, expected):
     assert caught.value.code == expected
     assert store.list_runs() == []
     # A fresh job remains usable after the previous worker failed.
-    assert run_job({"workspace": str(store.root), "action": "demo", "count": 16})["sample_count"] == 16
+    assert run_job(_generate_request(store.root, 16))["sample_count"] == 16

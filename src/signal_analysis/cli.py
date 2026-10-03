@@ -14,9 +14,6 @@ def main(argv=None):
     parser.add_argument("--workspace", default="workspace_data/analysis", help="本地工作目录")
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("gui", help="启动桌面工作台")
-    demo = commands.add_parser("demo", help="生成数学双音数据")
-    demo.add_argument("--count", type=int, default=8192)
-    demo.add_argument("--sample-rate", type=float, default=48000)
     imp = commands.add_parser("import", help="导入 NPY、CSV、交织 IQ 或 SigMF 双文件")
     imp.add_argument("path")
     imp.add_argument("--sample-rate", type=float, help="非 SigMF 必填；SigMF 自动读取，显式指定时须一致")
@@ -224,11 +221,8 @@ def main(argv=None):
                       "output": manifest["output"],
                       "class_set": manifest["class_set"], "samples": manifest["input"]["samples"]}
         else:
-            if args.command in ("demo", "import"):
+            if args.command == "import":
                 request["sample_rate"] = args.sample_rate
-            if args.command == "demo":
-                request["count"] = args.count
-            elif args.command == "import":
                 request["path"] = args.path
                 if args.binary_dtype:
                     request["binary_dtype"] = args.binary_dtype

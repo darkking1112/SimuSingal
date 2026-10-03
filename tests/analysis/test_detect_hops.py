@@ -475,15 +475,21 @@ def test_service_detect_hops_carries_truth_and_metrics(tmp_path):
 
 
 def test_service_detect_hops_without_generator_truth(tmp_path):
+    from signal_analysis.data import Workspace
     from signal_analysis.services import execute
 
-    demo = execute({"workspace": str(tmp_path), "action": "demo", "sample_rate": 48000.0,
-                    "count": 65536})
-    run = execute({"workspace": str(tmp_path), "action": "detect_hops", "asset_id": demo["id"]})
+    rate, count = 48000.0, 65536
+    rng = np.random.default_rng(7)
+    t = np.arange(count) / rate
+    samples = (np.exp(2j * np.pi * rate / 16 * t) + 0.35 * np.exp(-2j * np.pi * rate / 8 * t)
+               + 0.025 * (rng.standard_normal(count) + 1j * rng.standard_normal(count)))
+    asset = Workspace(tmp_path).add_samples(samples.astype(np.complex64), rate,
+                                            "无真值记录", "import:manual")
+    run = execute({"workspace": str(tmp_path), "action": "detect_hops", "asset_id": asset["id"]})
     assert run["truth"] == {"available": False,
                             "reason": "该资产不是跳频生成样式，逐跳真值不适用"}
     assert run["metrics"] is None
-    assert run["hops"]  # 双音演示数据同样按“一段驻留”给出结果，不丢弃
+    assert run["hops"]  # 非跳频连续信号同样按“一段驻留”给出结果，不丢弃
 
 
 def test_cli_detect_hops_prints_contract(tmp_path, capsys):

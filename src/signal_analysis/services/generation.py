@@ -1,15 +1,9 @@
-"""生成与分析服务：演示/生成/频谱分析、配方预览与保存、集合生成与 TorchSig 接入。"""
+"""生成与分析服务：生成/频谱分析、配方预览与保存、集合生成与 TorchSig 接入。"""
 
-from ..core_api import analyze as core_analyze, generate_iq, make_demo
+from ..core_api import analyze as core_analyze, generate_iq
 from ..data.io import write_samples
 from .imports import _ensure_initial_labels, _resolve_collection
 from .truth import _generated_name, _generation_targets
-
-
-def demo(workspace, request):
-    rate = request.get("sample_rate", 48000.0)
-    return workspace.add_samples(make_demo(rate, request.get("count", 8192)),
-                                 rate, "数学双音演示", "generated:tones_v1")
 
 
 def generate(workspace, request):

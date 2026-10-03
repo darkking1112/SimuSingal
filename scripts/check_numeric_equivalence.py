@@ -96,7 +96,6 @@ def snapshot():
         for function in (energy.detect_signals, hops.detect_hops):
             record("config/" + name + "/" + function.__name__, function,
                    scenes["noise"], rate, config)
-    record("demo", iqgen.make_demo)
     record("feature_vector", features.feature_vector, {key: i for i, key in enumerate(AMC_FEATURES)})
     results["feature_order"] = encode(AMC_FEATURES)
     results["signatures"] = {f.__name__: str(inspect.signature(f)) for f in (

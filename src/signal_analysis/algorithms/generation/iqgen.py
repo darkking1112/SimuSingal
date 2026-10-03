@@ -1,4 +1,4 @@
-"""测试 IQ 生成：九种调制样式、参数规划、带限噪声和数学双音。
+"""测试 IQ 生成：九种调制样式、参数规划与带限噪声。
 
 仅依赖标准库、NumPy 与其他底层数值模块，可随数值核心进行 Cython 编译。
 """
@@ -611,14 +611,14 @@ def plan_signal(spec, sample_rate):
 def generate_iq(sample_rate, duration, signals, noise=None, seed=0):
     """生成多信号叠加的 IQ 记录及可复核真值摘要。
 
-    参数：sample_rate 为 Hz，duration 为秒；signals 为最多 16 项参数字典列表；noise 可配置带宽 Hz、最强信号带内 snr_db
+    参数：sample_rate 为 Hz，duration 为秒；signals 为最多 16 项参数字典列表；noise 可配置带宽 Hz、参考信号（实测平均功率最大者）的带内 snr_db
     或纯噪声 power_dbfs；seed 为 32 位非负整数。
 
     返回：(samples, summary)：连续 complex64 一维 IQ 与 iq_generator_v1
     摘要，包含逐信号实际功率、占用带宽、随机种子和噪声口径。
 
     算法与边界：逐信号先规划，按固定顺序派生独立随机流并叠加 complex128 波形，最后转换 complex64。背景噪声按
-    N0=P_ref/(B_ref·10^(SNR/10)) 定标；须覆盖最强信号频带。仅启用噪声时允许空信号列表；无信号且无噪声、点数超限或配置无效均报错，不削峰。
+    N0=P_ref/(B_ref·10^(SNR/10)) 定标；噪声带宽须覆盖参考信号（实测平均功率最大者）频带，其余信号带内 SNR 由 P_k/(N0·B_k) 导出、可能低于填写值。仅启用噪声时允许空信号列表；无信号且无噪声、点数超限或配置无效均报错，不削峰。
     """
     rate = validate_rate(sample_rate)
     duration_s = _finite(duration, "持续时间", 0.0, 3600.0)
@@ -711,24 +711,3 @@ def generate_iq(sample_rate, duration, signals, noise=None, seed=0):
         "peak_dbfs": float(10.0 * np.log10(np.max(np.abs(samples) ** 2))),
     }
     return samples, summary
-
-
-def make_demo(sample_rate=48000.0, count=8192, seed=7):
-    """生成可重复的数学双音演示记录。
-
-    参数：sample_rate 为 Hz；count 为 1～MAX_SAMPLES 的整数；seed 为随机种子。
-
-    返回：长度 count 的 complex64 数组。
-
-    算法与边界：叠加 +rate/16 与 -rate/8 两个复音及固定幅度复高斯噪声；不代表通信调制模型。采样率或点数非法时抛出 ValueError。
-    """
-    rate = validate_rate(sample_rate)
-    if isinstance(count, bool) or int(count) != count or not 1 <= count <= MAX_SAMPLES:
-        raise ValueError(f"演示采样点数必须为 1～{MAX_SAMPLES:,} 的整数")
-    t = np.arange(int(count)) / rate
-    rng = np.random.default_rng(seed)
-    # 可重复的数学双音与噪声，仅用于演示，不代表通信调制模型。
-    x = np.exp(2j * np.pi * rate / 16 * t)
-    x += 0.35 * np.exp(-2j * np.pi * rate / 8 * t)
-    x += 0.025 * (rng.standard_normal(int(count)) + 1j * rng.standard_normal(int(count)))
-    return x.astype(np.complex64)

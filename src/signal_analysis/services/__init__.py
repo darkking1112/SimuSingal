@@ -24,8 +24,6 @@ from .truth import (_attach_amc_truth, _attach_hop_truth, _attach_iq_truth, _att
 def execute(request):
     workspace = Workspace(request["workspace"])
     action = request["action"]
-    if action == "demo":
-        return generation.demo(workspace, request)
     if action == "import":
         return import_file(workspace, request)
     if action == "import_inspect":

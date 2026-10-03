@@ -544,7 +544,9 @@ def test_service_ml_detect_requires_runtime(tmp_path):
     from signal_analysis.tasks import run_job
 
     workspace = Workspace(tmp_path)
-    asset = run_job({"workspace": str(workspace.root), "action": "demo", "count": 4096})
+    asset = workspace.add_samples(
+        np.exp(2j * np.pi * 0.03 * np.arange(4096)).astype(np.complex64),
+        48000.0, "无真值记录", "import:manual")
     path, _ = manifest_file(tmp_path)
     with pytest.raises(Exception) as excinfo:
         run_job({"workspace": str(workspace.root), "action": "ml_detect",
@@ -558,7 +560,13 @@ def test_cli_ml_detect_reports_missing_runtime(tmp_path, capsys):
     from signal_analysis.cli import main
 
     workspace = tmp_path / "ws"
-    assert main(["--workspace", str(workspace), "demo", "--count", "4096"]) == 0
+    spec = tmp_path / "scene.json"
+    spec.write_text(json.dumps({"sample_rate": 48000.0, "duration": 0.08, "seed": 0,
+                                "noise": {"enabled": True, "bandwidth": 48000.0, "snr_db": 20},
+                                "signals": [{"mode": "qpsk", "offset": 12000.0,
+                                             "bandwidth": 6000.0, "power_dbfs": -8.0}]}),
+                    encoding="utf-8")
+    assert main(["--workspace", str(workspace), "generate", str(spec)]) == 0
     capsys.readouterr()
     asset_id = Workspace(workspace).list_assets()[0]["id"]
     path, _ = manifest_file(tmp_path)

@@ -22,7 +22,6 @@ from .algorithms.detection.hops import (
 from .algorithms.generation.iqgen import (
     MODE_NAMES,
     generate_iq,
-    make_demo,
     occupied_interval,
     plan_signal,
 )
@@ -32,5 +31,5 @@ from .algorithms.amc.heuristic import (
 )
 
 __all__ = ["MAX_SAMPLES", "MODE_NAMES", "analyze", "classify_modulation", "detect_hops",
-           "detect_signals", "generate_iq", "make_demo", "occupied_interval", "plan_signal",
+           "detect_signals", "generate_iq", "occupied_interval", "plan_signal",
            "spectrum_row", "validate_rate", "validate_samples"]

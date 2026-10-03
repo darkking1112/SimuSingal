@@ -36,9 +36,7 @@ class GeneratorPageMixin:
         intro = QtWidgets.QLabel("生成用于测试检测、参数估计与调制识别算法的 IQ 基带信号。"
                                  "IQ 为复基带记录，不设置载频：\"频点\"指基带频率偏移；"
                                  "频率值以 Hz / kHz / MHz 显示（单位在输入框外）。"
-                                 "可一次包含多种信号并独立设置参数，自动按目标带宽推导调制参数。"
-                                 "另有“数学双音演示”：不建模通信链路，按下方的采样率与持续时间"
-                                 "生成一对可复现的复基带双音，供快速试跑分析流程。")
+                                 "可一次包含多种信号并独立设置参数，自动按目标带宽推导调制参数。")
         intro.setWordWrap(True)
         single_layout.addWidget(intro)
         from common.gui import TaskBanner
@@ -47,7 +45,6 @@ class GeneratorPageMixin:
         single_layout.addWidget(self.generator_banner)
         single_layout.addWidget(self._build_global_row())
         single_layout.addWidget(self._build_collection_row())
-        single_layout.addWidget(self._build_demo_row())
         single_layout.addWidget(self._build_noise_group())
         single_layout.addWidget(self._build_signal_table(), 1)
         single_layout.addWidget(self._build_export_row())
@@ -101,7 +98,7 @@ class GeneratorPageMixin:
         self.gen_collection_name.setPlaceholderText("新集合名称")
         self.gen_collection_name.setVisible(False)
         row.addWidget(self.gen_collection_name)
-        self.gen_initial_labels = QtWidgets.QCheckBox("同时生成初始标注（来源 generator）")
+        self.gen_initial_labels = QtWidgets.QCheckBox("同时生成初始标注")
         self.gen_initial_labels.setToolTip(
             "按目标参考参数写入初始标注：集合无标注集时自动建立默认检测/AMC 标注集")
         row.addWidget(self.gen_initial_labels)
@@ -121,21 +118,6 @@ class GeneratorPageMixin:
             request["collection_name"] = name
         return request
 
-    def _build_demo_row(self):
-        group = QtWidgets.QGroupBox("数学双音演示")
-        row = QtWidgets.QHBoxLayout(group)
-        hint = QtWidgets.QLabel("不建模通信链路：按上方采样率 × 持续时间生成一对可复现的复基带双音"
-                                "（含少量噪声），不使用信号列表与背景噪声设置。")
-        hint.setWordWrap(True)
-        row.addWidget(hint, 1)
-        self.demo_button = QtWidgets.QPushButton("生成数学双音演示")
-        self.demo_button.setToolTip("点数 = 上方采样率 × 持续时间，与“预计 N 个复采样”一致；"
-                                    "生成独立资产并在左侧资产列表选中，可到“态势显示”页分析")
-        self.demo_button.clicked.connect(self.generate_demo_clicked)
-        row.addWidget(self.demo_button)
-        return group
-
-
     def _build_noise_group(self):
         group = QtWidgets.QGroupBox("背景噪声")
         row = QtWidgets.QHBoxLayout(group)
@@ -147,10 +129,11 @@ class GeneratorPageMixin:
         noise_bw_row, self.gen_noise_bw = _freq_spin(1.0, 1e9, 1_000_000.0, 2)
         self.gen_noise_bw.setToolTip("双侧带限带宽；等于采样率时为全带白噪声")
         row.addWidget(noise_bw_row)
-        row.addWidget(QtWidgets.QLabel("带内 SNR（相对最强信号）"))
+        row.addWidget(QtWidgets.QLabel("带内 SNR（参考：最强信号）"))
         snr_row, self.gen_snr = _plain_spin(-10.0, 80.0, 20.0, 1, "dB")
-        self.gen_snr.setToolTip("信号平均功率 ÷ 同占用带宽内的噪声功率；噪声按功率谱密度折算，\n"
-                               "噪声带宽须覆盖最强信号的占用频带")
+        self.gen_snr.setToolTip("参考信号（实测平均功率最大者）的带内 SNR = 其平均功率 ÷ 同带宽内的噪声功率；\n"
+                                "噪声按双侧功率谱密度 N0 折算，其余信号按各自带宽折算、可能低于填写值\n"
+                                "（窄带信号反而更高）；噪声带宽须覆盖参考信号的占用频带")
         row.addWidget(snr_row)
         row.addWidget(QtWidgets.QLabel("噪声功率（无信号时）"))
         noise_power_row, self.gen_noise_power = _plain_spin(-200.0, 0.0, -20.0, 1, "dBFS")
@@ -360,18 +343,6 @@ class GeneratorPageMixin:
                        export=export, **collection)
 
 
-    def generate_demo_clicked(self):
-        """数学双音演示：点数跟随本页“采样率 × 持续时间”，与页内预计点数一致。"""
-        rate = self.gen_rate.value()
-        count = int(round(rate * self.gen_duration.value()))
-        if not 1 <= count <= MAX_SAMPLES:
-            self.status.setText(f"演示采样点数 {count:,} 超出 1～{MAX_SAMPLES:,} 范围，"
-                                "请调整采样率或持续时间")
-            return
-        self.start_job("demo", owner="IQ 信号生成", label="数学双音演示",
-                       cancel_text="取消本次生成", sample_rate=rate, count=count)
-
-
     def show_generation_result(self, result):
         summary = result["summary"]
         lines = [f"已生成资产：{result['name']}",
@@ -390,7 +361,7 @@ class GeneratorPageMixin:
         if noise["enabled"]:
             if noise["snr_db"] is not None:
                 reference = noise.get("snr_reference_index")
-                ref_text = "" if reference is None else f"（参考信号 #{reference + 1}）"
+                ref_text = "" if reference is None else f"（参考信号 #{reference + 1}，实测功率最大）"
                 lines.append(f"  背景噪声：带宽 {_fmt_hz(noise['bandwidth'])} · 带内 SNR {noise['snr_db']:g} dB"
                              f"{ref_text} · 总功率 {noise['power_dbfs']:.1f} dBFS{psd_text}")
             elif noise["power_dbfs"] is not None:

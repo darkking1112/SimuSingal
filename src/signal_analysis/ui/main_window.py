@@ -104,7 +104,7 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
 
 
     def job_buttons(self):
-        return (self.demo_button, self.analyze_button, self.native_button,
+        return (self.analyze_button, self.native_button,
                 self.generate_button, self.detect_button, self.hops_button, self.ml_button,
                 self.hops_ml_button, self.amc_button, self.storage_scan_button,
                 self.storage_preview_button, self.storage_cleanup_button,
@@ -119,7 +119,7 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
                         self.import_remove_button, self.import_recheck_button,
                         self.import_csv_button, self.import_apply_button,
                         self.import_start_button),
-            "IQ 信号生成": (self.demo_button, self.generate_button,
+            "IQ 信号生成": (self.generate_button,
                            *self.gen_panel.action_buttons()),
             "信号集合生成": tuple(self.gen_panel.action_buttons()),
             "态势显示": (self.analyze_button, self.native_button),

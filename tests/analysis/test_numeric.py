@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from signal_analysis.core_api import (analyze, classify_modulation, generate_iq, make_demo,
+from signal_analysis.core_api import (analyze, classify_modulation, generate_iq,
                                       spectrum_row, validate_samples)
 
 
@@ -40,13 +40,12 @@ def test_short_input_and_bounded_preview():
     summary, arrays = analyze([1], 100)
     assert summary["padded_samples"] == 255
     assert np.isfinite(arrays["spectrogram_db"]).all()
-    _, large = analyze(make_demo(count=100_000), 48000)
+    _, large = analyze(np.exp(2j * np.pi * 0.01 * np.arange(100_000)), 48000)
     assert len(large["wave_i"]) <= 4096
     assert len(large["spectrogram_db"]) <= 512
 
 
-def test_demo_reproducible_and_nfft_validation():
-    np.testing.assert_array_equal(make_demo(), make_demo())
+def test_nfft_validation():
     with pytest.raises(ValueError):
         analyze([1], 100, nfft=0)
 
@@ -98,7 +97,9 @@ def test_classify_analog_signals():
     n = 20000
     cls, est = classify_modulation(rng.normal(size=n) + 1j * rng.normal(size=n))
     assert cls == "analog" and est == 0
-    cls, est = classify_modulation(make_demo(count=n))
+    tones = (np.exp(2j * np.pi * 0.03 * np.arange(n))
+             + 0.35 * np.exp(-2j * np.pi * 0.07 * np.arange(n)))
+    cls, est = classify_modulation(tones)
     assert cls == "analog" and est == 0
 
 

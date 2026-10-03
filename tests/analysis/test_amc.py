@@ -530,8 +530,11 @@ def test_service_amc_truth_is_explicitly_not_applicable(tmp_path):
     run = run_job({"workspace": str(workspace), "action": "amc_classify", "asset_id": multi["id"]})
     assert run["truth"]["available"] is False and run["truth"]["count"] == 2
 
-    demo = run_job({"workspace": str(workspace), "action": "demo", "count": 4096})
-    run = run_job({"workspace": str(workspace), "action": "amc_classify", "asset_id": demo["id"]})
+    untracked = Workspace(workspace).add_samples(
+        np.exp(2j * np.pi * 0.03 * np.arange(4096)).astype(np.complex64),
+        48000.0, "无真值记录", "import:manual")
+    run = run_job({"workspace": str(workspace), "action": "amc_classify",
+                   "asset_id": untracked["id"]})
     assert run["truth"]["available"] is False and "没有生成器真值" in run["truth"]["reason"]
 
 

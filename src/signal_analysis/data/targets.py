@@ -35,7 +35,7 @@ class TargetMixin:
             mode = str(entry.get("mode", ""))
             hopping = bool(entry.get("hopping"))
             scope = "session" if (hopping or len(truth) > 1) else "whole_record"
-            # AMC 适用标记：有规范调制名的样式置位；跳频/演示样式保持 0。
+            # AMC 适用标记：有规范调制名的样式置位；跳频样式保持 0。
             target_id = self._insert_target_row(
                 conn, asset_id=asset_id, target_key=f"s{index}", scope=scope,
                 parent_target_id=None, hop_index=None, for_detection=1,

@@ -62,12 +62,12 @@ def test_analysis_gui_workflow(tmp_path, monkeypatch):
         # 演示入口属于“IQ 信号生成”页，不在态势显示页（与侧栅同一父级）。
         generator = window._page_index("IQ 信号生成")
         analysis = window._page_index("态势显示")
-        assert window.tabs.widget(generator).isAncestorOf(window.demo_button)
-        assert not window.tabs.widget(analysis).isAncestorOf(window.demo_button)
-        window.demo_button.click()
+        assert window.tabs.widget(generator).isAncestorOf(window.generate_button)
+        assert not window.tabs.widget(analysis).isAncestorOf(window.generate_button)
+        window.generate_iq_clicked()
         wait_job(app, window)
         assert window.assets.count() == 1
-        # 演示点数跟随生成页“采样率 × 持续时间”，不再固定 8192。
+        # 生成点数跟随生成页“采样率 × 持续时间”。
         assert window.selected_asset()["sample_count"] == int(round(
             window.gen_rate.value() * window.gen_duration.value()))
         window.analyze_button.click()
@@ -85,10 +85,10 @@ def test_analysis_gui_workflow(tmp_path, monkeypatch):
         window.export_current()
         import json
         assert json.loads(output.read_text(encoding="utf-8"))["kind"] == "analysis"
-        # 演示点数超出 1～16,000,000 时只提示，不启动作业
+        # 生成点数超出 1～16,000,000 时只提示，不启动作业
         window.gen_rate.setValue(1e9)
         window.gen_duration.setValue(10.0)
-        window.demo_button.click()
+        window.generate_iq_clicked()
         assert window.active_job is None
         assert "超出" in window.status.text()
     finally:
@@ -712,7 +712,7 @@ def test_asset_selection_reports_file_in_status_bar(tmp_path):
     window.show()
     try:
         assert not window.status_detail.isVisible()  # 未选数据时不占位
-        window.demo_button.click()
+        window.generate_iq_clicked()
         wait_job(app, window)
         window.assets.setCurrentRow(0)
         window.asset_changed()
@@ -726,8 +726,8 @@ def test_asset_selection_reports_file_in_status_bar(tmp_path):
         assert f"{asset['sample_count']:,} 复采样" in text
         assert f"{asset['sample_rate']:g} Hz" in text
         assert "资产：" in text and "complex64" in text
-        assert "内置生成 tones_v1" in text  # 内置生成的数据没有外部源文件
-        # 演示动作不导出（不读导出格式下拉框），所以导出字段如实写“无”
+        assert "内置生成 iq_noise_v1" in text  # 内置生成的数据没有外部源文件
+        # 默认导出格式为“不导出”，所以导出字段如实写“无”
         assert "导出：无" in text
         assert window.status_detail.isVisible()
         # 完整文本保留在 text()/tooltip，界面只显示省略后的字符串

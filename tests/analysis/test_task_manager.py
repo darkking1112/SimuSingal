@@ -238,9 +238,13 @@ def test_finished_banner_uses_result_status_text(tmp_path):
     window = MainWindow(tmp_path)
     window.show()
     try:
-        task, reason = window.start_job("demo", owner="IQ 信号生成",
-                                        label="数学双音演示",
-                                        sample_rate=100_000.0, count=4096)
+        task, reason = window.start_job("generate", owner="IQ 信号生成",
+                                        label="生成信号",
+                                        sample_rate=100_000.0, duration=0.04096,
+                                        seed=0, signals=[],
+                                        noise={"enabled": True, "bandwidth": 100_000.0,
+                                               "power_dbfs": -20.0},
+                                        name=None, export=None)
         assert reason is None and task is not None
         assert _wait(app, lambda: window.tasks.count() == 0, timeout=30)
         window.tabs.setCurrentIndex(window._page_index("IQ 信号生成"))
