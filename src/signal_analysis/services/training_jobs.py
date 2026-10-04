@@ -39,6 +39,57 @@ def list_experiments(root):
     return records
 
 
+def iq_tuning_args(config, arch):
+    """校验 IQ 训练的"高级"可选项并返回对应的 CLI 参数（未提供的键不产生参数）。
+
+    缺省行为与 ``training/train_iq.py`` 的默认值一致：cnn 通道 32,64,128 / 核长 7、
+    tcn 通道 64 / 核长 3、dropout 0.1、权重衰减 1e-4、早停 8 轮。GUI 勾选"覆盖默认
+    训练参数"后才会带上这些键；结构超参没有搜索证据，改动即视为新的实验口径。
+    """
+    args = []
+    channels = config.get("channels")
+    if channels not in (None, ""):
+        try:
+            widths = [int(part) for part in str(channels).replace("，", ",").split(",")]
+        except ValueError as exc:
+            raise ValueError(f"channels 需要逗号分隔的整数，收到 {channels!r}") from exc
+        if any(width < 1 for width in widths):
+            raise ValueError("channels 的每个通道数都应为正整数")
+        if arch == "cnn" and len(widths) != 3:
+            raise ValueError("cnn 的 channels 需要 3 个正整数（如 64,128,256）")
+        if arch == "tcn" and len(widths) > 3:
+            raise ValueError("tcn 的 channels 给出 1～3 个正整数（只用第 1 个）")
+        args += ["--channels", ",".join(str(width) for width in widths)]
+    kernel = config.get("kernel")
+    if kernel is not None:
+        if isinstance(kernel, bool) or not isinstance(kernel, int):
+            raise ValueError("卷积核长应为整数")
+        if arch == "cnn" and (kernel < 3 or kernel % 2 == 0):
+            raise ValueError("cnn 的卷积核长应是不小于 3 的奇数")
+        if arch == "tcn" and kernel < 1:
+            raise ValueError("tcn 的卷积核长应为正整数")
+        args += ["--kernel", str(kernel)]
+    for key, flag, low, high in (("dropout", "--dropout", 0.0, 1.0),
+                                 ("weight_decay", "--weight-decay", 0.0, None)):
+        value = config.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                or not math.isfinite(float(value)):
+            raise ValueError(f"{key} 应为有限数值")
+        number = float(value)
+        if number < low or (high is not None and number >= high):
+            limit = "[0, 1)" if high is not None else "不小于 0"
+            raise ValueError(f"{key} 应在 {limit} 范围内")
+        args += [flag, repr(number)]
+    patience = config.get("patience")
+    if patience is not None:
+        if isinstance(patience, bool) or not isinstance(patience, int) or patience < 1:
+            raise ValueError("早停轮数应为不小于 1 的整数")
+        args += ["--patience", str(patience)]
+    return args
+
+
 def iq_plan(config, directory):
     """Validate inputs before creating any output; return argv lists, never shell text.
 
@@ -64,6 +115,7 @@ def iq_plan(config, directory):
         raise ValueError("学习率必须为有限正数")
     if config["device"] not in ("cpu", "cuda"):
         raise ValueError("设备应为 cpu 或 cuda")
+    tuning = iq_tuning_args(config, arch)
     out = Path(directory).resolve()
     stages = []
 
@@ -86,7 +138,8 @@ def iq_plan(config, directory):
     stage("训练与导出", "train_iq.py", "--data", data, "--arch", arch,
           "--epochs", config["epochs"], "--batch-size", config["batch"],
           "--learning-rate", config["lr"], "--seed", config["seed"],
-          "--device", config["device"], "--events", "--onnx-dir", out / "model")
+          "--device", config["device"], "--events", "--onnx-dir", out / "model",
+          *tuning)
     stage("模型验收", "verify_iq.py", "--manifest", out / "model/iq_manifest.json",
           "--data", data, "--json", out / "verification.json", "--threads", 1)
     return stages

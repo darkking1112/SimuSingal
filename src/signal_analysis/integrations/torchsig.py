@@ -368,8 +368,9 @@ def import_bundle(workspace, bundle, collection, task_sets, reporter, *, mapping
         if pending:
             counts = annotate_assets(workspace, task_sets, pending, source="external",
                                      noise_only=noise_ids)
-            for key, value in counts.items():
-                totals[key] += value
+            # 字典外样式在 TorchSig 路径由 _add_targets 单独统计（unmapped），这里只取计数
+            for key in ("detection", "amc"):
+                totals[key] += counts[key]
             pending.clear()
             noise_ids.clear()
 

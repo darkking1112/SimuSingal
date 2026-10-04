@@ -96,6 +96,42 @@ def test_training_pages_have_fixed_tasks_and_independent_owners(training_window)
 
 
 @pytest.mark.gui
+def test_amc_advanced_training_fields_are_opt_in(training_window):
+    """高级结构超参默认不写入配置；勾选后才带上，并受 iq_tuning_args 校验。"""
+    app, window = training_window
+    page = window.amc_training_page
+    use_collection(window, app, name="高级参数集合", count=2)
+    config = page.configuration()
+    assert page.advanced_toggle.isChecked() is False
+    for key in ("channels", "kernel", "dropout", "weight_decay", "patience"):
+        assert key not in config, key          # 默认沿用 train_iq.py 的默认值
+    assert not page.iq_channels.isEnabled()
+
+    page.advanced_toggle.setChecked(True)
+    app.processEvents()
+    assert page.iq_channels.isEnabled()
+    page.iq_channels.setText("64,128,256")
+    page.iq_kernel.setValue(9)
+    page.iq_dropout.setValue(0.20)
+    page.iq_weight_decay.setValue(0.001)
+    page.iq_patience.setValue(4)
+    config = page.configuration()
+    assert config["channels"] == "64,128,256" and config["kernel"] == 9
+    assert config["dropout"] == 0.20 and config["weight_decay"] == 0.001
+    assert config["patience"] == 4
+
+    # 校验与执行侧共用同一份逻辑：cnn 通道数不对 / 核长为偶数直接拒绝
+    from signal_analysis.services.training_jobs import iq_tuning_args
+    page.iq_channels.setText("64,128")
+    with pytest.raises(ValueError, match="3 个正整数"):
+        iq_tuning_args(page.configuration(), "cnn")
+    page.iq_channels.setText("")
+    page.iq_kernel.setValue(4)
+    with pytest.raises(ValueError, match="奇数"):
+        iq_tuning_args(page.configuration(), "cnn")
+
+
+@pytest.mark.gui
 def test_training_tabs_need_a_selected_collection(training_window):
     app, window = training_window
     tabs = window.tabs

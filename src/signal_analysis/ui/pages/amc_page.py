@@ -8,6 +8,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from ...core_api import MAX_SAMPLES, plan_signal, spectrum_row
+from ...contracts.amc import AMC_MODEL_CONTRACT, AMC_ONNX_CONTRACT
 from ...contracts.iq import IQ_WAVEFORM_CONTRACT
 from ...data import Workspace
 from ...tasks import run_job
@@ -40,6 +41,9 @@ class AmcPageMixin:
             "若所选清单声明 contract = iq_waveform_v1，本页自动改走原始 IQ 通路：在同一分析频带内取"
             "定长复基带窗口（单位 RMS 归一化）直接交给 1D CNN／TCN，由网络自行学习调制特征；标签集合"
             "由清单决定（A09 六类或更宽的独立字典），结果契约 amc_iq_classify_v1，与特征通路互不影响。"
+            "分析中心与分析带宽对**两条通路含义相同**：带宽填 0 表示按整段采样带宽分析（中心强制归零），"
+            "只有信号占满整段时才用得上；窄带信号落在记录某个频点上时必须填频带（可用“取用检测结果频带”），"
+            "模型栏右侧实时显示当前会用哪条通路。"
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -50,11 +54,13 @@ class AmcPageMixin:
         bar = QtWidgets.QHBoxLayout()
         bar.addWidget(QtWidgets.QLabel("分析中心"))
         center_row, self.amc_offset = _freq_spin(-1e9, 1e9, 0.0, 1)
-        self.amc_offset.setToolTip("信号占用的中心频率（相对基带的频率偏移），0 表示基带中心")
+        self.amc_offset.setToolTip("信号占用的中心频率（相对基带的频率偏移），0 表示基带中心；"
+                                   "特征通路与原始 IQ 通路都用这组频带")
         bar.addWidget(center_row)
         bar.addWidget(QtWidgets.QLabel("分析带宽"))
         width_row, self.amc_bandwidth = _freq_spin(0.0, 1e9, 0.0, 1)
-        self.amc_bandwidth.setToolTip("信号占用带宽（Hz），0 表示使用整段采样带宽（不做抽取）")
+        self.amc_bandwidth.setToolTip("信号占用带宽（Hz），0 表示使用整段采样带宽（不做抽取、中心归零）；"
+                                      "两条通路共用该口径，窄带信号不填会按整段分析、结论不可靠")
         bar.addWidget(width_row)
         self.amc_button = QtWidgets.QPushButton("识别所选数据")
         self.amc_button.setObjectName("primary")
@@ -92,6 +98,8 @@ class AmcPageMixin:
         model_bar.addWidget(self.amc_model_status)
         model_bar.addStretch(1)
         layout.addLayout(model_bar)
+        # 模型栏改变即刷新"当前通路/模型"提示：本条通路判断不能只靠识别结果里的字
+        self.amc_model.textChanged.connect(self._update_amc_model_status)
         grid = QtWidgets.QGridLayout()
         self.amc_plot = pg.PlotWidget(title="六类后验概率")
         self.amc_plot.setLabel("left", "概率")
@@ -118,13 +126,61 @@ class AmcPageMixin:
 
 
     def update_amc_controls(self):
-        """显示内置模型是否随包分发（缺失时给出自训练指引，不影响手动选模型）。"""
+        """刷新模型栏提示：内置基线是否随包分发 + 当前选择会走哪条通路。"""
         from ...algorithms.amc.feature_model import default_model_path
 
-        present = default_model_path().is_file()
-        self.amc_model_status.setText(
-            "内置线性基线可用" if present else
-            "未找到内置模型，请先运行 training/train_amc.py，或手动选择模型文件")
+        self._amc_builtin_available = default_model_path().is_file()
+        self._update_amc_model_status()
+
+    def _model_label(self, path):
+        """清单里可读的 ``id@version``（读不动就退回家具文件名）。"""
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None, Path(path).name
+        if not isinstance(payload, dict):
+            return None, Path(path).name
+        identifier = str(payload.get("id") or "").strip()
+        version = str(payload.get("version") or "").strip()
+        label = f"{identifier}@{version}" if identifier else Path(path).name
+        return payload, label
+
+    def _update_amc_model_status(self, *_):
+        """模型栏右侧常驻显示"当前用哪条通路、哪个模型"，避免特征通路/原始 IQ 通路分不清。"""
+        if not hasattr(self, "amc_model_status"):
+            return
+        available = getattr(self, "_amc_builtin_available", None)
+        if available is None:
+            from ...algorithms.amc.feature_model import default_model_path
+            available = default_model_path().is_file()
+            self._amc_builtin_available = available
+        path = self.amc_model.text().strip()
+        if not path:
+            self.amc_model_status.setStyleSheet("")
+            self.amc_model_status.setText(
+                "当前：内置线性基线 · 特征通路（A09 六类）" if available
+                else "未找到内置模型，请先运行 training/train_amc.py 或手动选择模型文件")
+            return
+        payload, label = self._model_label(path)
+        contract = str((payload or {}).get("contract") or "") if payload else None
+        if contract == IQ_WAVEFORM_CONTRACT:
+            arch = str(((payload.get("training") or {}).get("arch") or "")).strip()
+            detail = f" · {arch}" if arch else ""
+            self.amc_model_status.setStyleSheet("")
+            self.amc_model_status.setText(f"当前：原始 IQ 通路（CNN/TCN）· {label}{detail}")
+        elif contract == AMC_MODEL_CONTRACT:
+            self.amc_model_status.setStyleSheet("")
+            self.amc_model_status.setText(f"当前：特征通路 · 线性判别模型 · {label}")
+        elif contract == AMC_ONNX_CONTRACT:
+            self.amc_model_status.setStyleSheet("")
+            self.amc_model_status.setText(f"当前：特征通路 · ONNX 分类器 · {label}")
+        elif payload is None:
+            self.amc_model_status.setStyleSheet("color: #b00020;")
+            self.amc_model_status.setText(f"当前：清单无法读取 → {label}（识别时会按特征通路报错）")
+        else:
+            self.amc_model_status.setStyleSheet("color: #b00020;")
+            shown = contract or "缺少 contract"
+            self.amc_model_status.setText(f"当前：清单契约无法识别（{shown}）· {label}")
 
 
     def choose_amc_model(self):

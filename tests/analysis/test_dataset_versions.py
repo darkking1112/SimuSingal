@@ -39,9 +39,9 @@ def test_detection_dataset_version_flow(tmp_path):
     workspace = Workspace(tmp_path / "ws")
     collection, assets, task_set = make_detection_set(workspace)
     boot = bootstrap_labels_from_versions(workspace, task_set["id"])
-    assert boot == {"created": 3, "skipped": 0}
+    assert boot == {"created": 3, "skipped": 0, "unmapped": {}}
     assert bootstrap_labels_from_versions(workspace, task_set["id"]) == \
-        {"created": 0, "skipped": 3}  # 幂等
+        {"created": 0, "skipped": 3, "unmapped": {}}  # 幂等
     for asset in assets:
         workspace.set_asset_coverage(task_set["id"], asset["id"], "complete",
                                      source="manual")
@@ -185,7 +185,7 @@ def test_service_dataset_and_recipe_actions(tmp_path):
     root = str(workspace.root)
     boot = execute({"workspace": root, "action": "dataset_bootstrap_labels",
                     "task_set_id": task_set["id"]})
-    assert boot == {"created": 2, "skipped": 0}
+    assert boot == {"created": 2, "skipped": 0, "unmapped": {}}
     for asset in assets:
         workspace.set_asset_coverage(task_set["id"], asset["id"], "complete",
                                      source="manual")

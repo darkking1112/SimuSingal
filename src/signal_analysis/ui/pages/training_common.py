@@ -185,6 +185,7 @@ class TrainingPageBase(QtWidgets.QWidget):
         self.config_status = QtWidgets.QLabel("")
         self.config_status.setWordWrap(True)
         self.config_status.setStyleSheet("color: #b00020;")
+        self._hint_key = None
 
         self.device = QtWidgets.QComboBox()
         self.device.addItems(["cpu", "cuda"])
@@ -268,6 +269,7 @@ class TrainingPageBase(QtWidgets.QWidget):
         self.load_button.clicked.connect(self.load_model)
         row.addWidget(self.load_button)
         layout.addLayout(row)
+        self._update_collection_hint()
         return widget
 
     def curve_title(self):
@@ -351,6 +353,42 @@ class TrainingPageBase(QtWidgets.QWidget):
         self.val_collection.setEnabled(not own_slot)
         self.stop_button.setEnabled(self.runner.active)
         self.update_task_controls()
+        self._update_collection_hint()
+
+    #: 标签状态 → 提示里的中文名（训练页说明"为什么样本比资产少"）
+    _LABEL_STATE_NAMES = {"unlabeled": "未标注", "unknown": "未知调制",
+                          "out_of_taxonomy": "字典外类别"}
+
+    def _update_collection_hint(self):
+        """在集合下拉下面给出本页当前选择的可用样本数与被跳过标签，避免"静默少样本"。"""
+        if not hasattr(self, "collection_hint"):
+            return
+        train_id = self.train_collection.currentData()
+        val_id = self.val_collection.currentData()
+        if not train_id or not val_id:
+            self.collection_hint.setText("选择训练集与验证集后显示本次训练可用的样本数。")
+            return
+        key = (train_id, val_id)
+        if key == getattr(self, "_hint_key", None):
+            return
+        self._hint_key = key
+        from ...services.training_inputs import inputs_plan
+        try:
+            plan = inputs_plan(self.window.workspace, self.TASK, train_id, val_id)
+        except ValueError as exc:
+            self.collection_hint.setText(f"当前选择不可训练：{exc}")
+            return
+        parts = []
+        for label, section in (("训练集", plan["train"]), ("验证集", plan["val"])):
+            counts = section["counts"]
+            text = f"{label} {counts['samples']} 个样本（{counts['assets']} 条资产）"
+            states = section["stats"].get("label_states") or {}
+            skipped = "、".join(f"{self._LABEL_STATE_NAMES.get(state, state)} {count}"
+                                for state, count in states.items() if count)
+            if skipped:
+                text += f"，跳过 {skipped}"
+            parts.append(text)
+        self.collection_hint.setText("；".join(parts) + "。")
 
     def update_task_controls(self):
         pass

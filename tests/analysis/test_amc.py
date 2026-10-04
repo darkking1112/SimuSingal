@@ -355,7 +355,9 @@ def test_gui_amc_tab_renders_result(tmp_path):
         assert labels == ["信号导入", "IQ 信号生成", "态势显示", "信号检测", "调制识别", "跳频参数",
                           "信号检测训练", "AMC 识别训练", "数据管理", "算法对比", "运行记录"]
         assert window.amc_button.text() and window.amc_from_detect.text()
-        assert "内置" in window.amc_model_status.text()  # 内置模型随包分发时应给出可用的提示
+        # 内置模型随包分发时应给出可用的提示，并写明当前走特征通路（AI/IQ 清单会改这一行）
+        assert "内置" in window.amc_model_status.text()
+        assert "特征通路" in window.amc_model_status.text()
         # 无检测结果时，“取用检测结果频带”给出明确提示而不是静默无动作
         window.use_detected_band()
         assert "信号检测" in window.status.text()

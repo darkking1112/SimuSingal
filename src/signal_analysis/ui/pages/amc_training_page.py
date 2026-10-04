@@ -7,10 +7,12 @@ import json
 
 from PySide6 import QtCore, QtWidgets
 
+from common.gui import direct_entry
 from ...contracts.iq import (CLASS_SET_A09, DEFAULT_IQ_SAMPLES, IQ_INPUT_CHANNELS,
                              IQ_NORMALIZATION)
 from ...data.targets import carryover_fields
 from ...services.training_inputs import collection_task_set
+from ...services.training_jobs import iq_tuning_args
 from .training_common import TrainingPageBase
 
 #: AMC 类别状态：与数据层 ``CLASS_STATES`` 一致。
@@ -42,11 +44,75 @@ class AmcTrainingPage(TrainingPageBase):
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         form.addRow("IQ 数据契约（只读）", self.iq_summary)
 
+        # 高级训练参数：默认关闭 = 用 train_iq.py 的默认结构超参；勾选后才写进配置
+        self.advanced_toggle = QtWidgets.QCheckBox("覆盖默认训练参数（高级）")
+        self.advanced_toggle.setToolTip(
+            "默认关闭：结构超参用 train_iq.py 的默认值（cnn 32,64,128 / 核长 7；"
+            "tcn 64 / 核长 3、dropout 0.1、权重衰减 1e-4、早停 8 轮）。勾选后下列字段"
+            "才写入训练配置；结构超参没有搜索证据，改动即视为新的实验口径，需要重新验收。")
+        self.advanced_toggle.toggled.connect(self._sync_advanced_enabled)
+        form.addRow(self.advanced_toggle)
+
+        self.iq_channels = QtWidgets.QLineEdit()
+        self.iq_channels.setPlaceholderText("留空 = 默认；cnn 需 3 个宽度（如 64,128,256），tcn 只用第 1 个")
+        form.addRow("卷积通道", self.iq_channels)
+
+        self.iq_kernel = QtWidgets.QSpinBox()
+        self.iq_kernel.setRange(0, 65)
+        self.iq_kernel.setSpecialValueText("按结构默认（cnn 7 / tcn 3）")
+        self.iq_kernel.setToolTip("cnn 需不小于 3 的奇数；tcn 为正整数")
+        form.addRow("卷积核长", self.iq_kernel)
+
+        self.iq_dropout = QtWidgets.QDoubleSpinBox()
+        self.iq_dropout.setRange(0.0, 0.9)
+        self.iq_dropout.setDecimals(2)
+        self.iq_dropout.setSingleStep(0.05)
+        self.iq_dropout.setValue(0.10)
+        form.addRow("Dropout", self.iq_dropout)
+
+        self.iq_weight_decay = QtWidgets.QDoubleSpinBox()
+        self.iq_weight_decay.setRange(0.0, 1.0)
+        self.iq_weight_decay.setDecimals(7)
+        self.iq_weight_decay.setSingleStep(0.0001)
+        self.iq_weight_decay.setValue(0.0001)
+        direct_entry(self.iq_weight_decay)
+        form.addRow("权重衰减", self.iq_weight_decay)
+
+        self.iq_patience = QtWidgets.QSpinBox()
+        self.iq_patience.setRange(1, 1000)
+        self.iq_patience.setValue(8)
+        self.iq_patience.setToolTip("验证准确率连续多少轮不提升就早停（默认 8）")
+        form.addRow("早停轮数", self.iq_patience)
+
+        self._advanced_fields = (self.iq_channels, self.iq_kernel, self.iq_dropout,
+                                 self.iq_weight_decay, self.iq_patience)
+        self._sync_advanced_enabled(False)
+
+    def _sync_advanced_enabled(self, enabled):
+        """未勾选"覆盖默认训练参数"时字段置灰（配置里也不出现这些键）。"""
+        for field in getattr(self, "_advanced_fields", ()):
+            field.setEnabled(bool(enabled))
+
+    def configuration(self):
+        config = super().configuration()
+        if self.advanced_toggle.isChecked():
+            text = self.iq_channels.text().strip()
+            if text:
+                config["channels"] = text
+            if self.iq_kernel.value() > 0:
+                config["kernel"] = int(self.iq_kernel.value())
+            config["dropout"] = float(self.iq_dropout.value())
+            config["weight_decay"] = float(self.iq_weight_decay.value())
+            config["patience"] = int(self.iq_patience.value())
+        return config
+
     def validate_task_config(self, config):
         classes = json.loads(self.window.workspace.get_taxonomy(
             self.inputs_plan["train"]["task_set"]["taxonomy_id"])["classes_json"])
         if len(classes) < 2:
             raise ValueError("AMC 训练至少需要 2 个类别：请检查训练集的类别字典")
+        # 高级训练参数在这里先校验一遍（iq_plan 会在起任务前复核同一份逻辑）
+        iq_tuning_args(config, config.get("arch", "cnn"))
 
     # ------------------------------------------------------------------ 摘要
     def update_data_summary(self):

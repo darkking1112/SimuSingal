@@ -434,6 +434,45 @@ def test_train_iq_help_runs_without_torch(trainer, capsys):
     assert "--torchsig" not in capsys.readouterr().out
 
 
+# --------------------------------------------------------------------------- 高级训练参数
+
+
+def test_iq_plan_passes_advanced_tuning_args(tmp_path):
+    """iq_plan 把高级超参转成 CLI 参数；缺省时不出现这些参数；非法值在起任务前拒绝。"""
+    from signal_analysis.services.training_jobs import iq_plan
+    repo = Path(__file__).resolve().parents[2]
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "iq_dataset.json").write_text("{}", encoding="utf-8")
+    (data / "iq_dataset.npz").write_bytes(b"placeholder")
+    base = {"repository": str(repo), "python": sys.executable, "arch": "cnn",
+            "epochs": 5, "batch": 4, "lr": 1e-3, "seed": 7, "device": "cpu",
+            "data": str(data)}
+
+    tuned = {**base, "channels": "64,128,256", "kernel": 9, "dropout": 0.2,
+             "weight_decay": 1e-3, "patience": 4}
+    argv = iq_plan(tuned, tmp_path / "run")[1]["argv"]
+    for flag, value in (("--channels", "64,128,256"), ("--kernel", "9"),
+                        ("--dropout", "0.2"), ("--weight-decay", "0.001"),
+                        ("--patience", "4")):
+        assert flag in argv and argv[argv.index(flag) + 1] == value, flag
+
+    argv = iq_plan(base, tmp_path / "run2")[1]["argv"]
+    for flag in ("--channels", "--kernel", "--dropout", "--weight-decay", "--patience"):
+        assert flag not in argv, flag  # 缺省 = 沿用 train_iq.py 默认值
+
+    with pytest.raises(ValueError, match="3 个正整数"):
+        iq_plan({**tuned, "channels": "64,128"}, tmp_path / "run3")
+    with pytest.raises(ValueError, match="奇数"):
+        iq_plan({**tuned, "kernel": 4}, tmp_path / "run4")
+    with pytest.raises(ValueError, match="dropout"):
+        iq_plan({**tuned, "dropout": 1.0}, tmp_path / "run5")
+    with pytest.raises(ValueError, match="早停轮数"):
+        iq_plan({**tuned, "patience": 0}, tmp_path / "run6")
+    with pytest.raises(ValueError, match="CNN / TCN"):
+        iq_plan({**tuned, "arch": "conv"}, tmp_path / "run7")
+
+
 # --------------------------------------------------------------------------- IQCNN / TCN
 
 

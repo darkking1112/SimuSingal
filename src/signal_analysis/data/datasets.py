@@ -191,18 +191,27 @@ def build_rows(workspace, task_set_id):
             if asset is not None and not asset.get("archived_at"):
                 rows.append(negative_row(asset))
     else:
+        label_states = {"unlabeled": 0, "unknown": 0, "out_of_taxonomy": 0}
         for target in targets:
             asset = assets.get(target["asset_id"])
             if asset is None or asset.get("archived_at") or target.get("current") is None:
                 missing_versions += 1
                 continue
             label = labels.get(target["id"])
-            if label is None or label.get("class_state") != "known":
-                continue  # 未标注 / 未知 / 字典外不进入训练（统计另行报告）
+            if label is None:
+                label_states["unlabeled"] += 1
+                continue
+            state = str(label.get("class_state") or "unknown")
+            if state != "known":
+                # 未标注 / 未知 / 字典外不进入训练；按状态计数供训练页提示，不静默丢掉
+                label_states[state if state in label_states else "unknown"] += 1
+                continue
             rows.append(target_row(target, label))
     stats = {"excluded": excluded, "excluded_count": len(excluded),
              "targets": {"total": len(targets), "labeled": len(labels),
                          "missing_versions": missing_versions}}
+    if task == "amc":
+        stats["label_states"] = label_states
     return rows, stats
 
 
@@ -373,6 +382,9 @@ def bootstrap_labels_from_versions(workspace, task_set_id, *, asset_ids=None,
     * AMC 任务：``modulation`` 能映射到类别字典的写 ``known``，其余按
       ``out_of_taxonomy``（保留原始名）或 ``unknown`` 记录。
     已有当前标签的目标跳过（幂等，重复调用不产生新版本）。
+
+    返回 ``{"created", "skipped", "unmapped"}``；``unmapped`` 是写不进类别字典的
+    调制名计数（如勾选 AMC 标注却生成 ``am``），调用方据此提示"这些样本不进训练"。
     """
     task_set = workspace.get_task_set(task_set_id)
     task = task_set["task"]
@@ -381,6 +393,7 @@ def bootstrap_labels_from_versions(workspace, task_set_id, *, asset_ids=None,
     classes = json.loads(taxonomy["classes_json"])
     selected = set(asset_ids) if asset_ids is not None else None
     created = skipped = 0
+    unmapped = {}
     for target in workspace.collection_targets(collection_id, task=task, with_current=True):
         if selected is not None and target["asset_id"] not in selected:
             continue
@@ -406,11 +419,14 @@ def bootstrap_labels_from_versions(workspace, task_set_id, *, asset_ids=None,
                 workspace.append_amc_label(task_set_id, target["id"], source=source,
                                            class_state="out_of_taxonomy",
                                            class_name=modulation)
+                unmapped[modulation] = unmapped.get(modulation, 0) + 1
             else:
                 workspace.append_amc_label(task_set_id, target["id"], source=source,
                                            class_state="unknown")
+                unmapped["（未识别样式）"] = unmapped.get("（未识别样式）", 0) + 1
         created += 1
-    return {"created": created, "skipped": skipped}
+    return {"created": created, "skipped": skipped,
+            "unmapped": dict(sorted(unmapped.items()))}
 
 
 def _class_for_modulation(modulation, classes):

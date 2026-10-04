@@ -77,7 +77,7 @@ def annotate_assets(workspace, task_sets, asset_ids, *, source, noise_only=()):
     生成器（以及带完整实例元数据的 TorchSig bundle）列全了每条录制里的信号，
     所以检测覆盖度记为 ``complete``；没有任何信号的录制是纯噪声负样本。
     """
-    created = {"detection": 0, "amc": 0}
+    created = {"detection": 0, "amc": 0, "amc_unmapped": {}}
     asset_ids = list(asset_ids)
     if not asset_ids:
         return created
@@ -92,8 +92,10 @@ def annotate_assets(workspace, task_sets, asset_ids, *, source, noise_only=()):
             workspace, detection["id"], asset_ids=asset_ids, source=source)["created"]
     amc = task_sets.get("amc")
     if amc is not None:
-        created["amc"] = bootstrap_labels_from_versions(
-            workspace, amc["id"], asset_ids=asset_ids, source=source)["created"]
+        outcome = bootstrap_labels_from_versions(workspace, amc["id"],
+                                                 asset_ids=asset_ids, source=source)
+        created["amc"] = outcome["created"]
+        created["amc_unmapped"] = outcome["unmapped"]
     return created
 
 
@@ -112,9 +114,16 @@ def _place_signals(specs, rate, rng):
                                               plan.get("side"))
         low = -rate / 2.0 + guard / 2.0 - rel_low
         high = rate / 2.0 - guard / 2.0 - rel_high
+        # 生成器还会按**标称带宽**复查一次基带范围（_check_band）：数字样式的实际带宽由
+        # sps 取整得到，可以小于标称带宽，若只按实际占用区间取界，就会放出在标称带宽下
+        # 越界的频点，导致整条录制生成失败。这里收紧到两条规则的公共区间。
+        nominal = float(spec["bandwidth"])
         if plan["mode"] == "ssb":  # check_band 对 SSB 用 offset ± 带宽的保守校验
-            low = max(low, -rate / 2.0 + plan["bandwidth"])
-            high = min(high, rate / 2.0 - plan["bandwidth"])
+            low = max(low, -rate / 2.0 + nominal)
+            high = min(high, rate / 2.0 - nominal)
+        else:
+            low = max(low, -rate / 2.0 + nominal / 2.0)
+            high = min(high, rate / 2.0 - nominal / 2.0)
         if low > high:
             raise ValueError("信号带宽过大，放不进采样带宽")
         for _ in range(PLACEMENT_TRIES):
@@ -170,13 +179,15 @@ def synthesize_record(recipe, index):
     return samples, summary, {"sample_seed": seed, "signal_count": len(specs)}
 
 
-def _flush_labels(workspace, task_sets, pending, noise, source, totals):
+def _flush_labels(workspace, task_sets, pending, noise, source, totals, unmapped):
     if not pending:
         return
     created = annotate_assets(workspace, task_sets, pending, source=source,
                               noise_only=noise)
-    for key, value in created.items():
-        totals[key] += value
+    for key in ("detection", "amc"):
+        totals[key] += created[key]
+    for name, count in (created.get("amc_unmapped") or {}).items():
+        unmapped[name] = unmapped.get(name, 0) + count
     pending.clear()
     noise.clear()
 
@@ -188,7 +199,7 @@ def _run_project(workspace, recipe, collection, recipe_row, task_sets, reporter,
     started = time.monotonic()
     writer, shard_bytes, shards = None, 0, 0
     pending, noise_ids = [], set()
-    failures, totals = {}, {"detection": 0, "amc": 0}
+    failures, totals, unmapped = {}, {"detection": 0, "amc": 0}, {}
     created = sessions = hops = 0
     stopped = None
     try:
@@ -226,15 +237,17 @@ def _run_project(workspace, recipe, collection, recipe_row, task_sets, reporter,
                 writer.seal()
                 writer, shard_bytes = None, 0
                 reporter.emit(index + 1, total, "写入标注…", force=True)
-                _flush_labels(workspace, task_sets, pending, noise_ids, "generator", totals)
+                _flush_labels(workspace, task_sets, pending, noise_ids, "generator",
+                              totals, unmapped)
             reporter.emit(index + 1, total, f"生成中 {index + 1}/{total}（成功 {created}）")
     finally:
         if writer is not None:
             writer.seal()
     reporter.emit(total, total, "写入标注…", force=True)
-    _flush_labels(workspace, task_sets, pending, noise_ids, "generator", totals)
+    _flush_labels(workspace, task_sets, pending, noise_ids, "generator", totals, unmapped)
     return {"created": created, "failures": failures, "sessions": sessions, "hops": hops,
-            "labels": totals, "stopped": stopped, "shards": shards}
+            "labels": totals, "unmapped": dict(sorted(unmapped.items())),
+            "stopped": stopped, "shards": shards}
 
 
 # ---------------------------------------------------------------------------
@@ -283,5 +296,5 @@ def generate_collection(workspace, request, resolve_collection):
             "stopped": outcome["stopped"], "collection_id": collection["id"],
             "collection_name": collection["name"], "recipe_id": recipe_row["id"],
             "sessions": outcome["sessions"], "hops": outcome["hops"],
-            "labels": outcome["labels"], "shards": outcome["shards"],
-            "elapsed_s": round(time.monotonic() - started, 3)}
+            "labels": outcome["labels"], "unmapped": outcome["unmapped"],
+            "shards": outcome["shards"], "elapsed_s": round(time.monotonic() - started, 3)}

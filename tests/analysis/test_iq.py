@@ -706,16 +706,22 @@ def test_gui_routes_iq_manifest_to_the_iq_action(tmp_path, tiny_model):
     window = MainWindow(tmp_path / "ws")
     try:
         assert window._use_iq_branch() is False
+        # 模型栏右侧常驻提示：空选 → 内置基线的特征通路；选中 IQ 清单 → 原始 IQ 通路
+        assert "内置" in window.amc_model_status.text()
+        assert "特征通路" in window.amc_model_status.text()
         window.amc_model.setText(str(manifest_path))
         assert window._use_iq_branch() is True
         assert window._amc_model_contract() == IQ_WAVEFORM_CONTRACT
+        assert "原始 IQ 通路" in window.amc_model_status.text()
         # 非 JSON / 非法 JSON 一律按"非 IQ 清单"处理，真正的报错留给识别入口
         window.amc_model.setText("")
         assert window._use_iq_branch() is False
+        assert "特征通路" in window.amc_model_status.text()
         broken = tmp_path / "broken.json"
         broken.write_text("{not json", encoding="utf-8")
         window.amc_model.setText(str(broken))
         assert window._amc_model_contract() is None and window._use_iq_branch() is False
+        assert "无法读取" in window.amc_model_status.text()
     finally:
         window.close()
         app.processEvents()

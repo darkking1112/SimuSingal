@@ -1,6 +1,6 @@
 # AMC 识别训练
 
-版本：0.1.0。更新日期：2026-10-03。
+版本：0.1.0。更新日期：2026-10-04。
 
 「AMC 识别训练」是信号分析桌面应用的第八个标签页，负责**调制识别（AMC）任务的数据标注与外部训练**：查看并修改当前集合内所选资产的 AMC 类别与目标参数，选好「训练集」「验证集」两个**信号集合**后启动 `training/` 下的 IQ 波形分类训练与验收，并在「实验与日志」里查看指标、加载验收通过的模型。它对应[00 技术方案](00电磁信号分析识别系统_Python技术方案.md) §4.4「数据评估与信号识别训练」的机器侧训练入口：产物是 ONNX 模型与 `iq_manifest.json` 清单，由「调制识别」页的 AI 入口加载推理（见[调制识别](05调制识别.md)）。
 
@@ -135,8 +135,11 @@
 | 初始权重 / RT-DETR 目录与 YAML / 时频图边长 | **不存在**：这些是检测专属字段 |
 | IQ 数据契约摘要 | 只读（§3.4） |
 | IQ 窗口长度 `samples` | 固定契约，页面只读显示默认值 1024；worker 从配置取 `samples`，缺省用 `DEFAULT_IQ_SAMPLES`。窗口长度必须与清单 `input.samples` 一致，训练、验收与推理只有一份实现 |
+| 高级训练参数（可选） | 复选框「覆盖默认训练参数（高级）」**默认关闭**：关闭时配置里不出现这些键，沿用 `train_iq.py` 默认值（cnn 通道 32,64,128 / 核长 7；tcn 通道 64 / 核长 3；dropout 0.1、权重衰减 1e-4、早停 8 轮）。勾选后才写入 `channels`（cnn 需 3 个正整数；tcn 取第 1 个）、`kernel`、`dropout`、`weight_decay`、`patience`，由 `services/training_jobs.iq_tuning_args` 统一校验并转成 `train_iq.py` 的 `--channels/--kernel/--dropout/--weight-decay/--patience`——页面预检与 worker 执行**共用同一份逻辑**。结构超参没有搜索证据，改动即视为新的实验口径，需要重新验收 |
 
 页内说明：「训练数据取自信号集合：选择训练集与验证集集合即可，页内不生成数据、不导出训练集。“信号标注”查看并修改当前集合内左侧选中资产的参数与调制类别。」
+
+集合下拉框下方另有**输入提示行**：选择两个集合后显示「训练集 N 个样本（M 条资产），跳过 字典外类别 X、未标注 Y；验证集 …」——`build_rows` 为 AMC 统计被跳过的标签状态（`unlabeled` / `unknown` / `out_of_taxonomy`），提示行直接读同一份 `inputs_plan` 装配结果，避免"资产数不少、训练样本却少一截"的原因只能到运行目录里查。选择不可训练（如两集合相同）时该行显示拒绝原因。
 
 ### 4.2 预检清单
 
@@ -148,9 +151,55 @@
 | 类别字典一致 | 「训练集与验证集的类别字典不同，无法一起训练：请统一后重试」 |
 | 类别数 | 「AMC 训练至少需要 2 个类别：请检查训练集的类别字典」（训练集标注集的类别数 < 2 时拒绝） |
 | 已确认类别 | 字典外与未知标签**不阻止训练**：它们被跳过并计数，只有「一个可训练样本都没有」才拒绝 |
+| 高级训练参数（勾选后） | `channels/kernel/dropout/weight_decay/patience` 由 `iq_tuning_args` 校验：cnn 需 3 个正整数通道、核长不小于 3 的奇数；tcn 通道 1～3 个、核长正整数；dropout ∈ [0,1)、权重衰减 ≥ 0、早停轮数 ≥ 1。非法值在起任务前报错，不创建实验目录 |
 | 快照为空 | 窗口生成全部失败时由 worker 报「没有可训练的 AMC 样本（需要已确认的类别，且频带内样本足够长）：<原因>（N 条）」 |
 
 预检失败不占槽、不创建实验目录，错误同时显示在配置页红字与实验页状态。
+
+### 4.3 训练配置字段详解
+
+本节逐项说明「训练配置」里每个输入**到底影响什么**。整份配置会**原样**写进运行目录的
+`experiment.json`，事后可在实验页或文件里核对，不存在"页面填了 A、实际跑了 B"。
+一次完整实跑的各字段取值与结果见[调制识别：AI 特征学习](algorithms/调制识别_AI特征学习.md) §8「项目实例」。
+
+**共用字段**（控件与检测页同一组）
+
+| 字段 | 默认值 | 作用 | 影响与建议 |
+| --- | --- | --- | --- |
+| 训练源码根目录 `repository` | 从本页代码位置向上回溯的仓库根（`parents[4]`） | worker 从哪里加载 `training/` 脚本 | 只决定"用哪份代码"，不改变数据；换目录前确认其中有 `training/iq_cnn.py`、`train_iq.py` |
+| 训练环境 Python `python` | 源码运行 = 当前解释器；冻结（打包）版 = 空，需手选 | 用哪个解释器跑 worker | 必须已装 `torch`、`onnx`、`onnxruntime`；环境不对会在「校验环境与数据」阶段失败（不是训练中途失败），日志里有缺包提示 |
+| 训练集 `train_collection_id` | 左栏当前选中的集合（随左栏切换同步） | 训练样本来源 | 实际样本数 = 集合内 `class_state=known` 的目标数（下拉框下方的提示行直接给出），不是"资产数"；页内改选会保持到下次左栏切换 |
+| 验证集 `val_collection_id` | **空选**（刻意不预设） | 早停与最佳轮次选择；验收脚本报告的准确率 | **不是按比例从训练集切的**，而是另一个完整集合——所以报出来的验证准确率天生是**跨集合**指标；空选或与训练集相同都不能启动，两集合同源（`origin_group_id` 重叠）会被预检拒绝 |
+| 训练设备 `device` | cpu | 计算设备 | cpu 慢但稳定、可复现；cuda 需要环境里是 CUDA 版 torch，且结果与 cpu 有细微差异 |
+| 轮数 `epochs` | 20 | **上限**，不是"一定跑完" | 验证准确率连续 `patience` 轮不提升即早停，并回滚到**最佳轮**权重再导出；同时它还是余弦退火的周期，所以设得太小会双重截断，设大一些更稳（只多花时间） |
+| 批大小 `batch` | 8 | 每步样本数 | 每轮步数 ≈ 样本数 ÷ 批大小；几千样本时 8 偏小、CPU 上慢，实例里用 64；内存吃紧再调小 |
+| 学习率 `lr` | 0.001 | AdamW 初始学习率 | **最敏感的一项**：界面下限是 `1e-7`，按成 1e-7 会让 loss 卡在 1.78 几乎不降（历史实验踩过）；训练用同一学习率配合余弦退火在 `epochs` 内衰减到 0 |
+| 随机种子 `seed` | 7 | 权重初始化 + 每轮打乱顺序 | 决定这次训练的可复现性（同种子同数据同参数结果一致）；换种子只应带来几个百分点抖动 |
+
+**AMC 专属字段**
+
+| 字段 | 默认值 | 作用 | 影响与建议 |
+| --- | --- | --- | --- |
+| 模型 `arch` | `cnn` | 网络结构 | `cnn` = 步长卷积堆叠，`tcn` = 膨胀因果残差；同一份数据上实测 cnn 更好，窗口很长时可试 tcn |
+| IQ 数据契约（只读） | — | 回显当前集合的窗口长度/通道排布/类别字典 | 只是回显；真正的契约校验在 worker 与 `train_iq.py` 里（契约不符直接报错，不训练） |
+| IQ 窗口长度 `samples` | 1024（只读） | 送进网络的采样点数 | 必须与清单 `input.samples` 一致；页面不给改——改窗口长度等于换契约，训练、验收、推理三处必须一起改 |
+| 覆盖默认训练参数（高级） | **关闭** | 打开后才把下面 5 个键写进配置 | 关闭时配置里**不出现**这些键，完全沿用 `train_iq.py` 默认值；结构超参没有搜索证据，改动即新的实验口径，需重新验收 |
+
+**高级参数（勾选「覆盖默认训练参数」后才生效）**
+
+| 字段 | 默认值 | 作用 | 约束（`services/training_jobs.iq_tuning_args` 校验） |
+| --- | --- | --- | --- |
+| 卷积通道 `channels` | cnn `32,64,128`；tcn `64` | 各级特征宽度 | cnn 需 **3 个正整数**（如 `64,128,256`）；tcn 只取第 1 个；留空 = 用结构默认 |
+| 卷积核长 `kernel` | cnn 7；tcn 3 | 感受野 | cnn 需 **≥3 的奇数**；tcn 为正整数；0/留空 = 用结构默认 |
+| Dropout `dropout` | 0.10 | 全连接前的丢弃率 | 取值 `[0, 0.9]`；小集合加大可抑过拟合，过大转为欠拟合 |
+| 权重衰减 `weight_decay` | 1e-4 | AdamW 的 L2 强度 | `≥ 0`；0 = 不加正则 |
+| 早停轮数 `patience` | 8 | 连续多少轮不提升就停 | `≥ 1`；调大只会多跑几轮，通常收益很小 |
+
+**页面不控制的项**（别以为"没入口 = 没发生"）：验证比例（由两个集合的关系决定，页内不按比例划分，
+也不产生 `test` 划分）、类别权重（各类等权，靠集合本身均衡）、**数据增强**（时移/相位/频偏/噪声注入
+都没接）、优化器与损失（固定 AdamW + 交叉熵 + 余弦退火）、`train_iq.py` 的 `--min-snr`
+（命令行支持"只用高 SNR 样本训练"，页面未暴露）、以及清单里的
+`--identifier` / `--version` / `--opset` 等元信息（页面使用默认值 `iq-cnn` / `0.1.0` / opset 17）。
 
 ---
 
@@ -162,7 +211,7 @@
 2. worker 首阶段「构建训练输入」：`inputs_plan` 复算预检（任务名 `iq` 映射到标注集任务 `amc`），取两个集合的 AMC 标注集，`build_rows` 装配候选行时**只保留 `class_state=known` 的目标**（`unknown`、`out_of_taxonomy`、未标注目标跳过）；训练集行标 `split=train`、验证集行标 `split=val`，**不按比例重划、不产生 `test` 划分**。
 3. `iq_snapshot` 把行实体化到 `runs/<id>/collection_data/`：每行按提取范围取 IQ，经推理端同一份 `iq_waveform` 前端口径生成 `(2, N)` float32 单位 RMS 窗口；窗口凑不满（样本不足等）时该行跳过并把异常文本计入 `skipped`；一个有效窗口都没有时直接报错。随后写 `iq_dataset.npz` 与 `iq_dataset.json`。
 4. `training_inputs.json` = `plan_summary(plan)`，记录两个集合的 ID／名称、标注集 ID 与启动时的样本统计；`experiment.json` 的 `config` 保存页面配置原样。**不写 `dataset_version_id`**。
-5. 之后的阶段由 `iq_plan` 生成：在所选 Python 环境里校验数据契约与 CUDA 可用性 → `train_iq.py` 训练并导出 → `verify_iq.py` 验收。运行目录内的 `collection_data/` 只是本次输入快照，不作为用户可见的「导出的训练集」，也不在 `datasets/` 或数据版本表登记。
+5. 之后的阶段由 `iq_plan` 生成：在所选 Python 环境里校验数据契约与 CUDA 可用性 → `train_iq.py` 训练并导出（页面勾选「覆盖默认训练参数」时附加 `--channels/--kernel/--dropout/--weight-decay/--patience`）→ `verify_iq.py` 验收。运行目录内的 `collection_data/` 只是本次输入快照，不作为用户可见的「导出的训练集」，也不在 `datasets/` 或数据版本表登记。
 
 ### 5.2 运行目录布局（AMC 部分）
 
@@ -232,6 +281,10 @@
 - **训练集／验证集可以共用一批信号吗？** 不可以。两集合必须不同，且不能有同源（同一 `origin_group_id`）的资产，否则预检按数据泄漏拒绝。
 - **验证集只有一类可以吗？** 可以启动，但类别数少于 2 的训练集类别字典会被预检拒绝（「AMC 训练至少需要 2 个类别」）；验证集覆盖不全时指标参考价值有限。
 - **为什么窗口长度不能改？** `iq_waveform_v1` 是训练-推理共同契约：窗口长度、通道排布、归一化与抽取比只有一份实现，改动必须同时改标注、训练与推理，本页只读显示。
+- **一条录制会切成多少训练样本？** **只切一个**：每条 AMC 标注目标调用一次 `iq_waveform`，取分析后序列**居中**的 1024 点，其余样本丢弃（一条录制里若有多个被标注目标，则每个目标各出一个窗口）。所以 4000 条集合就产出 4000 个训练样本，集合体积（十几 GB）与训练用量（几十 MB）差得很远——录制是给检测、复算、换参数重取窗用的，不是按训练样本存的。
+- **一个 10000 点的待识别数据会被切片多次投票吗？** 不会。推理同样是"居中取一个 1024 点窗口"：先按分析中心/带宽做混频-低通-抽取，再取居中 1024 点送进 ONNX 一次，**没有滑窗、没有多窗口概率平均**；样本数不足 1024 直接报错（不补零）。这也意味着"多窗融合"目前是改进方向而非既有能力。
+- **模型存在哪里？能不能只留一个文件？** 运行目录 `training/runs/<时间-id>/model/` 下是**一对**：`iq.onnx`（网络权重）+ `iq_manifest.json`（契约、类别顺序、前端口径、sha256、训练信息）。加载时必须选清单，它与 ONNX 必须在同一目录（清单里的 `library` 是相对路径，并会校验 sha256），单独拷 ONNX 不可用；`metrics.json`（逐轮与每类指标）、`verification.json`（验收报告）只用于回看，可以另外归档。
+- **训练跑了多少参数？** 默认 `IQCNN` 在 6 类、1024 点窗口上是 **103,270** 个可训练参数（导出后 BatchNorm 折进卷积，ONNX 里 102,822 个张量元素、约 419 KB）——它是个小网络，别指望靠加大网络解决数据质量问题。
 - **实验页为什么只有验证集、没有测试集？** 训练输入不产生 `test` 划分：训练集行 → `train`、验证集行 → `val`；测试集不参与模型选择。
 - **进度为什么会在换阶段时清零？** 阶段事件与轮次事件每次显式写 `done/total`，换阶段清零是刻意行为，避免横幅停在上一阶段（详见[信号检测训练](07信号检测训练.md) §6.2）。
 - **取消训练要多久？** 先请求进程树停止并等 2 秒，未退出才强杀；进程树未确认退出就保持占槽并允许重试。
@@ -256,7 +309,8 @@
 | AMC 快照（只收 known、跳过计数） | `services/training_snapshot.py::iq_snapshot`/`snapshot` | `test_training_snapshot.py::test_iq_snapshot_keeps_only_confirmed_classes` |
 | 数据层行装配（只收 known） | `data/datasets.py::build_rows` | `test_dataset_versions.py::test_amc_dataset_version_uses_target_windows` |
 | IQ 契约与清单 | `contracts/iq.py`（`iq_waveform_v1`/`iq_channels_first_v1`/`unit_rms`/A09）、`training/train_iq.py` | `test_iq_training_tools.py::test_iq_dataset_card_matches_inference_contract`、`::test_train_iq_load_dataset_validates_the_contract` |
-| 训练、导出与验收阶段 | `services/training_jobs.py::iq_plan`、`training/desktop_worker.py`、`training/train_iq.py`、`training/verify_iq.py` | `test_iq_training_tools.py::test_train_classifier_learns_and_exports_consistently`、`::test_iq_dataset_is_byte_reproducible` |
+| 训练、导出与验收阶段 | `services/training_jobs.py::iq_plan`（含高级超参 `iq_tuning_args`）、`training/desktop_worker.py`、`training/train_iq.py`、`training/verify_iq.py` | `test_iq_training_tools.py::test_train_classifier_learns_and_exports_consistently`、`::test_iq_dataset_is_byte_reproducible`、`::test_iq_plan_passes_advanced_tuning_args` |
+| 高级训练参数（页面开关与校验） | `ui/pages/amc_training_page.py::add_task_fields`/`configuration`、`services/training_jobs.py::iq_tuning_args` | `test_training_page_split.py::test_amc_advanced_training_fields_are_opt_in`、`test_iq_training_tools.py::test_iq_plan_passes_advanced_tuning_args` |
 | 端到端（集合直读 → 训练 → 加载） | `training/desktop_worker.py` + 运行器 | `test_training_workbench.py::test_gui_external_iq_training_from_collections_verify_and_load`、`::test_iq_test_partition_does_not_enter_validation` |
 | 运行器进度/日志/收尾与运行槽 | `ui/training_runner.py`、`ui/training_coordinator.py`、`ui/training_process.py` | `test_training_page_split.py::test_progress_reports_epochs_and_resets_on_stage_change`、`::test_stop_and_close_terminate_worker_and_spawned_child`、`test_progress_channel.py` |
 | 指标展示（含 per_snr）与加载 | `ui/pages/training_common.py::metric_text`/`load_model`、`services/training_jobs.py`（`list_experiments`/`decode_worker_log`） | `test_training_page_split.py::test_metric_text_shows_per_snr_buckets`、`test_iq_training_tools.py::test_train_iq_per_snr_buckets_are_explicit_about_empty_bands` |
@@ -271,5 +325,7 @@
 - **页面不暴露 TorchSig 混入**（那是训练脚本 CLI 的能力），也没有任何生成入口；页面不支持在线生成数据。
 - **CNN/TCN 之外的通路（如特征通路线性/Transformer 分类器与 `train_amc.py`）不在本页**；本页固定 `iq` 任务与 `iq_waveform_v1` 契约。
 - **识别准确率的合格门限仍是待确认项**：指标只描述当前数据分布；低信噪比下 16QAM 与 64QAM 易混（见工作台与 `training/README.md` 的实测记录），验收通过不代表精度达标。
+- **一条录制只用"居中一个窗口"**：没有滑窗提取、没有跨窗融合，也没有短录制（短于窗口长度）的兼容路径（直接报错）。训练样本数因此等于"被标注的目标数"，集合里绝大多数采样点未被使用；改进方向是快照侧多窗口提取 + 推理侧概率平均，以及为 AMC 生成更短的专用集合。
+- **无数据增强、无超参搜索**：时移/相位/频偏/噪声注入等保标签增强未接入；高级参数只是"手工覆盖默认值"，没有网格或贝叶斯搜索证据（对比实验见[调制识别：AI 特征学习](algorithms/调制识别_AI特征学习.md) §8）。
 - **未做真实显示器上的人工布局与交互验收**（GUI 流程由离屏集成测试覆盖），CUDA 与冻结构建需在目标环境另行验收。
 - 尚无多实验 A/B 汇总界面；误分类明细与更丰富的评测（如按类别/带宽分组的报表）属于后续方向。
