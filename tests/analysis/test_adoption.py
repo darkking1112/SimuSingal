@@ -1,10 +1,12 @@
 """采纳为参数标注（方案 §4.2）：检测/逐跳/AMC 结论 → 目标参考参数 + 标签。"""
+import numpy as np
 import pytest
 
 from signal_analysis.data.adoption import (adopt_classification, adopt_detections,
                                            adopt_hops)
 from signal_analysis.core_api import generate_iq
 from signal_analysis.services import execute
+from signal_analysis.services.truth import constellation_plan
 from signal_analysis.data import Workspace
 
 
@@ -147,3 +149,66 @@ def test_adopt_classification_service_end_to_end(tmp_path):
     with pytest.raises(ValueError, match="不支持"):
         execute({"workspace": str(workspace.root), "action": "adopt_result",
                  "run_id": analysis["run_id"]})
+
+
+def test_constellation_plan_reads_target_parameters(tmp_path):
+    """星座图绘制计划只读目标参考参数：数字样式 + 符号率 + 中心频率齐备才绘制。"""
+    workspace = Workspace(tmp_path / "ws")
+    digital = workspace.get_asset(add_generated(workspace, mode="qpsk", seed=21)["id"])
+    plan = constellation_plan(workspace, digital)
+    assert plan["plotted"] is True and plan["reason"] is None
+    assert plan["family"] == "digital" and plan["label"] == "QPSK"
+    assert plan["symbol_rate_baud"] == pytest.approx(200_000.0 / 6.0)
+    assert plan["center_hz"] == 0.0 and plan["bandwidth_hz"] is not None
+    assert plan["sources"] == ["generator"] and plan["targets"] == 1
+
+    analog = add_generated(workspace, mode="am", seed=22)
+    plan = constellation_plan(workspace, workspace.get_asset(analog["id"]))
+    assert plan["plotted"] is False and plan["reason"] == "analog"
+    assert plan["label"] == "AM"
+
+    hopping = add_generated(workspace, mode="fh_rc", seed=23)
+    plan = constellation_plan(workspace, workspace.get_asset(hopping["id"]))
+    assert plan["plotted"] is False and plan["reason"] == "hopping"
+
+    # 导入资产没有目标参数：未知，不给星座图
+    imported = workspace.add_samples(np.zeros(64, dtype=np.complex64), 200_000.0,
+                                     "外部导入", "samples.npy")
+    plan = constellation_plan(workspace, workspace.get_asset(imported["id"]))
+    assert plan["plotted"] is False and plan["reason"] == "unknown"
+    assert plan["targets"] == 0 and plan["label"] is None
+
+    # 识别采纳只给调制样式、没有符号率：仍不绘制，并明确缺的是符号率
+    adopt_classification(workspace, analog["id"], {"label": "qpsk"}, "run-21",
+                         band={"center_hz": 0.0, "bandwidth_hz": 50_000.0})
+    plan = constellation_plan(workspace, workspace.get_asset(analog["id"]))
+    assert plan["family"] == "digital" and plan["label"] == "QPSK"
+    assert plan["plotted"] is False and plan["reason"] == "symbol_rate"
+    assert plan["sources"] == ["algorithm"]
+
+
+def test_modulation_family_mapping():
+    """已知调制名/生成样式映射到数模家族；未收录的文本保持未知。"""
+    from signal_analysis.services.truth import modulation_family
+
+    assert modulation_family("AM") == "analog"
+    assert modulation_family("fh_rc") == "digital"
+    assert modulation_family("2ASK") == "digital"
+    assert modulation_family("16qam") == "digital"
+    assert modulation_family("未知") is None
+    assert modulation_family("") is None
+
+
+def test_analysis_summary_carries_constellation_plan(tmp_path):
+    """分析运行记录带星座图口径与符号数组：数字样式 + 参数齐备才落符号点。"""
+    workspace = Workspace(tmp_path / "ws")
+    asset = add_generated(workspace, mode="qam16", seed=24)
+    result = execute({"workspace": str(workspace.root), "action": "analyze",
+                      "asset_id": asset["id"]})
+    plan = result["summary"]["constellation"]
+    assert plan["plotted"] is True and plan["label"] == "16QAM"
+    assert plan["points"] > 0 and plan["timing_phase"] is not None
+    with np.load(workspace.root / result["plots_path"], allow_pickle=False) as arrays:
+        assert "const_symbol_i" in arrays
+        assert len(arrays["const_symbol_i"]) == plan["points"]
+        assert arrays["const_symbol_i"].dtype == np.float32

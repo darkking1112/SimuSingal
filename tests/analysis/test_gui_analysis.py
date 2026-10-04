@@ -72,7 +72,7 @@ def test_analysis_gui_workflow(tmp_path, monkeypatch):
         assert window.tabs.widget(generator).isAncestorOf(window.generate_button)
         assert not window.tabs.widget(analysis).isAncestorOf(window.generate_button)
         # 背景噪声以最强调制信号为参考，因此这里必须先添加一个调制信号（纯噪声请用“自定义噪声”样式）
-        # 用 AM 保证分析页走“非数字信号”分支（时频图而非星座图）
+        # AM 由生成元数据确认为模拟信号：左下角星座图留白并写明原因
         window.add_iq_signal({"mode": "am", "offset": 0.0, "power_dbfs": -10.0,
                               "bandwidth": 100_000.0})
         window.generate_iq_clicked()
@@ -84,7 +84,11 @@ def test_analysis_gui_workflow(tmp_path, monkeypatch):
         window.analyze_button.click()
         wait_job(app, window)
         assert window.last_result["kind"] == "analysis"
-        assert window.tf_image.image.ndim == 2
+        plan = window.last_result["summary"]["constellation"]
+        assert plan["reason"] == "analog" and plan["plotted"] is False
+        assert window.const_stack.currentWidget() is window.const_hint
+        assert "模拟信号" in window.const_hint.text()
+        assert "星座图：未绘制（模拟信号）" in window.summary.toPlainText()
         assert len(window.wave.listDataItems()) == 2
         window.workspace.set_label(window.selected_asset()["id"], "GUI 参考备注")
         window.refresh_assets()
@@ -588,14 +592,18 @@ def test_constellation_and_playback(tmp_path):
         window.analyze_button.click()
         wait_job(app, window)
         assert window.last_result["summary"]["classification"] == "digital"
-        assert window.tf_stack.currentWidget() is window.constellation
-        assert window.const_scatter.data.size > 0
+        plan = window.last_result["summary"]["constellation"]
+        assert plan["plotted"] is True and plan["label"] == "QPSK"
+        assert plan["symbol_rate_baud"] > 0 and plan["points"] > 0
+        assert window.const_stack.currentWidget() is window.constellation
+        assert "QPSK" in window.constellation.getPlotItem().titleLabel.text
+        assert window.const_scatter.data.size == plan["points"]
+        z = (window.const_scatter.data["x"] + 1j * window.const_scatter.data["y"])
+        ideal = np.array([1 + 1j, 1 - 1j, -1 + 1j, -1 - 1j]) / np.sqrt(2.0)
+        error = np.min(np.abs(z[:, None] - ideal[None, :]), axis=1)
+        assert float(np.mean(error)) < 0.15
         assert window.waterfall_image.image.ndim == 2
-        # 手动判定模拟 → 切回时频图
-        window.class_combo.setCurrentText("模拟")
-        assert window.tf_stack.currentWidget() is window.time_frequency
-        assert window.tf_image.image.ndim == 2
-        window.class_combo.setCurrentText("自动")
+        assert "星座图：已绘制" in window.summary.toPlainText()
         # 波形与频谱为固定范围，可在界面上调整
         def ranges():
             return (window.wave.viewRange(), window.spectrum.viewRange())
@@ -735,6 +743,68 @@ def test_constellation_and_playback(tmp_path):
         assert window._play_data is not None
         window.asset_changed()
         assert window._play_data is None
+    finally:
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.gui
+def test_constellation_panel_follows_target_parameters(tmp_path):
+    """左下角星座图只按目标参考参数画：导入无参数留白，补齐数字参数才抽符号点。"""
+    from signal_analysis.data.io import write_samples
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(tmp_path)
+    window.show()
+    try:
+        rate = 200_000.0
+        symbols = np.array([1 + 1j, 1 - 1j, -1 + 1j, -1 - 1j]) / np.sqrt(2.0)
+        samples = np.repeat(np.tile(symbols, 200), 8).astype(np.complex64)
+        source = write_samples(tmp_path / "reference", samples, "npy", sample_rate=rate)
+        execute({"workspace": str(tmp_path), "action": "import", "path": str(source),
+                 "sample_rate": rate})
+        window.refresh_assets()
+        window.assets.setCurrentRow(0)
+        asset = window.selected_asset()
+
+        # 导入的资产既没有生成元数据也没有识别结果：留白，只给“调制未知”的提示
+        window.analyze_button.click()
+        wait_job(app, window)
+        assert window.last_result["summary"]["constellation"]["reason"] == "unknown"
+        assert window.const_stack.currentWidget() is window.const_hint
+        assert "调制未知" in window.const_hint.text()
+
+        # 只补调制样式还不够：明确提示缺的是符号率
+        target = window.workspace.add_target(asset["id"], "s0", "whole_record", for_amc=1)
+        window.workspace.append_target_version(target["id"], source="manual",
+                                               modulation="QPSK", nominal_center_hz=0.0)
+        window.analyze_button.click()
+        wait_job(app, window)
+        assert window.last_result["summary"]["constellation"]["reason"] == "symbol_rate"
+        assert "缺少符号率" in window.const_hint.text()
+
+        # 补齐符号率后按参数抽符号级星座点
+        window.workspace.append_target_version(target["id"], source="manual",
+                                               modulation="QPSK", nominal_center_hz=0.0,
+                                               symbol_rate_baud=rate / 8.0)
+        window.analyze_button.click()
+        wait_job(app, window)
+        plan = window.last_result["summary"]["constellation"]
+        assert plan["plotted"] is True and plan["points"] > 0
+        assert window.const_stack.currentWidget() is window.constellation
+        title = window.constellation.getPlotItem().titleLabel.text
+        assert "QPSK" in title and "25 kBd" in title
+
+        # 改成模拟调制：同样留白，不再绘制星座图
+        window.workspace.append_target_version(target["id"], source="manual",
+                                               modulation="AM", nominal_center_hz=0.0,
+                                               symbol_rate_baud=rate / 8.0)
+        window.analyze_button.click()
+        wait_job(app, window)
+        assert window.last_result["summary"]["constellation"]["reason"] == "analog"
+        assert "模拟信号" in window.const_hint.text()
+        # 旧版运行记录没有口径：提示写明是记录缺失而不是资产缺参数
+        assert "旧记录" in window._constellation_hint({"classification": "digital"})
     finally:
         window.close()
         app.processEvents()

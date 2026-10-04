@@ -1,4 +1,5 @@
 """态势显示页（mixin）：统计/时频渲染、频率与幅度显示范围、实时播放与滚动瀑布图。"""
+import html
 import time
 from pathlib import Path
 
@@ -19,10 +20,16 @@ from ..constants import (IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
                          PLAY_MAX_ROWS_PER_TICK, PLAY_WAVE_POINTS, _SCOPE_LABELS,
                          _SOURCE_KIND_LABELS, _VERSION_SOURCE_LABELS)
 from ..dialogs import SignalParamsDialog
-from ..helpers import (_AMC_SOURCE_TEXT, _asset_format, _comparison_line,
+from ..helpers import (_AMC_SOURCE_TEXT, _asset_format, _comparison_line, _fmt_baud,
                        _fmt_hz, _fmt_metric, _fmt_span, _mirrored_spectrum)
 from ..runner import _run_task
 from ..widgets import UnitSpinBox, _freq_spin, _plain_spin, _unit_row
+
+#: 星座图未绘制原因码 → 摘要栏短文案（与 ``services.truth.constellation_plan`` 对应）。
+_CONSTELLATION_REASON_TEXT = {"analog": "模拟信号", "unknown": "调制未知",
+                              "multiple": "记录含多个信号", "hopping": "跳频样式",
+                              "symbol_rate": "缺少符号率", "center": "缺少中心频率",
+                              "aliasing": "符号率高于采样率一半", "insufficient": "记录太短"}
 
 
 class AnalysisPageMixin:
@@ -30,12 +37,8 @@ class AnalysisPageMixin:
         box = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(box)
         bar = QtWidgets.QHBoxLayout()
-        bar.addWidget(QtWidgets.QLabel("通用统计与时频展示 · 调制识别见“调制识别”标签页"), 1)
-        bar.addWidget(QtWidgets.QLabel("信号判定"))
-        self.class_combo = QtWidgets.QComboBox()
-        self.class_combo.addItems(["自动", "数字", "模拟"])
-        self.class_combo.currentIndexChanged.connect(lambda *_: self._apply_display_mode())
-        bar.addWidget(self.class_combo)
+        bar.addWidget(QtWidgets.QLabel("通用统计与时频展示 · 星座图按目标参考参数绘制 · "
+                                       "调制识别见“调制识别”标签页"), 1)
         bar.addWidget(QtWidgets.QLabel("频率显示"))
         self.freq_view = QtWidgets.QComboBox()
         self.freq_view.addItems(["自动", "双边", "仅正频率"])
@@ -138,30 +141,32 @@ class AnalysisPageMixin:
         self.spectrum = pg.PlotWidget(title="平均功率谱密度")
         self.spectrum.setLabel("bottom", "基带频率偏移", units="Hz")
         self.spectrum.setLabel("left", "PSD（dB，参考 1 任意单位²/Hz）")
-        self.time_frequency = pg.PlotWidget(title="时频图")
-        self.time_frequency.setLabel("bottom", "时间", units="s")
-        self.time_frequency.setLabel("left", "基带频率偏移", units="Hz")
-        self.constellation = pg.PlotWidget(title="星座图（数字信号判定）")
+        self.constellation = pg.PlotWidget(title="星座图")
         self.constellation.setLabel("bottom", "同相分量 I")
         self.constellation.setLabel("left", "正交分量 Q")
         self.const_scatter = pg.ScatterPlotItem(size=2, pen=None,
                                                 brush=pg.mkBrush(35, 101, 179, 120))
         self.constellation.addItem(self.const_scatter)
-        self.constellation.hide()
-        self.tf_stack = QtWidgets.QStackedWidget()
-        self.tf_stack.addWidget(self.time_frequency)
-        self.tf_stack.addWidget(self.constellation)
+        self.const_hint = QtWidgets.QLabel()
+        self.const_hint.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.const_hint.setWordWrap(True)
+        self.const_hint.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        self.const_stack = QtWidgets.QStackedWidget()
+        self.const_stack.addWidget(self.constellation)
+        self.const_stack.addWidget(self.const_hint)
+        self.const_stack.setCurrentWidget(self.const_hint)
+        self.const_hint.setText(self._hint_html(
+            "星座图：等待分析",
+            "分析所选数据后，只有目标参考参数给出数字调制样式与符号率、中心频率等"
+            "特征参数时，才按这些参数绘制符号级星座图；参数不足时留白并说明原因。"))
         self.waterfall = pg.PlotWidget(title="瀑布图（离线历史）")
         self.waterfall.setLabel("bottom", "基带频率偏移", units="Hz")
         self.waterfall.setLabel("left", "时间", units="s")
-        self.tf_image = pg.ImageItem(axisOrder="row-major")
         self.waterfall_image = pg.ImageItem(axisOrder="row-major")
-        self.time_frequency.addItem(self.tf_image)
         self.waterfall.addItem(self.waterfall_image)
         color_map = pg.colormap.get("viridis")
-        for item in (self.tf_image, self.waterfall_image):
-            item.setLookupTable(color_map.getLookupTable())
-        for index, plot in enumerate((self.wave, self.spectrum, self.tf_stack, self.waterfall)):
+        self.waterfall_image.setLookupTable(color_map.getLookupTable())
+        for index, plot in enumerate((self.wave, self.spectrum, self.const_stack, self.waterfall)):
             grid.addWidget(plot, index // 2, index % 2)
         layout.addLayout(grid, 1)
         self.summary = QtWidgets.QPlainTextEdit()
@@ -207,13 +212,82 @@ class AnalysisPageMixin:
                            asset_id=asset["id"], manifest=path)
 
 
-    def _effective_classification(self, summary):
-        choice = self.class_combo.currentText()
-        if choice == "数字":
-            return "digital", True
-        if choice == "模拟":
-            return "analog", True
-        return summary.get("classification", "analog"), False
+    @staticmethod
+    def _hint_html(head, detail):
+        """留白提示的统一排版：加粗标题 + 灰色说明。"""
+        return (f"<div style='font-size:13pt'><b>{html.escape(head)}</b></div>"
+                f"<div style='color:#6b7280; margin-top:10px'>{html.escape(detail)}</div>")
+
+    @staticmethod
+    def _reference_source_text(reference):
+        sources = reference.get("sources") or []
+        return "、".join(_VERSION_SOURCE_LABELS.get(source, source) for source in sources)
+
+    def _constellation_title(self, summary):
+        plan = summary.get("constellation") or {}
+        parts = [plan.get("label") or "参考参数"]
+        rate = plan.get("symbol_rate_baud")
+        if rate:
+            parts.append(f"符号率 {_fmt_baud(float(rate))}")
+        if plan.get("center_hz"):
+            parts.append(f"频偏 {_fmt_hz(float(plan['center_hz']))}")
+        source = self._reference_source_text(plan)
+        if source:
+            parts.append(f"来源 {source}")
+        parts.append(f"{plan.get('points', 0)} 符号")
+        return "星座图（" + " · ".join(parts) + "）"
+
+    def _constellation_hint(self, summary):
+        """未绘制星座图时的原因提示：每个原因码对应一段可执行的说明。"""
+        if "constellation" not in summary:
+            return self._hint_html("本次运行没有记录星座图口径（旧记录）",
+                                   "重新点「分析所选数据」后按目标参考参数判定。")
+        plan = summary.get("constellation") or {}
+        reason = plan.get("reason")
+        label = plan.get("label") or "调制已知"
+        if reason == "analog":
+            head = f"模拟信号（{label}）不绘制星座图"
+            detail = "模拟信号没有符号级星座；请结合平均功率谱密度与瀑布图判读。"
+        elif reason == "multiple":
+            head = "记录含多个信号：不绘制星座图"
+            detail = "多个信号的符号点会相互叠加，无法对应单一星座图。"
+        elif reason == "hopping":
+            head = f"跳频样式（{label}）：不绘制单一星座图"
+            detail = "各跳频点不同，符号级星座点会随跳频旋转、无法对齐。"
+        elif reason == "symbol_rate":
+            head = "缺少符号率参数：不绘制星座图"
+            detail = ("目标参考参数里没有符号率，无法抽取符号采样；本页不做参数估计——"
+                      "本项目生成的资产自带符号率。")
+        elif reason == "center":
+            head = "缺少中心频率参数：不绘制星座图"
+            detail = "目标参考参数里没有中心频率或频率上下限，无法把信号搬回零频。"
+        elif reason == "aliasing":
+            head = "符号率高于采样率的一半：不绘制星座图"
+            detail = "按该符号率每个符号不足 2 个采样点，无法抽取符号。"
+        elif reason == "insufficient":
+            head = "记录太短：不绘制星座图"
+            detail = plan.get("detail") or "记录长度不足以抽取足够的符号点。"
+        else:
+            head = "调制未知：不绘制星座图"
+            detail = ("资产没有可用的调制参数（生成元数据、识别采纳或人工标注）。可在"
+                      "「调制识别」页采纳识别结果，或在「信号导入」页补充调制样式；"
+                      "符号率与频偏仍以目标参考参数为准。")
+        return self._hint_html(head, detail)
+
+    @staticmethod
+    def _constellation_status(summary):
+        """摘要栏的一句话结论：是否绘制、依据什么参数或为什么没画。"""
+        if "constellation" not in summary:
+            return "未绘制（本次运行未记录口径 · 旧记录）"
+        plan = summary.get("constellation") or {}
+        if plan.get("plotted"):
+            basis = [str(plan.get("label") or "参考参数")]
+            rate = plan.get("symbol_rate_baud")
+            if rate:
+                basis.append(f"符号率 {_fmt_baud(float(rate))}")
+            basis.append(f"{plan.get('points', 0)} 符号")
+            return "已绘制（" + " · ".join(basis) + "）"
+        return "未绘制（" + _CONSTELLATION_REASON_TEXT.get(plan.get("reason"), "调制未知") + "）"
 
     def _positive_half_mask(self, frequencies, real_valued):
         choice = self.freq_view.currentText()
@@ -302,7 +376,6 @@ class AnalysisPageMixin:
                        float(np.abs(arrays["wave_q"]).max()) if arrays["wave_q"].size else 0.0)
             self._set_range_fields(self._nice_ceiling(peak), 0.0)
         levels = [high - float(self.spec_db_span.value()), high]
-        classification, manual = self._effective_classification(summary)
         self.wave.clear()
         self.wave.plot(arrays["wave_time"], arrays["wave_i"], pen="#2365b3", name="I")
         self.wave.plot(arrays["wave_time"], arrays["wave_q"], pen="#e39b35", name="Q")
@@ -315,18 +388,14 @@ class AnalysisPageMixin:
         low_f, high_f, span_db = self._apply_spectrum_range(rate, positive_only, high)
         df = f[1] - f[0]
         dt = summary["hop_samples"] / summary["sample_rate_hz"]
-        if classification == "digital":
-            self.const_scatter.setData(x=arrays["const_i"], y=arrays["const_q"])
-            self.constellation.setTitle(
-                f"星座图（数字信号判定 · 簇数估计 {summary.get('cluster_estimate', 0)}"
-                f"{' · 手动判定' if manual else ''}）")
-            self.tf_stack.setCurrentWidget(self.constellation)
+        plan = summary.get("constellation") or {}
+        if plan.get("plotted") and "const_symbol_i" in arrays:
+            self.const_scatter.setData(x=arrays["const_symbol_i"], y=arrays["const_symbol_q"])
+            self.constellation.setTitle(self._constellation_title(summary))
+            self.const_stack.setCurrentWidget(self.constellation)
         else:
-            self.tf_image.setImage(matrix.T, levels=levels, autoLevels=False)
-            self.tf_image.setRect(QtCore.QRectF(t[0] - dt / 2, fv[0] - df / 2,
-                                                dt * len(t), df * len(fv)))
-            self.tf_stack.setCurrentWidget(self.time_frequency)
-            self.time_frequency.autoRange()
+            self.const_hint.setText(self._constellation_hint(summary))
+            self.const_stack.setCurrentWidget(self.const_hint)
         self.waterfall_image.setImage(matrix, levels=levels, autoLevels=False)
         self.waterfall_image.setRect(QtCore.QRectF(fv[0] - df / 2, t[0] - dt / 2,
                                                    df * len(fv), dt * len(t)))
@@ -335,12 +404,11 @@ class AnalysisPageMixin:
         self.waterfall.setXRange(low_f, high_f, padding=0.0)
         self.waterfall.setYRange(float(t[0] - dt / 2), float(t[-1] + dt / 2), padding=0.0)
         s = summary
-        label = "数字" if classification == "digital" else "模拟"
         data_kind = "实数（默认仅显示正频率）" if s.get("real_valued") else "复数 IQ（默认双边频率）"
         self.summary.setPlainText(
             f"数据：{result.get('asset_name', result['asset_id'])}  |  采样数 {s['sample_count']:,}  |  时长 {s['duration_s']:.6f} s\n"
             f"均值 I={s['mean_i']:.6g}, Q={s['mean_q']:.6g}  |  RMS={s['rms']:.6g}  |  峰值={s['peak']:.6g}\n"
-            f"信号判定：{label}（{'手动选择' if manual else '自动启发式'}，簇数估计 {s.get('cluster_estimate', 0)}）"
+            f"星座图：{self._constellation_status(s)}"
             f"  |  数据：{data_kind}\n"
             f"显示范围（固定，可在工具栏调整）：波形 ±{self.amp_max.value():g}（时窗 {_fmt_span(wave_span)}）；"
             f"频谱 {_fmt_hz(low_f)}～{_fmt_hz(high_f)}，动态范围 {span_db:g} dB"

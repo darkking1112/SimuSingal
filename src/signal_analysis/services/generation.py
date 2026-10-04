@@ -1,9 +1,9 @@
 """生成与分析服务：生成/频谱分析、配方预览与保存、集合生成与 TorchSig 接入。"""
 
-from ..core_api import analyze as core_analyze, generate_iq
+from ..core_api import analyze as core_analyze, constellation_points, generate_iq
 from ..data.io import resolve_storage_format
 from .imports import _ensure_initial_labels, _resolve_collection
-from .truth import _generated_name, _generation_targets
+from .truth import _generated_name, _generation_targets, constellation_plan
 
 
 def _storage_request(request):
@@ -47,6 +47,21 @@ def generate(workspace, request):
 def analyze(workspace, request):
     asset, data = workspace.load_samples(request["asset_id"])
     summary, arrays = core_analyze(data, asset["sample_rate"], request.get("nfft", 256))
+    # 左下角星座图只按目标参考参数画：数字样式 + 符号率 + 中心频率齐备才抽符号级
+    # 星座点，参数不足留白并在摘要里写明原因（生成元数据、识别采纳、人工标注同源）。
+    plan = constellation_plan(workspace, asset)
+    summary["constellation"] = plan
+    if plan["plotted"]:
+        try:
+            points = constellation_points(data, asset["sample_rate"], plan["center_hz"],
+                                          plan["symbol_rate_baud"],
+                                          bandwidth_hz=plan["bandwidth_hz"])
+        except ValueError as exc:
+            plan.update({"plotted": False, "reason": "insufficient", "detail": str(exc)})
+        else:
+            arrays["const_symbol_i"] = points["const_i"]
+            arrays["const_symbol_q"] = points["const_q"]
+            plan.update({"points": points["symbols"], "timing_phase": points["timing_phase"]})
     return workspace.save_run("analysis", {"summary": summary, "asset_name": asset["name"]},
                               arrays, asset["id"])
 

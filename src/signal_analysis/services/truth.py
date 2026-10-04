@@ -115,6 +115,113 @@ def _class_from_version(version):
     return mode_to_class(str(version.get("waveform_mode") or "").lower())
 
 
+#: 已知调制名/生成样式 → 数模家族；键为去掉大小写与分隔符后的文本。
+_ANALOG_FAMILY = frozenset({"am", "amdsb", "dsb", "amssb", "ssb", "usb", "lsb", "fm", "pm"})
+_DIGITAL_FAMILY = frozenset({"ook", "ask", "ask2", "2ask", "bpsk", "qpsk", "dqpsk", "psk",
+                             "8psk", "fsk", "2fsk", "4fsk", "gfsk", "msk", "gmsk", "qam",
+                             "qam16", "16qam", "qam32", "32qam", "qam64", "64qam",
+                             "qam256", "256qam", "ofdm", "fhrc", "fhvideo"})
+
+
+def modulation_family(text):
+    """调制名或生成样式 → ``"analog"``/``"digital"``；未收录的文本返回 ``None``。"""
+    key = "".join(ch for ch in str(text).casefold() if ch.isalnum())
+    if key in _DIGITAL_FAMILY:
+        return "digital"
+    if key in _ANALOG_FAMILY:
+        return "analog"
+    return None
+
+
+def _version_modulation(version):
+    """目标版本的调制文本：规范调制名优先，其次生成样式。"""
+    return (str(version.get("modulation") or "").strip()
+            or str(version.get("waveform_mode") or "").strip())
+
+
+def _signal_versions(workspace, asset_id):
+    """参与星座图判定的信号目标当前版本：不含逐跳目标，跳过纯噪声行。"""
+    versions = []
+    for target in _signal_targets(workspace, asset_id):
+        version = target["current"]
+        noise_row = (str(version.get("waveform_mode") or "") == "noise"
+                     and not str(version.get("modulation") or ""))
+        if not noise_row:
+            versions.append(version)
+    return versions
+
+
+def _version_band(version):
+    """目标版本的频带口径：中心频率与占用带宽，缺省由频率上下限派生。"""
+    center = version.get("nominal_center_hz")
+    bandwidth = version.get("nominal_bandwidth_hz")
+    low, high = version.get("f_low_hz"), version.get("f_high_hz")
+    if low is not None and high is not None:
+        if center is None:
+            center = (float(low) + float(high)) / 2.0
+        if bandwidth is None:
+            bandwidth = float(high) - float(low)
+    return center, bandwidth
+
+
+def constellation_plan(workspace, asset):
+    """左下角星座图的绘制计划：元数据里的调制样式与特征参数是否够画符号级星座图。
+
+    返回 ``{"plotted", "reason", "family", "label", "sources", "targets",
+    "symbol_rate_baud", "center_hz", "bandwidth_hz", "points", "timing_phase"}``。
+    ``plotted`` 为真表示可按 ``center_hz``/``symbol_rate_baud``（可选 ``bandwidth_hz``）
+    抽取符号级星座点；为假时 ``reason`` 给出原因码：``analog``（模拟信号）、
+    ``unknown``（调制未知或含未标注信号）、``multiple``（记录含多个信号）、
+    ``hopping``（跳频/复合样式）、``symbol_rate``（缺符号率）、``center``（缺中心
+    频率）、``aliasing``（符号率高于采样率一半）。
+
+    判定只读目标参考参数（生成元数据登记、识别采纳、人工标注追加的版本），不消费
+    原始 IQ 的启发式判定，也不猜频偏与符号率。
+    """
+    rate = float(asset["sample_rate"])
+    versions = _signal_versions(workspace, asset["id"])
+    families = {modulation_family(_version_modulation(version)) for version in versions}
+    labels, sources = [], []
+    for version in versions:
+        modulation = str(version.get("modulation") or "").strip()
+        mode = str(version.get("waveform_mode") or "").strip()
+        if modulation or mode:
+            labels.append(modulation or MODE_NAMES.get(mode, mode))
+            sources.append(str(version.get("source") or ""))
+    family = families.pop() if len(families) == 1 and None not in families else None
+    unique = sorted(set(labels))
+    plan = {"plotted": False, "reason": "unknown", "family": family,
+            "label": " + ".join(unique) if unique else None,
+            "sources": sorted(source for source in sources if source),
+            "targets": len(versions), "symbol_rate_baud": None, "center_hz": None,
+            "bandwidth_hz": None, "points": 0, "timing_phase": None}
+    if family == "analog":
+        plan["reason"] = "analog"
+        return plan
+    if family is None:
+        return plan
+    if len(versions) != 1:
+        plan["reason"] = "multiple"
+        return plan
+    version = versions[0]
+    symbol_rate = version.get("symbol_rate_baud")
+    center, bandwidth = _version_band(version)
+    plan.update({"symbol_rate_baud": symbol_rate, "center_hz": center,
+                 "bandwidth_hz": bandwidth})
+    if version.get("is_hopping"):
+        plan["reason"] = "hopping"
+    elif symbol_rate is None or float(symbol_rate) <= 0.0:
+        plan["reason"] = "symbol_rate"
+    elif center is None:
+        plan["reason"] = "center"
+    elif rate / float(symbol_rate) < 2.0:
+        plan["reason"] = "aliasing"
+    else:
+        plan["plotted"] = True
+        plan["reason"] = None
+    return plan
+
+
 def _attach_truth(payload, workspace, asset_id, summary):
     """给检测结果补上目标参考参数真值与评分（AI 路径同时给出传统基线评分）。"""
     generation = workspace.get_metadata(asset_id).get("generation")

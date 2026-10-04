@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from signal_analysis.core_api import (analyze, classify_modulation, generate_iq,
-                                      spectrum_row, validate_samples)
+from signal_analysis.core_api import (analyze, classify_modulation, constellation_points,
+                                      generate_iq, spectrum_row, validate_samples)
 
 
 def test_constant_statistics_and_psd_energy():
@@ -104,9 +104,9 @@ def test_classify_analog_signals():
 
 
 def test_classify_deep_sine_am_is_a_known_heuristic_limit():
-    """纯正弦消息的深调制 AM 包络起伏大、边缘分布却接近数字信号，
+    """纯正弦消息的深调制 AM 包络起伏大、边缘分布却接近数字信号，启发式会判为数字。
 
-    启发式会判为数字；此时依赖界面上的手动「信号判定」纠正。
+    态势显示页不消费该判定：星座图只按目标参考参数绘制，本用例只固化启发式的已知边界。
     """
     rate = 48000.0
     n = 20000
@@ -143,3 +143,58 @@ def test_spectrum_row_matches_analyze_window():
     np.testing.assert_allclose(row, arrays["spectrogram_db"][-1], atol=1e-4)
     assert f[0] == -rate / 2
     assert f[-1] == rate / 2 - rate / nfft
+
+
+def _generated_signal(mode, seed=5, snr=30.0, **spec):
+    rate = 500_000.0
+    base = {"mode": mode, "offset": 120_000.0, "bandwidth": 100_000.0, "power_dbfs": -6.0}
+    base.update(spec)
+    samples, summary = generate_iq(rate, 0.1, [base], {"enabled": True, "snr_db": snr}, seed)
+    return rate, samples, summary["signals"][0]
+
+
+def test_constellation_points_recover_square_qpsk():
+    """按已知频偏与符号率抽取的符号点应贴住四个理想星座点（RMS 归一化后）。"""
+    rate, samples, entry = _generated_signal("qpsk")
+    points = constellation_points(samples, rate, entry["offset"], entry["symbol_rate"],
+                                  bandwidth_hz=entry["bandwidth_actual"])
+    assert points["const_i"].dtype == np.float32
+    assert points["symbols"] == len(points["const_i"]) == len(points["const_q"])
+    assert points["sps"] == pytest.approx(rate / entry["symbol_rate"])
+    assert points["symbols"] > 1000
+    z = points["const_i"] + 1j * points["const_q"]
+    assert float(np.mean(np.abs(z) ** 2)) == pytest.approx(1.0, rel=1e-6)
+    ideal = np.array([1 + 1j, 1 - 1j, -1 + 1j, -1 - 1j]) / np.sqrt(2.0)
+    error = np.min(np.abs(z[:, None] - ideal[None, :]), axis=1)
+    assert float(np.percentile(error, 99)) < 0.2
+
+
+def test_constellation_points_show_two_level_ask():
+    """2ASK 矩形成形：符号点只有 I 轴两个电平，Q 轴只剩噪声。"""
+    rate, samples, entry = _generated_signal("ask2", pulse="rect")
+    points = constellation_points(samples, rate, entry["offset"], entry["symbol_rate"],
+                                  bandwidth_hz=entry["bandwidth_actual"])
+    assert float(np.sqrt(np.mean(points["const_q"] ** 2))) < 0.1
+    levels = np.abs(points["const_i"])
+    assert float(np.mean(levels < 0.5)) > 0.4
+    assert float(np.mean(levels > 0.9)) > 0.4
+
+
+def test_constellation_points_respect_symbol_limit():
+    symbols = np.repeat(np.array([1 + 1j, -1 + 1j, -1 - 1j, 1 - 1j]) / np.sqrt(2.0), 8)
+    samples = np.tile(symbols, 200)
+    points = constellation_points(samples, 100_000.0, 0.0, 12_500.0, limit=300)
+    assert 0 < points["symbols"] <= 300
+
+
+@pytest.mark.parametrize("call", [
+    lambda s: constellation_points(s, 1000.0, 0.0, 600.0),
+    lambda s: constellation_points(s, 1000.0, 900.0, 100.0),
+    lambda s: constellation_points(s, 1000.0, 0.0, 0.0),
+    lambda s: constellation_points(s, 1000.0, 0.0, 100.0, limit=0),
+    lambda s: constellation_points(np.ones(8, dtype=np.complex64), 1000.0, 0.0, 100.0),
+])
+def test_constellation_points_validation(call):
+    samples = np.exp(2j * np.pi * 0.01 * np.arange(4096))
+    with pytest.raises(ValueError):
+        call(samples)

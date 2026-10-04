@@ -14,6 +14,15 @@ def _fmt_hz(value):
     return f"{value:g} Hz"
 
 
+def _fmt_baud(value):
+    """Format a symbol rate with a readable kBd / MBd unit."""
+    value = float(value)
+    for unit, factor in (("MBd", 1e6), ("kBd", 1e3)):
+        if abs(value) >= factor:
+            return f"{value / factor:g} {unit}"
+    return f"{value:g} Bd"
+
+
 def _fmt_span(seconds):
     """Format a duration in ms / s."""
     seconds = float(seconds)

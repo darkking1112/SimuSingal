@@ -652,10 +652,12 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             self.tab_results["态势显示"] = result
             self.wave.clear()
             self.spectrum.clear()
-            self.tf_image.clear()
             self.waterfall_image.clear()
             self.const_scatter.clear()
-            self.tf_stack.setCurrentWidget(self.time_frequency)
+            self.const_hint.setText(self._hint_html(
+                "原生复制完成",
+                "请选择输出资产后再点「分析所选数据」，届时按目标参考参数决定是否绘制星座图。"))
+            self.const_stack.setCurrentWidget(self.const_hint)
             self.summary.setPlainText(f"原生复制完成：{result['plugin']['id']}\n"
                                       f"输出资产：{result['derived_asset_id']}\n请选择输出资产进行分析。")
 

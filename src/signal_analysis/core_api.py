@@ -2,6 +2,7 @@
 
 from .algorithms.dsp.spectrum import (
     analyze,
+    constellation_points,
     spectrum_row,
 )
 
@@ -30,6 +31,7 @@ from .algorithms.amc.heuristic import (
     classify_modulation,
 )
 
-__all__ = ["MAX_SAMPLES", "MODE_NAMES", "analyze", "classify_modulation", "detect_hops",
-           "detect_signals", "generate_iq", "occupied_interval", "plan_signal",
-           "spectrum_row", "validate_rate", "validate_samples"]
+__all__ = ["MAX_SAMPLES", "MODE_NAMES", "analyze", "classify_modulation",
+           "constellation_points", "detect_hops", "detect_signals", "generate_iq",
+           "occupied_interval", "plan_signal", "spectrum_row", "validate_rate",
+           "validate_samples"]

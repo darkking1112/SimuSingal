@@ -28,7 +28,8 @@ MODULES = ("signal_analysis.algorithms.dsp.base",
 #: core_api 的稳定导出 → 实现模块：稳定层不得退化为搬运。
 _STABLE_SOURCES = {
     "MAX_SAMPLES": common, "MODE_NAMES": iqgen, "analyze": spectrum,
-    "classify_modulation": heuristic, "detect_hops": hops, "detect_signals": energy,
+    "classify_modulation": heuristic, "constellation_points": spectrum,
+    "detect_hops": hops, "detect_signals": energy,
     "generate_iq": iqgen, "occupied_interval": iqgen,
     "plan_signal": iqgen, "spectrum_row": spectrum, "validate_rate": common,
     "validate_samples": common,
