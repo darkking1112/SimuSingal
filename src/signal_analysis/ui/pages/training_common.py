@@ -7,7 +7,7 @@ import sys
 import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
 
-from common.gui import TaskBanner
+from common.gui import TaskBanner, direct_entry
 from ...services.training_jobs import decode_worker_log, list_experiments
 from ..training_runner import TrainingRunner
 
@@ -195,6 +195,8 @@ class TrainingPageBase(QtWidgets.QWidget):
         self.lr.setDecimals(7)
         self.lr.setRange(.0000001, 1)
         self.lr.setValue(.001)
+        direct_entry(self.lr)
+        self.lr.setSingleStep(10.0 ** -self.lr.decimals())
         form.addRow("学习率", self.lr)
         self.seed = self.spin(form, "随机种子", 7, 0, 2147483647)
         self.add_task_fields(form)

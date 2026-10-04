@@ -195,6 +195,33 @@ def test_fh_edit_dialog_roundtrip():
 
 
 @pytest.mark.gui
+def test_decimal_spin_boxes_are_direct_entry(tmp_path):
+    """小数输入框直接键入（隐藏增减按钮）且步进为显示精度；整数计数框保留按钮。"""
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    no_buttons = QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons
+    window = MainWindow(tmp_path)
+    try:
+        assert window.gen_duration.buttonSymbols() == no_buttons
+        assert window.gen_duration.singleStep() == pytest.approx(1e-6)
+        assert window.gen_rate.buttonSymbols() == no_buttons           # UnitSpinBox：频率
+        assert window.gen_seed.buttonSymbols() != no_buttons           # 0 位小数：整数语义
+        assert window.gen_panel.count.buttonSymbols() != no_buttons    # 整数计数
+    finally:
+        window.close()
+    dialog = SignalParamsDialog("qpsk", 1_000_000.0)
+    try:
+        assert dialog.alpha.buttonSymbols() == no_buttons
+        assert dialog.power.buttonSymbols() == no_buttons
+        # 单步步进是 1 个显示精度 0.01；沿用默认步进 1.0 会把 0.35 一次顶到上限
+        assert dialog.alpha.value() == pytest.approx(0.35)
+        dialog.alpha.stepUp()
+        assert dialog.alpha.value() == pytest.approx(0.36)
+    finally:
+        dialog.close()
+    app.processEvents()
+
+
+@pytest.mark.gui
 def test_iq_generation_gui_workflow(tmp_path):
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = MainWindow(tmp_path)

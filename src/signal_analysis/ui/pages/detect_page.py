@@ -7,6 +7,7 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
+from common.gui import direct_entry
 from ...core_api import MAX_SAMPLES, plan_signal, spectrum_row
 from ...contracts.iq import IQ_WAVEFORM_CONTRACT
 from ...data import Workspace
@@ -123,6 +124,7 @@ class DetectPageMixin:
         self.ml_score.setSingleStep(0.05)
         self.ml_score.setDecimals(2)
         self.ml_score.setValue(0.25)
+        direct_entry(self.ml_score)
         self.ml_score.setToolTip("低于该置信度的模型候选框被丢弃，默认 0.25")
         ai_bar.addWidget(self.ml_score)
         ai_bar.addWidget(QtWidgets.QLabel("去重 IoU"))
@@ -131,6 +133,7 @@ class DetectPageMixin:
         self.ml_iou.setSingleStep(0.05)
         self.ml_iou.setDecimals(2)
         self.ml_iou.setValue(0.5)
+        direct_entry(self.ml_iou)
         self.ml_iou.setToolTip("重叠度超过该值的同类别候选框只保留置信度最高的一个，默认 0.5")
         ai_bar.addWidget(self.ml_iou)
         self.ml_compare = QtWidgets.QCheckBox("并排对比传统检测")

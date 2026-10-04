@@ -20,6 +20,7 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtWidgets
 
+from common.gui import direct_entry
 from ...core_api import MODE_NAMES
 from ...algorithms.generation.impairments import IMPAIRMENTS
 from ...algorithms.generation.recipes import check_generator_support, validate_recipe
@@ -77,6 +78,9 @@ class _ParamsDialog(QtWidgets.QDialog):
         for spin in (left, right):
             spin.setRange(low, high)
             spin.setDecimals(decimals)
+            if decimals:
+                direct_entry(spin)
+                spin.setSingleStep(10.0 ** -decimals)
         left.setValue(float(values[0]))
         right.setValue(float(values[1]))
         box.addWidget(left)

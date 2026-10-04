@@ -420,6 +420,16 @@ class BlackCheckboxStyle(QtWidgets.QProxyStyle):
         painter.restore()
 
 
+def direct_entry(spin):
+    """数值输入框改为直接键入：隐藏增减按钮（两个桌面应用共用）。
+
+    小数字段的默认步进是 1.0，点一次就顶到区间端点、之后按钮再无反应，
+    所以小数一律直接键入；步进由调用方按显示精度另行设置，供键盘 ↑/↓ 与滚轮使用。
+    """
+    spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+    return spin
+
+
 def _install_black_checkbox_style():
     """把应用样式包一层黑框复选框绘制（幂等；两个桌面应用共用）。"""
     app = QtWidgets.QApplication.instance()

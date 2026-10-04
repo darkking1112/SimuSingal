@@ -694,6 +694,7 @@ def test_cli_amc_iq_classify_reports_errors(tmp_path, capsys, tiny_model):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.gui
 def test_gui_routes_iq_manifest_to_the_iq_action(tmp_path, tiny_model):
     pytest.importorskip("PySide6")
     pytest.importorskip("pyqtgraph")
@@ -720,6 +721,7 @@ def test_gui_routes_iq_manifest_to_the_iq_action(tmp_path, tiny_model):
         app.processEvents()
 
 
+@pytest.mark.gui
 def test_gui_renders_iq_result_without_fake_feature_columns(tmp_path, tiny_model):
     pytest.importorskip("PySide6")
     pytest.importorskip("pyqtgraph")

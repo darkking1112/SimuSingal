@@ -213,8 +213,20 @@ python -m signal_analysis native ASSET_ID /tmp/simusignal-native-demo/plugin.jso
 
 ## 按项目测试和基准
 
+按改动面分三档执行；默认 `-n auto` 并行（`pytest-xdist` 随 `.[dev]` 安装）：
+
 ```bash
+# 快速档：算法与服务层改动，不含界面与真实 TorchSig 生成
+QT_QPA_PLATFORM=offscreen python -m pytest -q -m "not gui and not native and not torchsig"
+# 界面档：改动 UI 后
+QT_QPA_PLATFORM=offscreen python -m pytest -q -m gui
+# 全量档：提交或合并前（其余标记内用例按环境自动跳过）
 QT_QPA_PLATFORM=offscreen python -m pytest -q
+```
+
+按目录执行与基准：
+
+```bash
 python -m pytest tests/common -q
 python -m pytest tests/analysis -q
 python -m pytest tests/simulation -q
@@ -222,7 +234,7 @@ python benchmarks/run_smoke.py analysis
 python benchmarks/run_smoke.py simulation
 ```
 
-Windows PowerShell 先设置 `$env:QT_QPA_PLATFORM="offscreen"`。该设置**只用于自动化测试**：设过之后同一个会话里再启动图形界面不会显示窗口，需先执行 `Remove-Item Env:QT_QPA_PLATFORM` 或另开一个终端。缺少 GUI 依赖或原生编译器的跳过项不能视为通过。基准脚本只记录基础流程耗时，不代表合同性能验收。
+Windows PowerShell 先设置 `$env:QT_QPA_PLATFORM="offscreen"`。该设置**只用于自动化测试**：设过之后同一个会话里再启动图形界面不会显示窗口，需先执行 `Remove-Item Env:QT_QPA_PLATFORM` 或另开一个终端。单用例调试或需要连续输出时在命令后加 `-n0` 串行执行。缺少 GUI 依赖或原生编译器的跳过项不能视为通过。基准脚本只记录基础流程耗时，不代表合同性能验收。
 
 ## 独立构建与发布
 

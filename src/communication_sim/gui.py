@@ -1,7 +1,7 @@
 """Independent generic event simulation desktop."""
 from PySide6 import QtCore, QtWidgets
 import pyqtgraph as pg
-from common.gui import DesktopWindow
+from common.gui import DesktopWindow, direct_entry
 from .storage import Workspace
 from .tasks import run_job
 
@@ -65,6 +65,8 @@ class MainWindow(DesktopWindow):
             spin.setRange(.001, 3600)
             spin.setDecimals(3)
             spin.setValue(value)
+            direct_entry(spin)
+            spin.setSingleStep(10.0 ** -spin.decimals())
             spin.setSuffix(" s")
             form.addWidget(QtWidgets.QLabel(label))
             form.addWidget(spin)

@@ -1,6 +1,11 @@
-"""复用控件：Hz 单位自适应输入框与带外置单位标签的 Spin 工厂。"""
+"""复用控件：Hz 单位自适应输入框与带外置单位标签的 Spin 工厂。
+
+小数输入框一律直接键入（隐藏增减按钮）；整数计数框仍保留步进按钮。
+"""
 
 from PySide6 import QtWidgets
+
+from common.gui import direct_entry
 
 
 class UnitSpinBox(QtWidgets.QDoubleSpinBox):
@@ -8,6 +13,7 @@ class UnitSpinBox(QtWidgets.QDoubleSpinBox):
 
     The unit is shown in a QLabel beside the box (``unit_label``), not inside
     the input; it switches automatically when the value crosses a boundary.
+    频率是小数，直接键入，不显示步进按钮。
     """
 
     _UNITS = (("GHz", 1e9), ("MHz", 1e6), ("kHz", 1e3), ("Hz", 1.0))
@@ -20,6 +26,7 @@ class UnitSpinBox(QtWidgets.QDoubleSpinBox):
         self.unit_label = QtWidgets.QLabel("Hz")
         self.setValue(value)
         self._sync_unit()
+        direct_entry(self)
         self.setAccelerated(True)
         self.valueChanged.connect(self._sync_unit)
 
@@ -58,6 +65,10 @@ def _plain_spin(minimum, maximum, value, decimals, unit=None):
     spin.setRange(minimum, maximum)
     spin.setDecimals(decimals)
     spin.setValue(value)
+    if decimals:
+        # 步进取一个显示精度（0.01、1e-7…）：键盘 ↑/↓ 与滚轮微调才有意义。
+        direct_entry(spin)
+        spin.setSingleStep(10.0 ** -decimals)
     if unit is None:
         return spin
     spin.unit_label = QtWidgets.QLabel(unit)

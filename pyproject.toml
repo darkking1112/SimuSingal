@@ -11,7 +11,7 @@ dependencies = ["numpy>=1.26,<3", "simpy>=4.1,<5", "sigmf==1.11.1"]
 
 [project.optional-dependencies]
 gui = ["PySide6>=6.6,<7", "pyqtgraph>=0.13,<0.15"]
-dev = ["pytest>=8,<10", "Cython>=3,<4", "build>=1,<2", "pyinstaller>=6,<7"]
+dev = ["pytest>=8,<10", "pytest-xdist>=3.5,<4", "Cython>=3,<4", "build>=1,<2", "pyinstaller>=6,<7"]
 # AI 检测：ONNX Runtime 推理。不安装时 ml-detect 会给出安装提示，传统检测路径不受影响
 ml = ["onnxruntime>=1.17,<2"]
 # 模型训练：仅 training/ 目录下的脚本使用，不随发布包分发
@@ -36,6 +36,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# 默认并行：全量回归主要由 GUI/训练端到端用例决定（串行约 3 min），pytest-xdist 随 [dev] 安装。
+# 单用例调试或需要串行输出时追加 -n0。
+addopts = "-n auto"
 markers = ["gui: requires PySide6 and an offscreen Qt platform",
            "torchsig: real TorchSig generation in an installed training environment",
            "native: builds a local C shared library",

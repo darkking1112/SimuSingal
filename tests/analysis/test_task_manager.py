@@ -1,9 +1,21 @@
 """任务体系 P1：任务管理器——并发、同页单任务、独占规则、独立取消与兼容属性。"""
+import os
 import time
+
+# 无显示环境：必须在导入 PySide6 之前设置
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+
+pytest.importorskip("PySide6")
+pytest.importorskip("pyqtgraph")
 
 from PySide6 import QtWidgets
 
 from signal_analysis.ui import MainWindow
+
+# 本文件全部用例都要起 QApplication + MainWindow
+pytestmark = pytest.mark.gui
 
 
 def _app():

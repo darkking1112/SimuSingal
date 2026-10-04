@@ -8,12 +8,14 @@ import json
 import time
 from pathlib import Path
 
-#: 原子替换进度文件的重试次数与间隔。父进程每 0.2 s 打开一次 ``progress.json`` 读，
+#: 原子替换进度文件的重试预算。父进程每 0.2 s 打开一次 ``progress.json`` 读，
 #: 每次读句柄只存活几十微秒；Windows 上 ``os.replace`` 撞上这个读句柄会以
-#: ``WinError 5``（拒绝访问）/``WinError 32``（共享冲突）失败——重试几十毫秒即可
-#: 错开，否则整个任务会因为一条进度写不进去而崩掉。
-_REPLACE_ATTEMPTS = 6
-_REPLACE_DELAY_S = 0.02
+#: ``WinError 5``（拒绝访问）/``WinError 32``（共享冲突）失败——退避重试错开即可，
+#: 否则整个任务会因为一条进度写不进去而崩掉。真实读窗口远短于最坏情况，且杀毒
+#: 软件扫描刚写入的临时文件也会瞬时拒绝，所以退避按 5 ms 起步翻倍放大到约 0.7 s。
+_REPLACE_ATTEMPTS = 12
+_REPLACE_DELAY_S = 0.005
+_REPLACE_DELAY_CAP_S = 0.08
 #: 允许重试的 Windows 错误码：ERROR_ACCESS_DENIED / ERROR_SHARING_VIOLATION。
 _SHARING_WINERRORS = (5, 32)
 
@@ -23,7 +25,7 @@ def _is_sharing_error(exc):
 
 
 def _replace_with_retry(temporary, path):
-    """原子替换 ``temporary`` → ``path``；被并发读句柄挡住时短暂重试。"""
+    """原子替换 ``temporary`` → ``path``；被并发读句柄挡住时退避重试。"""
     for attempt in range(_REPLACE_ATTEMPTS):
         try:
             temporary.replace(path)
@@ -31,7 +33,7 @@ def _replace_with_retry(temporary, path):
         except OSError as exc:
             if not _is_sharing_error(exc) or attempt == _REPLACE_ATTEMPTS - 1:
                 raise
-            time.sleep(_REPLACE_DELAY_S * (attempt + 1))
+            time.sleep(min(_REPLACE_DELAY_S * 2 ** attempt, _REPLACE_DELAY_CAP_S))
 
 
 class Reporter:

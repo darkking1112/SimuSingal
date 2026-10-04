@@ -6,6 +6,7 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
+from common.gui import direct_entry
 from ...core_api import MAX_SAMPLES, plan_signal, spectrum_row
 from ...data import Workspace
 from ...tasks import run_job
@@ -73,6 +74,7 @@ class AnalysisPageMixin:
         self.amp_max.setDecimals(4)
         self.amp_max.setSingleStep(0.05)
         self.amp_max.setValue(1.0)
+        direct_entry(self.amp_max)
         self.amp_max.setToolTip("波形纵轴固定为 ±该值（任意单位）")
         self.amp_max.valueChanged.connect(self._on_range_edited)
         span_bar.addWidget(self.amp_max)
