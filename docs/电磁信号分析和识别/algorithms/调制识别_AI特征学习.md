@@ -1,524 +1,60 @@
-# 调制识别（AI 特征学习）算法设计
+# 调制识别（原始 IQ 端到端：CNN/TCN）算法设计
 
 | 项目 | 取值 |
 | --- | --- |
-| 算法标识 | `amc_linear_v1`（JSON 线性模型）/ `amc_onnx_v1`（ONNX 分类器） |
-| 特征契约 | `amc_feature_vector_v1`（34 维，**与"传统特征"文档完全同一份**） |
-| 模型契约 | `amc_model_v1`（线性 JSON）/ `amc_feature_vector_v1`（ONNX 清单） |
-| 结果契约 | `amc_classify_v1` |
-| 原始 IQ 通路 | `iq_waveform_v1`（输入）/ `amc_iq_classify_v1`（结果），§7（**完整实跑见 §8**）；训练侧 `training/iq_cnn.py`、`build_iq_dataset.py`、`train_iq.py`、`verify_iq.py` |
-| 判别器实现 | `src/signal_analysis/ml/amc.py::fit_model` / `predict` / `onnx_scores` |
-| 训练实现 | `training/amc_transformer.py`、`training/train_amc.py`（**不随 wheel 分发**） |
-| 数据集 | `training/build_amc_dataset.py`，产出 `(features, label, snr_db)` 记录 |
-| 验收 | `training/verify_amc.py`（数据集契约 / 线性基线 / ONNX 一致性） |
-| 内置模型 | id `amc-linear-default`，version `0.1.0`（随包分发的合成数据基线） |
-| 文档日期 | 2026-10-04 |
+| 波形契约 | `iq_waveform_v1`（`(2, N)` float32、通道排布 `iq_channels_first_v1`、归一化 `unit_rms`） |
+| 结果契约 | `amc_iq_classify_v1` |
+| 分类网络 | `IQCNN`（步长一维卷积）/ `IQTCN`（膨胀因果卷积残差块），`training/iq_cnn.py` |
+| 训练实现 | `training/train_iq.py`（**不随 wheel 分发**，需要 `.[train]`） |
+| 数据集 | `training/build_iq_dataset.py`（每个样本：`(2, N)` 波形 + 调制标签 + SNR 等 metadata） |
+| 验收 | `training/verify_iq.py`（清单 / 契约 / 形状 / 确定性场景端到端 / 重复推理 / 数据集独立验证，共十项） |
+| 推理入口 | CLI `signal-analysis amc-iq-classify`；GUI「调制识别」页加载 IQ 清单后按 `iq_waveform_v1` 契约推理 |
+| GUI 训练入口 | 「AMC 识别训练」页（只支持 `iq` 任务与 CNN/TCN，见 [08AMC识别训练](../08AMC识别训练.md)） |
+| 文档日期 | 2026-10-04（2026-10-05 重构：本文档只讲原始 IQ 通路） |
 
-> **本项目的 "AI 调制识别" 是"确定性物理特征 + 学习判别器"。**
-> 特征提取（[调制识别_传统特征与启发式判定](调制识别_传统特征与启发式判定.md) §2.3–§2.8 统计出的 34 维）**不是**神经网络——它逐项有闭式定义、可复算、可人工判读；
-> 只有最后一层"从 34 维到 6 类"的映射是学出来的。
-> 这样做的直接好处是：**线性基线与 Transformer 共用同一份输入**，
-> 两者的差距就是"判别器的贡献"，不掺任何特征工程的差异。
-> 特征本身的公式、物理含义、局限见
-> [调制识别_传统特征与启发式判定](调制识别_传统特征与启发式判定.md)。
+> **本文档 = 原始 IQ 时序通路：不做任何人工特征，`(2, N)` 波形直接喂给 CNN/TCN，
+> 网络自己学调制特征。** 这是与特征通路并列的**第二条通路**，不是替代关系：
+>
+> - 特征通路（34 维确定性物理量 + 启发式 / 线性岭回归 / FT-Transformer 判别器）见
+>   [调制识别_传统特征与启发式判定](调制识别_传统特征与启发式判定.md)——
+>   **默认路径与可审计兜底**在那条路上；
+> - 两条通路的输入契约、类别字典、结果契约都不同，**清单不能互串、数字不能直接比较**
+>   （输入信息不同，不是同一道题）；前端（混频/低通/抽取）共用同一份实现。
 
-共享数值实现：34 维特征及固定顺序转换来自 `algorithms/amc/features.py`；特征网络和原始 IQ 网络共用 `algorithms/dsp/preprocess.py` 的校验、混频、低通和抽取。模型训练、加载与推理在 `algorithms/amc/feature_model.py`；数值实现随核心编译。详细模块依赖与数值基线复核见[基础工程实现与文件说明](../基础工程实现与文件说明.md)的「数值模块与算法边界」。
+共享数值实现：`algorithms/dsp/preprocess.py` 的校验、混频、低通和抽取由两条通路共用；IQ 通路的波形窗口由 `algorithms/amc/iq_model.py::iq_waveform` 唯一定义（训练与推理同源），结果组装在 `algorithms/amc/iq_model.py::amc_iq_classify`。详细模块依赖与数值基线复核见[基础工程实现与文件说明](../基础工程实现与文件说明.md)的「数值模块与算法边界」。
+
+**两条通路对照**（本文档与特征通路的分工索引）：
+
+| | 特征通路（另一文档） | 原始 IQ 通路（本文档） |
+| --- | --- | --- |
+| 输入 | `amc_feature_vector_v1`，34 维确定性物理量 | `iq_waveform_v1`，`(2, N)` float32 单位 RMS 波形 |
+| 类别字典 | **冻结** A09 六类 | 由清单声明：`a09` 六类或 `custom` 自定义（≤ 64 类） |
+| 解释性 | 每次判决可展开成 34 个物理量 | 无逐项物理量，只能看概率与波形摘要 |
+| 传统对照 | 有（数字/模拟启发式、线性判别） | 无（没有确定特征可对照） |
+| 模型结构 | 线性判别 / FT-Transformer | `IQCNN`（步长卷积）/ `IQTCN`（膨胀因果卷积） |
+| 训练脚本 | `training/train_amc.py`（`--arch linear\|transformer`） | `training/train_iq.py`（`--arch cnn\|tcn`） |
+| 结果契约 | `amc_classify_v1` | `amc_iq_classify_v1` |
+| 推理入口 | `amc-classify` | `amc-iq-classify` |
+| 依赖 | 仅 numpy（线性基线） | `.[ml]`（推理）/ `.[train]`（训练） |
 
 ---
 
 ## 1. 算法思路
 
-### 1.1 为什么默认不让网络直接看 IQ
-
-把原始 IQ 直接喂给深度网络（CNN/LSTM/ResNet）是 RadioML 路线的标准做法，本项目**默认没走这条路**，原因有三：
-
-1. **数据量不够**。合成数据可以无限生成，但生成器只能覆盖它建模过的物理效应
-   （本项目生成器：理想信道 + 白噪声 + RRC 成形），网络很容易学成"认生成器的指纹"，
-   到真实数据上直接失效。34 维物理特征**先验更强、自由度更低**，小样本下更稳。
-2. **可解释性与可复核**。任何一次判决都可以展开成 34 个物理量，与启发式判据、
-   与文献里的累积量参考表逐项核对。端到端网络做不到这一点。
-3. **与检测路径同构**。检测是"网络判决 + 物理测量"，识别是"网络判决 + 物理特征"，
-   同一套工程范式（清单强校验、契约冻结、失败即报错）可以复用。
-
-> **这三条是"默认路径选特征"的理由，不是"禁止用 IQ"。** 本项目后来把原始 IQ
-> 做成了**另一条显式通路**（§7，`iq_waveform_v1` + `amc_iq_classify_v1`），
-> 只有两个入口上的硬区别：输入契约不同（`(2, N)` 波形 vs 34 维向量）、类别字典由模型声明
-> （`a09` 或自定义）而不是冻结。两条通路**互不替代**：特征通路是默认交付与可审计兜底，
-> IQ 通路用于"有足够多样数据时让网络自己学特征"的探索，且**必须与自己的基线比**，
-> 不能与 34 维特征通路直接比数字（输入信息不同，不是同一道题）。
-
-### 1.2 两个判别器，一个特征
-
-| | 线性基线 | FT-Transformer |
-| --- | --- | --- |
-| 参数 | $34\times6$ 权重 + 6 偏置 + 68 标准化参数 | 约 10 万级 |
-| 拟合方式 | **闭式解**（岭回归，无需迭代、无需随机种子） | AdamW 迭代训练 |
-| 产出 | JSON（`amc_model_v1`，可直接 diff、可直接审计） | ONNX + 清单 |
-| 依赖 | 仅 numpy | torch（训练）、onnxruntime（推理） |
-| 定位 | **默认路径 / 可复现基线 / 交付兜底** | 精度上限探索 |
-| 置信度 | softmax(温度 × logits)，温度在训练集上按对数损失网格校准 | softmax，**未标定** |
-
-两者**必须**用同一份 `records`、同一条 `train/val` 划分、同一个 `evaluate_model` 评测，
-否则比较没有意义（数据集划分由 `build_amc_dataset.py --seed` 决定并写进数据集卡）。
-
-### 1.3 为什么线性基线能到 0.82
-
-34 维特征里已经包含了**强判别性**的量：
-
-- `c63_mag` 直接把 QPSK(≈4) / 16QAM(≈2.1) / 64QAM(≈1.8) 拉开；
-- `m20_mag` 把实信号（AM/2ASK）与其他分开；
-- `spec_flatness` / `spec_edge_ratio` 把 SSB 的"盒状谱"识别出来；
-- `amp_clusters` / `peak_clusters` / 16 桶模板给出电平数。
-
-在这个特征空间里，六类**近似线性可分**（这也是文献里"累积量特征 + 线性判别"能做起来的
-根本原因）。因此闭式岭回归就能给出宏平均 F1 0.8246 的基线；
-Transformer 的增益空间主要在**低 SNR 与 16/64QAM 混淆**这两块。
-
----
-
-## 2. 公式
-
-### 2.1 标准化
-
-线性基线（`fit_model`，$N$ 为样本数、$D=34$）：
-
-$$\mu_d=\frac{1}{N}\sum_{i=1}^{N}x_{i,d},\qquad
-\sigma_d=\max\Big(\mathrm{std}_d,\ \texttt{STANDARDIZE\_FLOOR}=10^{-2}\Big)$$
-
-$$z_{i,d}=\frac{x_{i,d}-\mu_d}{\sigma_d}$$
-
-> 下限 $10^{-2}$ 的作用：**近常量特征（例如空桶占满的 `peak_hist_*`）不被放大成噪声**。
-> 同时 $z$ 的量级不随特征物理量纲变化，岭正则才对所有维度公平。
-
-Transformer（`_standardizer`）用的是 $\sigma_d=\max(\mathrm{std}_d,10^{-3})$，
-**下限不同**（$10^{-3}$ vs $10^{-2}$）——两个分支各自独立训练，
-**不要假设它们的标准化参数一致**（这也是清单里 `standardize` 只作留档的原因）。
-
-### 2.2 岭回归（闭式解）
-
-把六类做成 one-hot 目标矩阵 $T\in\{0,1\}^{N\times C}$（$C=6$，顺序恒为
-`AMC_CLASSES`）：$T_{i,c}=1$ 当且仅当第 $i$ 个样本属于第 $c$ 类。
-
-$$\boxed{\ G=Z^{\!\top}Z+\lambda I_D,\qquad W=G^{-1}\big(Z^{\!\top}T\big)\ }$$
-
-$$\boxed{\ b=\frac{1}{N}\sum_{i=1}^{N}\big(T_i-Z_iW\big)\ }$$
-
-$\lambda=\texttt{DEFAULT\_L2}=10^{-3}$，$Z\in\mathbb{R}^{N\times D}$、$W\in\mathbb{R}^{D\times C}$、
-$b\in\mathbb{R}^{C}$。代码用 `np.linalg.solve(G, ZᵀT)`（不解显式逆）。
-
-> **为什么要岭正则**：34 维里有强共线的组（`spec_edge_ratio` 与 `psd_peak_ratio`、
-> `amp_clusters` 与 `peak_clusters`、16 桶模板和为 1）。无正则时 $Z^\top Z$ 近奇异，
-> 权重会爆到 $10^{3}$ 量级；$\lambda=10^{-3}$ 把它压到稳定区间，
-> 且**不引入随机性**（同一个数据集必定得到同一组权重）。
-> 偏置取"残差均值"而非直接求和，是为了让它在类别先验不平衡时仍居中。
-
-### 2.3 判别与温度校准
-
-$$z_i=\frac{x_i-\mu}{\sigma},\qquad \ell_i=z_iW+b,\qquad
-p_i=\mathrm{softmax}\big(\tau\cdot \ell_i\big)$$
-
-$$\text{softmax}(v)_c=\frac{e^{v_c-\max_j v_j}}{\sum_{k}e^{v_k-\max_j v_j}}$$
-
-温度 $\tau$ 在**训练集**上按对数损失网格搜索（`_TEMPERATURE_GRID`）：
-
-$$\tau^\star=\arg\min_{\tau\in\{0.5,1,2,3,4,6,8,12,16,24\}}
--\frac{1}{N}\sum_{i=1}^{N}\ln\max\big(p_{i,y_i}(\tau),\ 10^{-12}\big)$$
-
-### 2.4 最小类质心（探索性）
-
-$$z^{\text{centroid}}_c=\frac{1}{|\mathcal{C}_c|}\sum_{i\in\mathcal{C}_c}z_i,
-\qquad
-\texttt{nearest\_centroid}(x)=\arg\min_c\big\lVert z-z_c^{\text{centroid}}\big\rVert_2^2$$
-
-质心**不是**判决依据（判决只用 $\ell$），只作为"这个样本离哪一类训练分布更近"的探索信息。
-
-### 2.5 FT-Transformer 分类器
-
-**（a）标量化分词元**：34 个特征各成一个"句子里的词"，第 $d$ 个特征的标量
-$x_d\in\mathbb{R}$ 经
-
-$$\text{token}_d=W_d\,x_d+b_d,\qquad W_d\in\mathbb{R}^{1\times d_{\text{model}}}$$
-
-不再加特征位置编码（位置由 $W_d$ 本身承担），另加一个可学习的分类词元：
-
-$$\text{CLS}\sim\mathcal{N}\big(0,\ 0.02^2\big)\ (\text{trunc\_normal})$$
-
-**（b）pre-norm 编码器**（`norm_first=True`，$\ell=1,\dots,L$）：
-
-$$\hat u^{\ell}=\mathrm{MHA}\big(\mathrm{LN}(u^{\ell-1})\big)+u^{\ell-1},\qquad
-u^{\ell}=\mathrm{FFN}\big(\mathrm{LN}(\hat u^{\ell})\big)+\hat u^{\ell}$$
-
-$$\mathrm{FFN}(v)=W_2\,\mathrm{gelu}\big(W_1v+b_1\big)+b_2$$
-
-$$\mathrm{MHA}(V)=\mathrm{Concat}(\text{head}_1,\dots,\text{head}_H)W^O,\qquad
-\text{head}_h=\mathrm{softmax}\Big(\frac{Q_hK_h^{\!\top}}{\sqrt{d_k}}\Big)V_h$$
-
-超参：$d_{\text{model}}=64$、$H=4$（$d_k=16$）、$d_{ff}=4\,d_{\text{model}}=256$、
-$L=2$、dropout 0.1。
-
-**（c）分类头**：
-
-$$\boxed{\ p=\mathrm{softmax}\Big(W_{\text{cls}}\,\mathrm{LN}(u^L_{\text{CLS}})+b_{\text{cls}}\Big)\ }$$
-
-### 2.6 训练目标与超参（`train_classifier`）
-
-$$\mathcal{L}=-\frac{1}{B}\sum_{i=1}^{B}\ln p_{i,y_i}
-\quad(\text{CrossEntropyLoss})$$
-
-| 超参 | 取值 |
-| --- | --- |
-| 优化器 | AdamW |
-| 学习率 | $3\times10^{-3}$ |
-| 权重衰减 | $10^{-4}$ |
-| 学习率调度 | CosineAnnealingLR |
-| 轮数 / 批大小 | 60 / 128 |
-| 早停 | 验证损失 patience 12 |
-| 随机种子 | 0（CLI `--seed`） |
-| 结构 | `--d-model 64`、`--heads 4`、`--layers 2` |
-
-### 2.7 导出与"标准化必须在图内"
-
-导出时把标准化写成**图的一部分**（`StandardizedClassifier` 把 $\mu$、$\sigma$ 注册为 buffer）：
-
-$$\text{ONNX}: \texttt{features}(N,34)\ \text{float32}
-\ \longrightarrow\ \mathrm{Linear}\to\mathrm{softmax}\ \longrightarrow\
-\texttt{scores}(N,6)\ \text{（概率）}$$
-
-$$\text{scores}=\mathrm{softmax}\Big(W_{\text{cls}}\,\mathrm{LN}\big(\mathrm{enc}(\text{tokens})\big)\Big)
-\quad\text{其中 tokens 由 } \frac{x-\mu}{\sigma}\ \text{生成（在图内）}$$
-
-**关键约束**（`write_amc_manifest` 的 docstring 原文）：
-> "模型必须位于清单目录内并使用相对路径；`standardize` 用于留档与核对，
-> **真正的标准化必须已写入导出图**。"
-
-因此 **`.onnx` 的输入 `features` 是"未标准化的原始 34 维特征"**；
-Python 侧不做任何预处理（`onnx_scores` 只做 `np.asarray([feature_vector(features)], dtype=np.float32)`）。
-opset 默认 17（`DEFAULT_ONNX_OPSET`）。
-
-### 2.8 推理侧的鲁棒读取（`onnx_scores`）
-
-$$\text{values}=\text{output}\ \text{（reshape 到 } -1\text{）},\qquad
-\text{值域}\ge0\ \wedge\ \big|\textstyle\sum-1\big|<10^{-3}
-\ \Rightarrow\ \text{直接当概率}$$
-
-$$\text{否则}\ \Rightarrow\ p=\mathrm{softmax}(\text{values})$$
-
-输出维度必须等于 6，否则报错。这一层判断是为了兼容"导出图里带了 softmax"与
-"导出图输出 logits"两种常见情况，而**不改变契约**（对外永远是概率）。
-
-### 2.9 可信度判定（与结果契约共用）
-
-| 条件 | `reliable` |
-| --- | --- |
-| `snr_estimate_db is None` | `True`（附"无法估计"说明） |
-| `snr_estimate_db < 5.0` dB | `False` |
-| `confidence < 0.5` | `False` |
-| 其他 | `True` |
-
-`snr_note` 固定声明：带内信噪比是**粗估**，仅用于可信度提示，**不是验收口径**。
-
----
-
-## 3. 流程图
-
-```mermaid
-flowchart TD
-    A["数据集 records：features(34) + label + snr_db"] --> B["build_amc_dataset.py<br/>按类分层生成 → train / val 划分写进数据集卡"]
-    B --> C{"arch 选择"}
-    C -- linear --> D["fit_model 闭式岭回归<br/>μ、σ → z → G = ZᵀZ + λI → W = solve(G, ZᵀT) → b = mean(T - ZW)"]
-    D --> E["温度网格校准 τ*<br/>最小化训练集平均对数损失"]
-    E --> F["模型 JSON（amc_model_v1）<br/>weights / bias / standardize / temperature / centroids / training"]
-    F --> G["save_model<br/>allow_nan=False，落盘前 _validate_model 自校验"]
-    G --> H["内置模型 amc_default.json<br/>随 wheel/冻结产物分发"]
-    C -- transformer --> I["_standardizer<br/>scale = max(std, 1e-3)"]
-    I --> J["FT-Transformer：34 个标量词元 + CLS<br/>pre-norm encoder ×2，d_model 64，heads 4"]
-    J --> K["AdamW + CosineAnnealingLR + 交叉熵<br/>epochs 60，batch 128，早停 patience 12"]
-    K --> L["StandardizedClassifier 包装<br/>把 μ、σ 写为 buffer → 标准化进入图内"]
-    L --> M["export_onnx opset 17<br/>输入 features (N,34) float32；输出 scores (N,6)"]
-    M --> N["write_amc_manifest + 写后自校验<br/>类别与特征顺序强校验、sha256、模型须在清单目录内"]
-    N --> O["清单 JSON（amc_feature_vector_v1）"]
-    H --> P["amc_classify 统一入口"]
-    O --> P
-    Q["输入 IQ + sample_rate"] --> R["extract_features<br/>与传统路径同一份实现（34 维契约）"]
-    R --> P2["_resolve_config：只允许 offset_hz / bandwidth_hz，其余键报错"]
-    P2 --> P
-    P --> S["JSON 模型：z = (x - μ)/σ；logits = zW + b；p = softmax(τ·logits)"]
-    P --> T["ONNX 清单：read_amc_manifest 强校验（摘要、相对路径、类别、特征顺序）<br/>onnxruntime 会话 → scores"]
-    S --> U["predict：label、confidence、margin、scores、logits、nearest_centroid"]
-    T --> V["onnx_scores：和式为 1 且非负即概率，否则 softmax；维度必须为 6"]
-    U --> W["evaluate_model / verify_amc<br/>混淆矩阵、逐类 P/R/F1、宏平均 F1、按 5 dB 分桶准确率"]
-    V --> W
-    W --> X["结果契约 amc_classify_v1<br/>prediction + baseline + pending（合格门限未确认）"]
-```
-
----
-
-## 4. 输入与输出参数
-
-### 4.1 训练侧接口
-
-| 对象 | 说明 |
-| --- | --- |
-| `fit_model(records, *, l2=1e-3, provenance=None) -> dict` | `records` 为 `{"features": dict, "label": str, "snr_db": float\|None}` 序列；**至少覆盖两个类别**；标签必须在六类字典内，否则报错 |
-| `build_amc_dataset.py` | `--output --per-class 400 --seed 0 --rate 2e5 --duration-range --snr-range(-5,30) --min-bandwidth-ratio 0.05 --max-bandwidth-ratio 0.30 --guard-ratio 0.02 --center-jitter 0.05 --bandwidth-jitter 0.10 --power-dbfs -6 --train-fraction 0.8 --modes` |
-| `train_amc.py` | `--data --output --arch {linear,transformer} --l2 --min-snr --seed --epochs --batch-size --d-model --heads --layers --learning-rate --onnx-dir` |
-| `train_classifier(...)` | 传入已划分好的 `train_x/train_y/val_x/val_y` 与 `classes`，返回训练好的 `StandardizedClassifier` |
-| `export_onnx(model, path, *, standardize, feature_count, classes, opset=17)` | 导出**自带标准化**的 `.onnx` |
-| `write_amc_manifest(output, model, *, classes, features, standardize, identifier, version, opset, input_name, output_name, training, notes)` | 返回 `(manifest, library_path)`；**模型必须在清单目录内** |
-| `verify_amc.py` | `--data --model --manifest --limit 200 --threads --json` |
-
-### 4.2 线性模型 JSON（`amc_model_v1`）字段
-
-| 字段 | 说明 |
-| --- | --- |
-| `contract` | `"amc_model_v1"` |
-| `feature_contract` | `"amc_feature_vector_v1"` |
-| `schema_version` | 1 |
-| `classes` / `labels` | 六类顺序 / 中文标签 |
-| `features` | 34 个特征名，**顺序必须与 `AMC_FEATURES` 完全一致**，否则 `_validate_model` 报错 |
-| `l2` | 岭系数 |
-| `temperature` | 校准后的温度 $\tau^\star$ |
-| `standardize.mean` / `standardize.scale` | 各 34 个数；`scale > 0` 且全部有限 |
-| `weights` | $34\times6$ 嵌套数组，有限 |
-| `bias` | 长度 6，有限 |
-| `centroids` | 六类质心（标准化空间，34 维） |
-| `training.samples` / `support` | 样本总数 / 逐类支撑数 |
-| `training.accuracy_in_sample` | **训练集内**准确率（不是泛化指标） |
-| `training.confusion_in_sample` | 训练集内混淆矩阵 $6\times6$ |
-| `training.snr_db.min` / `.max` | 训练集 SNR 实际覆盖范围 |
-| `training.note` | 固定提示："in-sample 指标仅用于自检；正式指标须用独立验证集（evaluate_model）" |
-| `training.provenance` | 训练脚本追加的来源信息（可选） |
-
-### 4.3 ONNX 分类器清单（`amc_feature_vector_v1`）字段
-
-| 字段 | 约束（`read_amc_manifest` 强校验） |
-| --- | --- |
-| `schema_version` | 必须为 1 |
-| `task` | `"amc"` |
-| `contract` | 必须为 `amc_feature_vector_v1` |
-| `runtime` | 必须为 `onnxruntime` |
-| `runtime_min_version` | 默认 `1.17`；运行时版本更低则拒绝 |
-| `id` / `version` | 非空文本 |
-| `sha256` | 64 位十六进制，且与 `library` 实际摘要**必须一致** |
-| `library` | **清单目录内的相对路径**；绝对路径/越界/缺失/空文件均报错 |
-| `opset` | 整数（默认 17） |
-| `input.name` / `input.size` | 输入节点名（默认 `features`）/ 必须为 34 |
-| `output.name` / `output.classes` | 输出节点名（默认 `scores`）/ **必须与六类字典一致** |
-| `features` | **必须与 `AMC_FEATURES` 逐项一致** |
-| `standardize.mean` / `.scale` | 各 34 个有限数 |
-| `standardize.note` | 固定："标准化应已写入导出图；此处仅留档核对" |
-| `training` | 训练元信息 |
-| `manifest.notes` | 说明 |
-| 文件大小 | 清单 $\le$ 64 KiB |
-
-### 4.4 推理侧接口
-
-```python
-amc_classify(samples, sample_rate, config=None, model=None, threads=None) -> dict
-```
-
-| `config` 键 | 说明 |
-| --- | --- |
-| `offset_hz` | 分析频带中心（Hz），默认 0 |
-| `bandwidth_hz` | 分析频带带宽（Hz），`None` 表示整段采样带宽 |
-
-**其他任何键都会报错**（`_resolve_config`：`AMC 配置不支持以下字段：…`）。
-
-| `model` 取值 | `algorithm` | `model.source` |
-| --- | --- | --- |
-| `None` | `amc_linear_v1` | `builtin`（内置 `amc_default.json`） |
-| dict（内联模型） | `amc_linear_v1` | `inline`（或 dict 里的 `source`） |
-| 线性模型 JSON 路径 | `amc_linear_v1` | `file` |
-| ONNX 清单路径（`contract == amc_feature_vector_v1`） | `amc_onnx_v1` | `onnx` |
-
-结果键**恰好**为 12 个（见
-[调制识别_传统特征与启发式判定 §4.4](调制识别_传统特征与启发式判定.md)），
-其中 `model` 在 ONNX 分支额外带 `simplify` 后的 `sha256` 与实际清单路径。
-
-CLI：`signal-analysis amc-classify <asset_id> [--model PATH] [--offset-hz HZ] [--bandwidth-hz HZ] [--threads N]`。
-**`amc-classify` 没有 `--report` 参数**（报表走 `export RUN_ID PATH`）。
-
-### 4.5 评测输出（`evaluate_model`）
-
-| 键 | 说明 |
-| --- | --- |
-| `confusion` | $6\times6$ 混淆矩阵 |
-| `per_class` | 逐类 precision / recall / f1（真值与预测里都不出现的类，F1 为 `null` 且**不拉低宏平均**） |
-| `accuracy` | 总体准确率 |
-| `macro_f1` | 宏平均 F1 |
-| `per_snr` | 按 5 dB 分桶的准确率，键形如 `"+5~+10 dB"` |
-| `model_id` | 模型 id（便于报告里标注"这行数字来自哪个模型"） |
-
-### 4.6 结果里的 `pending`（**必须原样出现**）
-
-```
-"识别准确率的合格门限尚未确认（技术方案待确认项）"
-"AMC 使用单信号频带特征，多信号重叠场景需先由检测切分"
-```
-
-GUI、CLI、HTML 报表的每一个 AMC 结果都会带上这两条，**不允许在展示层丢掉**。
-
----
-
-## 5. 设计局限
-
-1. **合格门限未确认 —— 因此不给"通过/不通过"。**
-   `pending[0]` 原文："识别准确率的合格门限尚未确认（技术方案待确认项）"。
-   下一条限制里列出的所有数字都只**描述**这一次数据集划分下的表现，
-   **不构成验收结论**，任何展示面都不许把它写成"达标"。
-
-2. **数字全部来自合成数据自评，无独立验证集、无实测数据。**
-   实测（`build_amc_dataset.py --per-class 800 --seed 11` 分层验证集）：
-   总体准确率 **0.8250**、宏平均 F1 **0.8246**；
-   分档：$\ge10$ dB $\ge0.97$；5–10 dB **0.793**；0–5 dB **0.662**；$-5$–0 dB **0.444**。
-   逐类 F1：FM 0.954 / SSB 0.888 / 2ASK 0.982 / QPSK 0.835 / **16QAM 0.608 / 64QAM 0.682**。
-   主误差：**16QAM ↔ 64QAM**（16QAM 有 26/80 被判成 64QAM），
-   以及低 SNR 下 QPSK 被判成 QAM。**没有真实采集数据、没有 SDR 实测**。
-
-3. **`accuracy_in_sample` 与验证集准确率是两个数，绝不可混用。**
-   内置模型 `training.accuracy_in_sample = 0.851042`，验证集 0.8250。
-   前者是**训练集内**、且**掺了温度校准**（温度就是在同一批数据上选的）的数字，
-   只有自检价值；模型对象里 `training.note` 已写死这一点。
-
-4. **温度校准是 in-sample 的，不是标定。**
-   `_calibrate_temperature` 在训练集上网格搜索最小化平均对数损失。
-   正确做法是**在独立验证集上做温度标定**（或保序回归，文献 [21][23]）；
-   当前实现只能压一压过度自信的倾向，**不能**把 `confidence` 解释为概率。
-
-5. **线性判别只有一个全局超平面。**
-   $W$ 是 $34\times6$ 的常数矩阵，无法表达"低 SNR 时用规则 A、高 SNR 时用规则 B"。
-   实际数据里 `c63_mag` 的判据随 SNR 漂移（这也是把 `snr_estimate_db` 塞进第 34 维的原因），
-   线性模型只能用"折中斜率"处理，这直接反映在 16QAM/64QAM 的 F1 上。
-
-6. **Transformer 在 34 维上极易过拟合。**
-   约 10 万参数配 34 维输入、每类几百到几千样本，必须靠早停 + dropout + 权重衰减兜住；
-   文献 [9] 明确指出这类表格数据上深度模型往往不如树模型。
-   当前配置（$L=2$、$d=64$、patience 12）是为"小数据能训起来"选的保守配置，
-   数据量上去以后需要重新调。
-
-7. **ONNX 分支的标准化与清单可能不一致，而且无法自动发现。**
-   唯一保证是"导出图里已经带标准化"（`StandardizedClassifier` 的 buffer）。
-   清单里的 `standardize` 只是**留档**，`read_amc_manifest` 只校验它有 34 个有限数，
-   **无法验证**它是否真的等于图内参数。`onnx_scores` 直接把**未标准化**的特征喂进图，
-   所以如果导出时漏了 `StandardizedClassifier` 包装，模型照样能跑，
-   只是精度会莫名其妙地差。**这是本分支最危险的失效模式**，只能靠
-   `verify_amc.py` 的端到端比对发现。
-
-8. **`verify_amc.py` 只验证契约，不验证精度。**
-   它检查数据集卡与特征契约、特征顺序、线性模型形状、ONNX 清单自洽性、
-   ONNX 与线性模型在有限样本上的一致性（容差 `2e-4`，`--limit 200`）。
-   它**不**回答"这个模型够不够用"。
-
-9. **ONNX 分支需要额外依赖。**
-   `onnxruntime`（`pip install .[ml]`）缺失时：GUI 控件禁用并提示安装方式、
-   CLI 以错误码 2 退出，**不回退、不猜**。传统/线性路径完全不受影响。
-
-10. **多信号重叠场景必须先由检测切分。**
-    `pending[1]` 原文："AMC 使用单信号频带特征，多信号重叠场景需先由检测切分"。
-    频带内混叠会同时污染 34 个特征，模型没有任何机制处理它。
-
-11. **只用六类字典，`am` 与两种跳频样式按"不适用"计数。**
-    `fit_model` 遇到不在字典里的标签直接报错（不给"训练时丢掉"的机会），
-    统计侧把它们记为"不适用"、不计入分母、**不当成错误**。
-    这意味着**准确率的分母是六类**，不能对外说成"所有信号"。
-
-12. **前置特征提取的误差会原样传入。**
-    `bandwidth_hz` 给不准 → 抽取比 $F$ 不准 → 16 桶模板与 `amp_clusters` 失真
-    → 线性判别偏离训练分布。结果里**没有**"输入特征是否可信"的标志（只有 `snr_estimate_db` 这一个粗估），因此"检测给错频带"这件事在识别侧是静默的。
-
-13. **`snr_estimate_db` 既是特征也是提示，语义重叠。**
-    它作为第 34 维参与判别（让模型能补偿 SNR 漂移），同时用于 `reliable` 判定。
-    当它无法估计时，特征里填哨兵值 **60.0**、`info.snr_estimate_db` 填 `None`，
-    于是"可信度判定"走 `reliable = True` 分支——**这是一个刻意的宽松选择**
-    （不知道 SNR 就不因为 SNR 判不可信），但意味着高噪声下若占用带几乎覆盖采样带宽，
-    结果仍会被标为可靠。
-
----
-
-## 6. 可以改进的地方与相关文献
-
-### 6.1 先把"对标与标定"做对（成本最低、收益最直接）
-
-1. **独立验证集上做温度标定/保序回归**，替换当前 in-sample 校准
-   —— Guo 2017 [21]、Zadrozny & Elkan 2002 [23]；
-2. **先把树模型跑成第三基线**（随机森林 / LightGBM），
-   因为文献 [9] 预测它在 34 维上很可能优于线性与 Transformer；
-   如果真是这样，"上 Transformer"的意义需要重新论证；
-3. **报告必须分档**：按 SNR 桶（`per_snr` 已有）、按调制样式、按目标数分列，
-   避免单一总分掩盖 16/64QAM 这个真问题。
-
-### 6.2 特征侧（性价比通常高于换判别器）
-
-- **恢复 34 维之外的物理量**：符号速率、滚降系数、循环谱特征
-  —— Gardner 1991；Dobre 2007 [17]。加特征属于契约破坏性变更，
-  需要 `amc_feature_vector_v2` 并重训两个分支；
-- **特征增强**：把 `c42/c63` 改成"多个子段上的中位数"以降低方差
-  —— Rousseeuw & Croux 1993 *Alternatives to the median absolute deviation.*
-  JASA **88**(424):1273–1283；
-- **特征选择/降维**：34 → 15–20 维可显著降低过拟合 —— Guyon & Elisseeff 2003 [26]；
-  LDA / PCA 白化也是对线性判别友好的预处理 —— Hastie 2009 [25]。
-
-### 6.3 判别器侧
-
-| 方向 | 具体做法 | 文献 |
-| --- | --- | --- |
-| 树集成 | LightGBM / XGBoost + 特征重要性审计 | Friedman 2001 [10]、Chen & Guestrin *XGBoost.* KDD 2016 |
-| 核方法 | RBF-SVM + 概率输出 | Cortes & Vapnik 1995 [12]、Platt 1999 [22] |
-| 集成 | 线性 + 树 + Transformer 软投票/堆叠 | Wolpert, D. *Stacked generalization.* Neural Networks **5**(2):241–259, 1992 |
-| 蒸馏 | Transformer → 线性/树，保留精度、丢掉依赖 | Hinton 2015 [29] |
-| 深度但更省 | TabNet / 1D-CNN 替代全 Transformer；MLP + 特征交互（DCN-V2） | Arik & Pfister *TabNet.* AAAI 2021；Wang, R. et al. *DCN V2.* WWW 2021 |
-| 不确定性 | MC dropout / 深度集成给"不知道" | Gal & Ghahramani *Dropout as a Bayesian approximation.* ICML 2016；Lakshminarayanan et al. *Simple and scalable predictive uncertainty estimation using deep ensembles.* NeurIPS 2017 |
-
-### 6.4 数据与领域自适应
-
-- **规模**：每类 400 条只能跑通链路；要有意义的模型建议**每类数千到上万条**，
-  并覆盖每个 SNR 档位（`build_amc_dataset.py --per-class --snr-range --seed`）；
-- **领域自适应**：少量实测数据微调
-  —— Ganin et al. *Domain-adversarial training of neural networks.* JMLR 2016；
-  Sun & Saenko *Deep CORAL.* ECCV Workshops 2016；
-- **少样本/自监督**：Snell et al. *Prototypical networks.* NeurIPS 2017；
-  Chen et al. *SimCLR.* ICML 2020（在特征向量上做对比学习是低成本选项）；
-- **干净的数据集卡**：把生成器版本、参数、SNR 分布、划分种子全部写进数据集卡
-  （`build_amc_dataset.py` 已输出），否则数字无法复现。
-
-### 6.5 部署
-
-- **INT8 量化** ONNX 分类器（Jacob 2018 [28]），并用 `verify_amc.py --manifest`
-  的端到端比对卡住数值漂移；
-- **多模型版本共存**：`model.id` + `version` + `sha256` 已经进了结果与清单，
-  报表里可以标注"这一行来自哪个模型"，便于 A/B；
-- **把线性基线的 weights 纳入审计**：它是可读的 $34\times6$ 矩阵，
-  可以做逐类权重分析和漂移检测（新数据的特征均值 vs `standardize.mean`）
-  —— 文献 [9] 关于表格数据可解释性的讨论。
-
-### 6.6 评测规范
-
-- 建立**固定验证集**（seed 固定、写进数据集卡），禁止用训练集数字对外；
-- 引入**真实采集数据**做独立验证集，与合成数据结果**分列报告**；
-- 指标口径对齐 `evaluation.classification_metrics`（缺失类不拉低宏平均），
-  并把"不适用"样本单列统计——把它们算进分母会系统性低估准确率；
-- 置信度**标定之后**再谈阈值：当前 `reliable` 里的 `confidence < 0.5`
-  与 `snr < 5 dB` 都是工程经验值，没有 ROC/PR 曲线支撑。
-
----
-
-## 7. 原始 IQ 通路（`iq_waveform_v1` / `amc_iq_classify_v1`）
-
-§1–§7 讲的是"确定性特征 + 学习判别器"。本节是**同一任务的第二条通路**：不给网络 34 维物理量，
-直接把定长 IQ 波形喂给卷积网络。它**不是**对 §1.1 三条理由的否定，而是把"让网络自己学特征"
-做成一个契约完备、可验收、可回退的选项。
-
-### 7.1 定位与边界
-
-| | 特征通路（§1–§7） | 原始 IQ 通路（本节） |
-| --- | --- | --- |
-| 输入 | `amc_feature_vector_v1`，34 维确定性物理量 | `iq_waveform_v1`，`(2, N)` float32 波形 |
-| 类别字典 | **冻结** A09 六类 | 由清单声明：`a09` 六类或 `custom` 自定义（≤ 64 类） |
-| 解释性 | 每次判决可展开成 34 个物理量 | 无逐项物理量，只能看概率与波形摘要 |
-| 传统对照 | 有（数字/模拟、恒包络/非恒包络启发式） | 无（没有确定特征可对照） |
-| 结果契约 | `amc_classify_v1` | `amc_iq_classify_v1` |
-| 入口 | `amc-classify` | `amc-iq-classify` |
-| 依赖 | 仅 numpy（线性基线） | `.[ml]`（推理）/ `.[train]`（训练） |
+### 1.1 定位与边界
+
+原始 IQ 通路的做法与特征通路相反：**不做任何人工特征**，把单位 RMS 的 `(2, N)` 复基带窗口
+直接喂给一维卷积网络，让网络自己学调制特征。它存在的理由有三条：
+
+1. **有足够多样数据时，端到端可能超过人工特征**——尤其是生成器没建模过的效应
+   （频偏、IQ 不平衡、多径）难以写出闭式特征，但网络可以学；
+2. **类别字典不受 A09 六类限制**：清单可声明 `custom` 类别（≤ 64 类），
+   便于把第三方数据（如 TorchSig）映射进来做实验；
+3. **作为特征通路的对照**：两条通路跑同一任务，差距本身就是"人工特征值多少"的信息。
+
+代价也直接：**没有逐项物理解释**（只有概率与波形摘要，没有 34 个物理量可复核）、
+**没有传统对照**（产品里对 IQ 结果不显示启发式对照行）、
+且**必须与自己的基线比**（同一数据划分上的 `cnn` vs `tcn`），不能拿特征通路的数字直接对比。
 
 **两条通路不能互相"调包"**：清单里的 `input.contract` 是硬门禁，特征清单拿给 `amc-iq-classify`
 会被拒绝，IQ 清单拿给 `amc-classify` 同样被拒绝。这是刻意的——两者的 `samples`、通道数、
@@ -527,7 +63,38 @@ GUI、CLI、HTML 报表的每一个 AMC 结果都会带上这两条，**不允�
 同样，**两个通路的数字不可直接比较**：输入信息不同（34 维压缩量 vs 原始波形），
 IQ 通路的对手只有它自己的基线（同一数据划分上的 CNN vs TCN，以及后续的更强骨干）。
 
-### 7.2 输入契约与前端
+### 1.2 两个基线：IQCNN 与 IQTCN
+
+| | `IQCNN` | `IQTCN` |
+| --- | --- | --- |
+| 结构 | 步长卷积堆叠（默认 32/64/128 通道，卷积核 7） | 膨胀因果残差块（默认 64 通道、5 级、核 3） |
+| 感受野 | 由层数与步长决定 | 指数增长，适合长窗口 |
+| 依据 | 一维 CNN 调制识别 [1] | 通用序列卷积优于 RNN 的实证 [2] |
+| 产出 | ONNX（输入 `iq (1,2,N)`、输出 `scores (1,C)`） | 同左 |
+
+**模型容量**（以本次实例的 `IQCNN`、6 类、$N=1024$ 为例）：三级步长卷积
+2→32→64→128（核长 7/5/3，每级 BatchNorm + GELU），时间维"平均池化 ⊕ 最大池化"拼成
+256 维，接 `256→256→6` 全连接与**图内 softmax**：**可训练参数 103,270 个**
+（导出时 BatchNorm 折叠进卷积，ONNX 里剩 102,822 个张量元素，文件约 419 KB）。
+结构超参此前只能在 `train_iq.py` 的命令行上给；现在 AMC 训练页的
+「覆盖默认训练参数（高级）」可直接设置通道/核长/dropout/权重衰减/早停轮数，
+不勾选即沿用默认值（详见 [AMC 识别训练](../08AMC识别训练.md) §4.3）。
+
+设计约束（都是踩过的坑，写进 `training/iq_cnn.py`）：
+
+* **softmax 写进图内**：图外再算 softmax 会让"ONNX 输出"与"产品展示的概率"失去唯一的定义处；
+* **导出按 batch = 1 探测**：产品侧 `iq_scores` 永远喂 `(1, 2, N)`，若按批导出静态形状，
+  运行时会因维度不符失败；
+* **类别顺序即输出下标顺序**：`classes[i]` 必须与模型第 $i$ 个输出对应，清单里写死，
+  不允许运行时按名字重排；
+* **数值一致性门槛**：验收用 `2e-4` 容差比对 torch 与 ONNX 的同输入 logits，
+  超过这个量级说明导出不忠实（训练脚本还会用 ONNX 入口重算一遍验证集，两条路径准确率必须相等）。
+
+---
+
+## 2. 公式与结构
+
+### 2.1 输入契约与前端
 
 输入张量 $x\in\mathbb{R}^{2\times N}$，通道 0 为 $I$、通道 1 为 $Q$，排布 `iq_channels_first_v1`，
 归一化 `unit_rms`：
@@ -564,45 +131,133 @@ $f_\text{analysis}=f_s/8$ 与滤波器完全一致，差别只在"交给判别�
 每符号采样点数 ≈ $8(1+\alpha) ≈ 10.8$（α 默认 0.35），所以每个窗口始终约 **95 个符号**——
 不同带宽下观察窗"看到的符号数"是一致的，这正是 8×带宽抽取想要的性质。
 结果与数据集里的 `window_start` / `decimation` / `source_samples` / `analysis_samples`
-就是用来逐条核对"到底用了哪一段"的。多窗口与跨窗融合见 §7.7 与 §8.7。
+就是用来逐条核对"到底用了哪一段"的。多窗口与跨窗融合见 §7 第 7 条与 §8.7。
 
-### 7.3 两个基线
+### 2.2 分类网络结构
 
-| | `IQCNN` | `IQTCN` |
-| --- | --- | --- |
-| 结构 | 步长卷积堆叠（默认 32/64/128 通道，卷积核 7） | 膨胀因果残差块（默认 64 通道、5 级、核 3） |
-| 感受野 | 由层数与步长决定 | 指数增长，适合长窗口 |
-| 依据 | 一维 CNN 调制识别 [13] | 通用序列卷积优于 RNN 的实证 [30] |
-| 产出 | ONNX（输入 `iq (1,2,N)`、输出 `scores (1,C)`） | 同左 |
+**`IQCNN`**（`training/iq_cnn.py`）：三级带步长的一维卷积
+$2\to32\to64\to128$（核长逐级 7→5→3，每级
+`Conv1d(stride=2, padding=kernel//2) + BatchNorm1d + GELU`），
+时间维**全局平均池化 ⊕ 最大池化**拼接成 256 维，接两层全连接
+`Linear(256→256) + GELU + Dropout(0.1) + Linear(256→C)`，最后 softmax 输出 $C$ 类概率。
 
-**模型容量**（以本次实例的 `IQCNN`、6 类、$N=1024$ 为例）：三级步长卷积
-2→32→64→128（核长 7/5/3，每级 BatchNorm + GELU），时间维"平均池化 ⊕ 最大池化"拼成
-256 维，接 `256→256→6` 全连接与**图内 softmax**：**可训练参数 103,270 个**
-（导出时 BatchNorm 折叠进卷积，ONNX 里剩 102,822 个张量元素，文件约 419 KB）。
-结构超参此前只能在 `train_iq.py` 的命令行上给；现在 AMC 训练页的
-「覆盖默认训练参数（高级）」可直接设置通道/核长/dropout/权重衰减/早停轮数，
-不勾选即沿用默认值（详见 [AMC 识别训练](../08AMC识别训练.md) §4.3）。
+**`IQTCN`**：入口 `Conv1d(2→64, 1)` 作 stem，随后 5 个**膨胀因果残差块**
+（dilation $=1,2,4,8,16$，核长 3）。每块的因果卷积左侧填充 $(k-1)\cdot d$、右侧不越界：
 
-设计约束（都是踩过的坑，写进 `training/iq_cnn.py`）：
+$$y[n]=\sum_{i=0}^{k-1} w_i\,u[n-i\cdot d],\qquad \text{pad}_\text{left}=(k-1)d$$
 
-* **softmax 写进图内**：图外再算 softmax 会让"ONNX 输出"与"产品展示的概率"失去唯一的定义处；
-* **导出按 batch = 1 探测**：产品侧 `iq_scores` 永远喂 `(1, 2, N)`，若按批导出静态形状，
-  运行时会因维度不符失败；
-* **类别顺序即输出下标顺序**：`classes[i]` 必须与模型第 $i$ 个输出对应，清单里写死，
-  不允许运行时按名字重排；
-* **数值一致性门槛**：验收用 `2e-4` 容差比对 torch 与 ONNX 的同输入 logits，
-  超过这个量级说明导出不忠实（训练脚本还会用 ONNX 入口重算一遍验证集，两条路径准确率必须相等）。
+块内结构：`F.pad(left) → Conv1d(dilation) → BatchNorm1d → GELU → Dropout`，两层后与残差相加
+（`out + residual`）；时间维池化与 `IQCNN` 相同。感受野随层数指数增长，适合长窗口。
 
-### 7.4 数据集与标签
+两者都**不含任何归一化层**：窗口归一化由 `iq_waveform` 在推理前统一完成，
+训练数据也是同一个函数产出的，不给"训练-推理口径分叉"留口子。
+
+### 2.3 训练目标与超参（`train_classifier`）
+
+$$\mathcal{L}=-\frac{1}{B}\sum_{i=1}^{B}\ln p_{i,y_i}\quad(\text{CrossEntropyLoss})$$
+
+| 超参 | 默认值（`training/iq_cnn.py`，CLI 可覆盖） |
+| --- | --- |
+| 优化器 | AdamW（学习率 $10^{-3}$、权重衰减 $10^{-4}$） |
+| 学习率调度 | CosineAnnealingLR |
+| 轮数 / 批大小 | 30 / 64（页面轮数上限 60；§8 实例用 60） |
+| 早停 | 验证准确率 patience 8，恢复最优轮权重 |
+| 随机种子 | 0（CLI `--seed`） |
+| 结构 | `cnn`：通道 32/64/128、核长 7 → 7/5/3；`tcn`：通道 64、5 级、核长 3 |
+
+训练循环是"最朴素的确定性循环"（种子固定后逐轮可复现），逐轮 loss / 验证准确率写进
+`metrics.json`；结构超参可在 AMC 训练页「覆盖默认训练参数（高级）」手工覆盖
+（与 CLI 共用同一套校验，见 [AMC 识别训练](../08AMC识别训练.md) §4.3）。
+
+### 2.4 导出与 ONNX 约定
+
+导出时用 `SoftmaxClassifier` 包装，把 **softmax 写进图内**，并做三重自检：
+
+$$\text{ONNX}: \texttt{iq}(1,2,N)\ \text{float32}\ \longrightarrow\ \mathrm{CNN/TCN}\to\mathrm{softmax}\ \longrightarrow\ \texttt{scores}(1,C)$$
+
+* 以 **batch = 1** 的随机探针导出与探测（产品侧只喂 `(1, 2, N)`，静态形状必须一致）；
+* torch 与 onnxruntime 同输入输出最大偏差 $\le$ `TOLERANCE = 2e-4`；
+* 概率和与 1 的偏差 $\le 10^{-4}$（否则说明 softmax 没写进图）；
+* opset 默认 17；输入/输出节点名固定为 `iq` / `scores`。
+
+清单由 `contracts/iq.py::write_iq_manifest` 写出：`sha256`、契约、类别顺序、
+前端口径（`samples_per_band` / `lowpass_taps` / 归一化）与声明式默认中心/带宽，
+字段清单见 §4.3。
+
+---
+
+## 3. 流程图（端到端）
+
+```mermaid
+flowchart TD
+    subgraph DATA["数据：集合 → 快照 → 窗口"]
+        A1["信号集合（gen_recipe_v1）<br/>采样率 / 时长 / 占用带宽比例 / SNR / 功率 / 类别均衡"] --> A2["训练快照 iq_snapshot<br/>按 AMC 真值逐条取目标（一条录制一个窗口）"]
+        A2 --> A3["iq_waveform<br/>混频 → 65 抽头低通 → 抽取 ≈8×BW → 居中取 N 点 → 单位 RMS"]
+        A3 --> A4["(2, N) float32 单位 RMS<br/>其余样本全部丢弃（只用 0.2%–0.8% 时长）"]
+        A4 --> A5["build_iq_dataset.py<br/>iq_dataset.npz + iq_dataset.json（labels / split / snr_db / index）"]
+        A5 --> A6["按集合 / 整组切分（origin_group_id 防泄漏）"]
+    end
+    subgraph TRAINIQ["训练与导出（training/，需 .[train]）"]
+        B1["train_iq.py --arch cnn/tcn<br/>IQCNN / IQTCN · AdamW · 早停"] --> B2["metrics.json（逐轮 loss / 验证准确率）"]
+        B1 --> B3["SoftmaxClassifier → export_onnx（batch=1，容差 2e-4）<br/>→ iq.onnx + iq_manifest.json（sha256 / 契约 / 类别 / 前端口径）"]
+    end
+    subgraph VERIFY["验收"]
+        C1["verify_iq.py 十项检查<br/>清单 / 契约 / 形状 / 确定性场景 / 重复推理 / 数据集独立验证"] --> C2["verification.json（+ per_snr 分档）"]
+    end
+    subgraph INFER["推理（amc-iq-classify / GUI）"]
+        D1["输入 IQ + 采样率 + offset_hz / bandwidth_hz（默认取清单声明值）"] --> D2["iq_waveform（runner 声明的 N）<br/>M<N 直接报错，不补零"]
+        D2 --> D3["onnxruntime 会话：iq (1,2,N) → scores (1,C)"]
+        D3 --> D4["amc_iq_classify_v1<br/>waveform + prediction + model + timing + pending"]
+    end
+    A6 --> B1
+    B3 --> C1
+    B3 --> D3
+```
+
+**流程阶段对照表**（与上图同一条链路）：
+
+| 阶段 | 做什么 | 产物 / 字段 | 实现 |
+| --- | --- | --- | --- |
+| 1 集合生成 | 生成器按配方产出 IQ 集合（单信号、类别均衡、SNR 覆盖） | 信号集合（保留在工作区，可复现） | [02IQ信号生成页面](../02IQ信号生成页面.md) 的生成流程 |
+| 2 取窗 | 按真值逐条取目标 → 混频/低通/抽取/居中取 N 点/单位 RMS；**一条录制只出一个窗口** | `(2, N)` float32 + 波形摘要 | `algorithms/amc/iq_model.py::iq_waveform`（训练与推理同源） |
+| 3 数据集 | 抽好的窗口落盘，按集合切分写卡 | `iq_dataset.npz` + `iq_dataset.json` | `training/build_iq_dataset.py` |
+| 4 训练 | IQCNN / IQTCN 训练（AdamW + 早停，恢复最优轮） | `metrics.json` | `training/train_iq.py`、`training/iq_cnn.py` |
+| 5 导出 | softmax 写进图、batch=1 探测、`2e-4` 容差自检 | `iq.onnx` + `iq_manifest.json` | `training/iq_cnn.py::export_onnx` |
+| 6 验收 | 十项检查 + 数据集独立验证（+ 按 SNR 分档） | `verification.json` | `training/verify_iq.py` |
+| 7 推理 | 按清单口径取窗 → ONNX 会话 → 结果契约 | `amc_iq_classify_v1` | CLI `amc-iq-classify`；GUI「调制识别」页 |
+
+---
+
+## 4. 输入与输出参数
+
+### 4.1 波形契约与取窗规则
+
+| 项目 | 取值 |
+| --- | --- |
+| 契约 | `iq_waveform_v1`：`(2, N)` float32、通道排布 `iq_channels_first_v1`、归一化 `unit_rms` |
+| 窗口长度 | $64 \le N \le 65536$，默认 1024；**必须与清单 `input.samples` 一致** |
+| 通道 | 固定 2（通道 0 = I、通道 1 = Q），不接受单通道 |
+| 取窗 | 取请求频带内居中 $N$ 点（起点 $\lfloor (M-N)/2 \rfloor$）；$M<N$ 直接报错，**不补零** |
+| 波形摘要 | §2.1 字段表；`window_start` / `decimation` / `source_samples` / `analysis_samples` 可逐条核对"用了哪一段" |
+
+```python
+iq_waveform(samples, sample_rate, offset_hz=0.0, bandwidth_hz=None, *,
+            window_samples=...) -> (tensor, meta)
+```
+
+训练（快照 / 数据集）与推理（`amc_iq_classify`）**都调用这一个函数**，
+"窗口长度 / 取中规则 / 归一化 / 抽取比"在训练与推理之间只有一份实现。
+
+### 4.2 数据集与标签（`build_iq_dataset.py`）
 
 数据集由 `training/build_iq_dataset.py` 产出：每个样本的场景参数随机化
 （中心频率抖动、带宽比例、时长、带内 SNR、功率），标签是**生成器已知的调制样式**
 （不是"猜"出来的），因此不存在标注噪声。关键设计：
 
-* **样本窗口由推理端入口产出**：构建数据集时直接调用 `ml/iq.py::iq_waveform`，
-  保证"窗口长度 / 取中规则 / 归一化 / 抽取比"在训练与推理之间只有一份实现，
-  从根上避免"训练与推理不一致"；
-* **凑不满就换场景重抽**，绝不补零（同 §7.2）；
+* **样本窗口由推理端入口产出**：构建数据集时直接调用
+  `algorithms/amc/iq_model.py::iq_waveform`，保证"窗口长度 / 取中规则 / 归一化 / 抽取比"
+  在训练与推理之间只有一份实现，从根上避免"训练与推理不一致"；
+* **凑不满就换场景重抽**，绝不补零（同 §4.1）；
 * **类内分层划分**：每类的 train/val 按同一比例切分，避免某类整类落进验证集；
 * **字节级可复现**：同种子同参数两次生成的数据集逐字节相同，便于复盘；
 * **确定性场景网格**：`--snr-range` 与 `--per-class` 决定 SNR 覆盖，数据集卡里按来源与
@@ -635,13 +290,106 @@ A09 六类是交付口径，而 IQ 通路允许把数据里真实存在的类别
 代价是**结果不再可跨模型直接比较**，所以 `amc_iq_classify_v1` 里必须原样带上
 `class_set` 与 `labels`（已实现，不允许在展示层丢掉）。
 
-**外部数据必须显式映射**：TorchSig [19] 的 `class_name` 属于它自己的体系，
+**外部数据必须显式映射**：TorchSig [11] 的 `class_name` 属于它自己的体系，
 把它的"信号实例/调制族"直接当成项目的跳频会话或 A09 类别是错的。
 `build_iq_dataset.py` 要求 `--torchsig-map` 给出 `TorchSig 类名 → 项目类别`，
 未映射的类名**原样**记进 `unmapped_classes` 并跳过该记录（不猜、不兜底），
 映射目标不在类别字典内则直接报错；混合样本用 `source` 字段区分，卡片按来源分段统计。
 
-### 7.5 实测（冒烟规模，**不是性能结论**）
+```bash
+# 只用项目生成器（纯 NumPy，不需要 torch）
+.venv/bin/python training/build_iq_dataset.py --output training/data/iq \
+    --per-class 200 --samples 1024 --seed 7
+# 接入 TorchSig 时必须显式映射类名
+.venv/bin/python training/build_iq_dataset.py --output training/data/iq \
+    --torchsig-map training/iq_map.example.json --class-set custom --classes ...
+```
+
+### 4.3 ONNX 契约与清单字段（`iq_waveform_v1`）
+
+| 字段 | 约束（`read_iq_manifest` 强校验） |
+| --- | --- |
+| `schema_version` | 必须为 1 |
+| `task` | `"amc_iq"` |
+| `contract` | 必须为 `iq_waveform_v1`（`IQ_ONNX_CONTRACT` 与 `IQ_WAVEFORM_CONTRACT` 同值） |
+| `runtime` | 必须为 `onnxruntime`；`runtime_min_version` 高于本机版本则拒绝 |
+| `id` / `version` | 非空文本（默认 id `iq-cnn-default`） |
+| `sha256` | 64 位十六进制，且与 `library` 实际摘要**必须一致** |
+| `library` | **清单目录内的相对路径**；绝对路径/越界/缺失/空文件均报错 |
+| `opset` | 整数（默认 17） |
+| `input` | `{name: iq, samples: N, channels: 2, layout: iq_channels_first_v1}`；`samples` 必须与导出时一致 |
+| `output` | `{name: scores, classes: [...]}`；类别顺序即输出下标顺序，**不允许运行时按名字重排** |
+| `class_set` | `"a09"` 或 `"custom"`（与 `classes` 绑定） |
+| `preprocess` | `normalization = unit_rms`、`samples_per_band = 8.0`、`lowpass_taps = 65`、`default_offset_hz`、`default_bandwidth_hz`（声明式默认值，推理时可被 `config` 覆盖） |
+| `training` | 训练元信息 |
+| 与其它清单 | **不能互串**：检测清单（`tf_image_v1`）与特征通路清单（`amc_feature_vector_v1`）拿给 IQ 入口都会被拒；反之亦然 |
+
+### 4.4 训练与验收接口
+
+| 对象 | 说明 |
+| --- | --- |
+| `train_iq.py` | `--data --arch {cnn,tcn} --epochs 30 --batch-size 64 --learning-rate 1e-3 --weight-decay 1e-4 --patience 8 --dropout 0.1 --channels --kernel --seed --min-snr --onnx-dir --identifier --version --opset --threads --default-offset-hz --default-bandwidth-hz --note`（另有 `--device`、`--events`） |
+| `train_classifier(train_x, train_y, val_x, val_y, *, classes, arch="cnn", …, device="cpu", progress=None)` | 返回 `{model, arch, best_accuracy, best_epoch, epochs_run, history}`；只依赖 torch，不引入训练框架 |
+| `export_onnx(model, path, *, classes, samples, opset=17)` | 导出并自检（图内 softmax、batch=1 探测、容差 `2e-4`、概率和） |
+| `verify_iq.py` | `--manifest --data --rate --duration --seed --threads --json`；`--data` 给出后额外报验证集指标与 `per_snr` |
+| GUI「覆盖默认训练参数（高级）」 | 通道/核长/dropout/权重衰减/早停轮数；与 CLI 共用同一套校验（`services/training_jobs.py::iq_tuning_args`） |
+
+```bash
+# 训练 CNN/TCN 并导出 ONNX + 清单
+.venv/bin/python training/train_iq.py --data training/data/iq --arch cnn \
+    --epochs 30 --onnx-dir training/runs/iq
+# 验收：清单/图形状/确定性场景端到端/可复现/数据集独立验证
+.venv/bin/python training/verify_iq.py --manifest training/runs/iq/iq_manifest.json \
+    --data training/data/iq
+```
+
+### 4.5 推理入口（`amc-iq-classify`）
+
+```python
+amc_iq_classify(samples, sample_rate, config=None, model=None, runner=None, threads=None) -> dict
+```
+
+* `model`：IQ 清单路径（`contract = iq_waveform_v1`）；`runner`：已加载的会话（可注入、可复用）；
+* `config` 只接受 `offset_hz` / `bandwidth_hz`（缺省取清单声明的默认中心/带宽）——
+  窗口长度、通道排布、归一化与低通**全部由清单固定**，不给调用方静默改口径的机会。
+
+CLI：`signal-analysis amc-iq-classify <asset_id> --model <清单> [--offset-hz HZ] [--bandwidth-hz HZ] [--threads N]`。
+GUI：「调制识别」页加载验收通过的清单（历史 → 「加载验收通过的模型」），对选中资产推理；
+结果里的 `waveform` 段给出 `window_start` / `decimation` / `analysis_rate_hz`，
+可逐条核对"取的是哪一段"；`timing` 段给出 `preprocess_ms` / `inference_ms` / `total_ms`。
+
+### 4.6 结果契约 `amc_iq_classify_v1`（11 个键，**恰好**）
+
+| 键 | 类型 | 说明 |
+| --- | --- | --- |
+| `contract` | str | `"amc_iq_classify_v1"` |
+| `algorithm` | str | `amc_iq_onnx_v1:<模型 id>` |
+| `classes` / `class_set` / `labels` | list/dict | 清单声明的类别与中文标签；`class_set` 为 `a09` 或 `custom` |
+| `waveform` | dict | §2.1 的波形摘要（含 `snr_estimate_db`） |
+| `snr_estimate_db` | float / null | 带内信噪比粗估 |
+| `prediction` | dict | 见下 |
+| `model` | dict | 模型 id / 版本 / sha256 / 来源 |
+| `timing` | dict | `preprocess_ms` / `inference_ms` / `total_ms` |
+| `pending` | list[str] | 待确认项（见下） |
+
+**`prediction`**：`label` / `label_text` / `confidence` / `margin` / `scores`（各类概率）/
+`reliable` / `reason` / `snr_note`（固定声明"粗估、仅提示、不是验收口径"）。
+`reliable` 规则与特征通路共用：信噪比无法估计 → `True`；`snr < 5 dB` → `False`；
+`confidence < 0.5` → `False`；否则 `True`。
+
+**`pending`（必须原样出现）**：
+
+```
+"原始 IQ 通路的识别准确率合格门限尚未确认（技术方案待确认项）"
+"IQ 模型仅在本项目合成数据与转写数据上训练过，尚未用独立实采数据验证泛化"
+"同一分析频带内的多信号重叠会让 IQ 窗口混叠，需先由检测切分"
+```
+
+GUI、CLI、HTML 报表的每一个 IQ 分类结果都会带上这三条，**不允许在展示层丢掉**。
+
+---
+
+## 5. 实测（冒烟规模，**不是性能结论**）
 
 用 `--samples 512 --per-class 24` 生成的 180 条样本（144 训练 / 36 验证）、
 `--arch cnn --epochs 30` 实跑：
@@ -662,11 +410,15 @@ A09 六类是交付口径，而 IQ 通路允许把数据里真实存在的类别
 > 测试集合，准确率 0.9125 / 0.9000）见 **§8 项目实例**，那里把集合设计、
 > 取窗、训练配置、验收链路与复验步骤都摊开了。
 
-### 7.6 设计局限
+---
+
+## 6. 设计局限
 
 * **无实采验证**：训练与验证都用本项目生成器（理想信道 + AWGN + RRC 成形），
-  没有多径、频偏漂移、IQ 不平衡、非线性的实测数据，泛化性未知 [14]；
-* **概率未标定**：与 §6.6 / 文献 [21] 同样的问题，`reliable` 与 `confidence` 只是工程值；
+  没有多径、频偏漂移、IQ 不平衡、非线性的实测数据，泛化性未知 [3]；
+  所有冒烟数字都来自合成数据，测试与验收用的是**同一分布**，"生成器指纹"无法被排除；
+* **概率未标定**：`reliable` 与 `confidence` 只是工程值（与特征通路同一个未标定问题，
+  温度标定 / 保序回归见《传统特征与启发式判定》§7.3、§8.6）；
 * **类别字典不冻结的代价**：模型之间不可直接比较，需要靠 `class_set` + `labels` 追溯；
 * **尺度归一化依赖生成器假设**：分析率 = 8×占用带宽，只有在"符号率 ≈ 带宽/(1+α)"
   （单载波 + 根升余弦成形）时才等价于"每符号采样点数固定"（默认 ≈ 10.8）。
@@ -679,21 +431,29 @@ A09 六类是交付口径，而 IQ 通路允许把数据里真实存在的类别
 * **单窗口判决**：一次只看一个 $N$ 点窗口，没有跨窗口的时序融合（跳频、突发信号的时序结构
   被丢弃）。代价是实打实的——本次实例里每条 0.25–0.5 s 的录制只用了 0.2%–0.8%
   （居中 1024 点，约 1–2 ms、95 个符号），既浪费信息，又可能在分段/突发信号上取到无信号段；
+* **多信号重叠场景必须先由检测切分**：同一分析频带内的多信号重叠会让 IQ 窗口混叠，
+  模型没有任何机制处理它（`pending` 第 3 条原样提示）；
 * **没有不合格门限**：识别准确率的合格线仍为待确认项，结果里的 `pending` 原样提示，
   因此**不做通过/不通过判定**。
 
-### 7.7 可以改进的地方
+---
+
+## 7. 可以改进的地方
 
 按性价比排序：
 
 1. **数据增强（保标签）**：随机时移 + 随机相位 + 小频偏 + 重采样 + 噪声注入——
-   参考 [13]–[15] 的实测数据增强做法；
+   参考 [1][3][4] 的实测数据增强做法；
 2. **规模与 SNR 覆盖**：每类数千条、全 SNR 档位；低 SNR 可用课程学习（先高 SNR 后低 SNR）；
-3. **更强骨干**：ResNet 风格的残差一维卷积 [31]、CLDNN（CNN + LSTM + DNN）[15]，
-   或直接把时频图骨干迁移过来做双分支融合（波形 + 时频图），这是 RadioML 2018 之后的主流方向 [14]；
-4. **校准与拒识**：温度标定 [21][23] 后再谈阈值，并加上开集拒识（未知调制不应被强判成六类之一）；
-5. **实采验证**：这是**收益最大也最必须**的一步，没有它，任何提升都能被"生成器指纹"解释掉；
-6. **蒸馏回特征通路**：把 IQ 通路的知识蒸馏到 34 维判别器 [29]，在保持可解释性的前提下拿收益；
+3. **更强骨干**：ResNet 风格的残差一维卷积 [6]、CLDNN（CNN + LSTM + DNN）[4]，
+   或直接把时频图骨干迁移过来做双分支融合（波形 + 时频图），
+   这是 RadioML 2018 之后的主流方向 [3]；
+4. **校准与拒识**：温度标定（见《传统特征与启发式判定》§8.3）后再谈阈值，
+   并加上开集拒识（未知调制不应被强判成六类之一）；
+5. **实采验证**：这是**收益最大也最必须**的一步，没有它，
+   任何提升都能被"生成器指纹"解释掉；
+6. **蒸馏回特征通路**：把 IQ 通路的知识蒸馏到 34 维判别器 [10]，
+   在保持可解释性的前提下拿收益；
 7. **多窗口提取与跨窗融合**：快照按非重叠/半重叠切出 $K$ 个窗口（训练样本 $K$ 倍，
    底层录制一份都不用多存），推理侧对应地做概率平均或多数投票——这是把"每条录制
    只用 0.2%–0.8%"这一浪费收回来最直接的一步；
@@ -704,7 +464,7 @@ A09 六类是交付口径，而 IQ 通路允许把数据里真实存在的类别
 
 ## 8. 项目实例：一次 Raw-IQ AMC 的完整往返（2026-10-04）
 
-本节把 §7 的口径落到一次**可复现的实跑**上：三套信号集合（训练 / 验证 / 全新位置测试）
+本节把上述口径落到一次**可复现的实跑**上：三套信号集合（训练 / 验证 / 全新位置测试）
 → 训练 CNN → 独立验收 → 跨集合报告。集合、模型、运行目录都**保留在工作区**里，
 可按 §8.8 自行复验；下面所有数字都取自实测文件，不是估算。
 
@@ -716,7 +476,7 @@ A09 六类是交付口径，而 IQ 通路允许把数据里真实存在的类别
 | 验证集合 | `check-signal-test2`（400 条，独立采样、独立种子） |
 | 测试集合 | `signal-test`（400 条，**全新位置**：新种子、新时长区间，训练与验收都没看过） |
 | 判据 | 验证集与测试集整体准确率 **≥ 0.80** |
-| 模型 | `IQCNN`（§7.3 结构），6 类 `fm / ssb / ask2 / qpsk / qam16 / qam64` |
+| 模型 | `IQCNN`（§1.2 结构），6 类 `fm / ssb / ask2 / qpsk / qam16 / qam64` |
 | 结果 | `check-signal-test2` **0.9125**（宏平均 F1 0.911）；`signal-test` **0.9000**（宏平均 F1 0.897），验收十项检查 10/10 |
 
 ### 8.2 集合怎么设计（参数与理由）
@@ -828,7 +588,7 @@ flowchart LR
 **结论**：误差**全部**集中在 16QAM ↔ 64QAM 这一对——矩阵里 26 条 16QAM 被判成 64QAM、
 7 条反向，其余四类近乎完美；而且主要集中在 5–10 dB 档。这与物理一致：
 两者只差"幅度有几级"，低 SNR 下星座内圈/外圈本就难分。
-继续往上走应走 §7.7 的数据增强与更多低 SNR 样本，**不是**继续加大网络。
+继续往上走应走 §7 的数据增强与更多低 SNR 样本，**不是**继续加大网络。
 
 ### 8.7 这次实测暴露并修掉的问题
 
@@ -838,7 +598,7 @@ flowchart LR
 | 数字调制偶发"生成失败" | `_place_signals` 按**实际占用带宽**摆位，而真值校验用**标称带宽**，SPS 取整后两者不一致 | 摆位改为按名义带宽留保护带并回写真值（回归 3.6 万次摆位 0 失败） |
 | 页面上看不出走的是传统特征通路还是原始 IQ 通路 | 状态文本从不随模型切换刷新 | AMC 页新增状态指示器（通路名 · 模型 id@version · 结构），模型不可读时红字提示 |
 | CNN 超参只能改命令行 | 页面无入口 | 训练页新增「覆盖默认训练参数（高级）」，与 CLI 共用同一套校验 |
-| 14 GB 集合，训练只用了 34 MB | 一条录制只取一个窗口（§7.2） | 记录在案；改进方向见 §7.7 第 7、8 条 |
+| 14 GB 集合，训练只用了 34 MB | 一条录制只取一个窗口（§2.1） | 记录在案；改进方向见 §7 第 7、8 条 |
 
 ### 8.8 自己复验的步骤
 
@@ -856,63 +616,29 @@ flowchart LR
    （`--data` 给出后才额外报验证集指标），应复现"十项检查全通过 + 验证集准确率 0.9125"。
 
 > `workspace_data/` 不进版本库：集合与模型都在本机目录库里；重跑一遍生成与训练即可复现同名对象
-> （同种子同参数逐字节可复现，见 §7.4）。
+> （同种子同参数逐字节可复现，见 §4.2）。
 
 ---
 
 ## 9. 当前相关参考文献
 
-**表格数据上的 Transformer**
-
-1. Gorishniy, Y., Rubachev, I., Khrulkov, V., Babenko, A. *Revisiting deep learning models for tabular data (FT-Transformer).* NeurIPS, 2021. —— **本项目的直接依据**：每个数值特征一个标量词元 + CLS 词元。
-2. Vaswani, A. et al. *Attention is all you need.* NeurIPS, 2017. —— 编码器/多头注意力。
-3. Devlin, J., Chang, M.-W., Lee, K., Toutanova, K. *BERT.* NAACL, 2019. —— CLS 词元用法的来源。
-4. Dosovitskiy, A. et al. *An image is worth 16×16 words (ViT).* ICLR, 2021. —— 另一个"标量化 + Transformer"的范式参照。
-5. Xiong, R. et al. *On layer normalization in the transformer architecture (Pre-LN).* ICML, 2020. —— `norm_first=True` 的依据（训练更稳，可省 warmup）。
-6. Loshchilov, I., Hutter, F. *Decoupled weight decay regularization (AdamW).* ICLR, 2019.
-7. Loshchilov, I., Hutter, F. *SGDR: stochastic gradient descent with warm restarts.* ICLR, 2017. —— CosineAnnealingLR。
-8. Hendrycks, D., Gimpel, K. *Gaussian error linear units (GELUs).* arXiv:1606.08415, 2016.
-
-**表格数据上的经典/树模型对照**
-
-9. Grinsztajn, L., Oyallon, E., Varoquaux, G. *Why do tree-based models still outperform deep learning on typical tabular data?* NeurIPS Datasets & Benchmarks, 2022. —— **本项目必须引用**：它说明"在 34 维表格数据上，树模型常常优于深度模型"，这正是保留线性/树基线的方法论依据。
-10. Friedman, J. H. *Greedy function approximation: a gradient boosting machine.* Ann. Statist. **29**(5):1189–1232, 2001.
-11. Breiman, L. *Random forests.* Machine Learning **45**(1):5–32, 2001.
-12. Cortes, C., Vapnik, V. *Support-vector networks.* Machine Learning **20**(3):273–297, 1995.
-
 **无线电/调制识别领域的深度模型**
 
-13. O'Shea, T. J., Corgan, J., Clancy, T. C. *Convolutional radio modulation recognition networks.* EANN, 2016.
-14. O'Shea, T. J., Roy, T., Clancy, T. C. *Over-the-air deep learning based radio signal classification.* IEEE J. Sel. Topics Signal Process. **12**(1):168–179, 2018. —— RadioML 数据集与"深度模型 + 真实数据"的标杆。
-15. West, N. E., O'Shea, T. J. *Deep architectures for modulation recognition.* IEEE DySPAN, 2017.
-16. Rajendran, S., Meert, W., Giustiniano, D., Lenders, V., Pollin, S. *Deep learning models for wireless signal classification with distributed low-cost spectrum sensors.* IEEE Trans. Cogn. Commun. Netw. **4**(3):433–445, 2018.
-17. Dobre, O. A., Abdi, A., Bar-Ness, Y., Su, W. *Survey of automatic modulation classification techniques.* IET Communications **1**(2):137–156, 2007. —— 传统特征方法的综述（与本项目特征族的对照）。
-18. Swami, A., Sadler, B. M. *Hierarchical digital modulation classification using cumulants.* IEEE Trans. Commun. **48**(3):416–429, 2000. —— 34 维特征中累积量项的来源。
-19. TorchSig, MIT License 数据集生成库（**本仓库已作为可选补充数据源接入**，见 §7.4：
-    `training/build_torchsig.py` 把它转成本项目自描述的 `torchsig_bundle_v1`，
-    `ingest_torchsig.py` / `build_iq_dataset.py` 再转成检测/识别数据集；
-    它的产物只落本地目录，不随产品分发，训练侧也不依赖它）。
-20. DeepSig RadioML 2018.01A，**CC BY-NC-SA 4.0**——**不可商用、不可随产品分发**，本项目**未使用**。
+1. O'Shea, T. J., Corgan, J., Clancy, T. C. *Convolutional radio modulation recognition networks.* EANN, 2016. —— `IQCNN` 的直接依据。
+2. Bai, S., Kolter, J. Z., Koltun, V. *An empirical evaluation of generic convolutional and recurrent networks for sequence modeling.* arXiv:1803.01271, 2018. —— 膨胀因果卷积（`IQTCN` 的依据），并说明长序列上卷积常优于 RNN。
+3. O'Shea, T. J., Roy, T., Clancy, T. C. *Over-the-air deep learning based radio signal classification.* IEEE J. Sel. Topics Signal Process. **12**(1):168–179, 2018. —— RadioML 数据集与"深度模型 + 真实数据"的标杆。
+4. West, N. E., O'Shea, T. J. *Deep architectures for modulation recognition.* IEEE DySPAN, 2017.
+5. Rajendran, S., Meert, W., Giustiniano, D., Lenders, V., Pollin, S. *Deep learning models for wireless signal classification with distributed low-cost spectrum sensors.* IEEE Trans. Cogn. Commun. Netw. **4**(3):433–445, 2018.
+6. He, K., Zhang, X., Ren, S., Sun, J. *Deep residual learning for image recognition.* CVPR, 2016. —— 残差连接（`IQTCN` 残差块与"更强骨干"的依据）。
+7. Dobre, O. A., Abdi, A., Bar-Ness, Y., Su, W. *Survey of automatic modulation classification techniques: classical approaches and new trends.* IET Communications **1**(2):137–156, 2007. —— 传统特征方法的综述（与特征通路的对照）。
 
-**概率校准与可信度**
+**训练与部署**
 
-21. Guo, C., Pleiss, G., Sun, Y., Weinberger, K. Q. *On calibration of modern neural networks.* ICML, 2017. —— **Transformer 分支置信度未标定的直接依据**。
-22. Platt, J. *Probabilistic outputs for support vector machines and comparisons to regularized likelihood methods.* Advances in Large Margin Classifiers, 1999.
-23. Zadrozny, B., Elkan, C. *Transforming classifier scores into accurate multiclass probability estimates.* KDD, 2002. —— 面向多类的保序回归/温度标定。
+8. Loshchilov, I., Hutter, F. *Decoupled weight decay regularization (AdamW).* ICLR, 2019. —— `train_classifier` 的优化器。
+9. ONNX Runtime documentation, Microsoft, 2024. —— 会话、线程数、算子集。
+10. Hinton, G., Vinyals, O., Dean, J. *Distilling the knowledge in a neural network.* NeurIPS Workshop, 2015. —— 把 IQ 通路蒸馏回特征通路是后续可选项。
 
-**正则化与线性判别**
+**数据与工具链**
 
-24. Hoerl, A. E., Kennard, R. W. *Ridge regression: biased estimation for nonorthogonal problems.* Technometrics **12**(1):55–67, 1970. —— 岭回归原始文献。
-25. Hastie, T., Tibshirani, R., Friedman, J. *The Elements of Statistical Learning.* 2nd ed., Springer, 2009. —— 岭回归与 LDA 的系统论述。
-26. Guyon, I., Elisseeff, A. *An introduction to variable and feature selection.* JMLR **3**:1157–1182, 2003.
-
-**部署与运行时**
-
-27. ONNX Runtime documentation, Microsoft, 2024. —— 会话、线程数、算子集。
-28. Jacob, B. et al. *Quantization and training of neural networks for efficient integer-arithmetic-only inference.* CVPR, 2018. —— INT8 量化部署。
-29. Hinton, G., Vinyals, O., Dean, J. *Distilling the knowledge in a neural network.* NeurIPS Workshop, 2015. —— 把 Transformer 蒸馏回线性模型是后续可选项。
-
-**原始 IQ 通路的额外依据（§7）**
-
-30. Bai, S., Kolter, J. Z., Koltun, V. *An empirical evaluation of generic convolutional and recurrent networks for sequence modeling.* arXiv:1803.01271, 2018. —— 膨胀因果卷积（`IQTCN` 的依据），并说明长序列上卷积常优于 RNN。
-31. He, K., Zhang, X., Ren, S., Sun, J. *Deep residual learning for image recognition.* CVPR, 2016. —— 残差连接（`IQTCN` 残差块与"更强骨干"的依据）。
+11. TorchSig, MIT License 数据集生成库（**本仓库已作为可选补充数据源接入**：`training/build_torchsig.py` 把它转成本项目自描述的 `torchsig_bundle_v1`，`ingest_torchsig.py` / `build_iq_dataset.py` 再转成检测/识别数据集；它的产物只落本地目录，不随产品分发，训练侧也不依赖它）。
+12. DeepSig RadioML 2018.01A，**CC BY-NC-SA 4.0**——**不可商用、不可随产品分发**，本项目**未使用**。
