@@ -24,6 +24,7 @@ from ..dialogs import SignalParamsDialog
 from ..helpers import (_AMC_SOURCE_TEXT, _asset_format, _comparison_line,
                        _fmt_hz, _fmt_metric, _fmt_span, _mirrored_spectrum)
 from ..runner import _run_task
+from ..model_picker import ModelPicker
 from ..widgets import UnitSpinBox, _freq_spin, _plain_spin, _unit_row
 
 
@@ -111,13 +112,16 @@ class DetectPageMixin:
         layout.addLayout(bar)
         ai_bar = QtWidgets.QHBoxLayout()
         ai_bar.addWidget(QtWidgets.QLabel("AI 模型清单"))
-        self.ml_manifest = QtWidgets.QLineEdit()
-        self.ml_manifest.setPlaceholderText("选择 ml-manifest 生成的 JSON（含 ONNX 相对路径与 SHA-256）")
-        self.ml_manifest.setToolTip("清单声明输入图像尺寸、STFT 点数与动态范围；推理时与清单不一致会直接报错")
-        ai_bar.addWidget(self.ml_manifest, 1)
-        self.ml_choose = QtWidgets.QPushButton("选择…")
-        self.ml_choose.clicked.connect(self.choose_ml_manifest)
-        ai_bar.addWidget(self.ml_choose)
+        # 清单路径是各推理入口的唯一数据源，但界面不再重复放输入框与“选择…”按钮：
+        # 路径由模型下拉（含“浏览本地文件…”）写入，这里只留存一个隐藏载体。
+        self.ml_manifest = QtWidgets.QLineEdit(self)
+        self.ml_manifest.hide()
+        self.ml_picker = ModelPicker(
+            self.ml_manifest, "detect", self, browse=self.choose_ml_manifest,
+            hint="清单声明输入图像尺寸、STFT 点数与动态范围，推理时与清单不一致会直接报错。"
+                 "不指定模型时「检测所选数据」走传统能量检测；AI 检测需要先选模型。")
+        self.register_model_picker(self.ml_picker)
+        ai_bar.addWidget(self.ml_picker, 1)
         ai_bar.addWidget(QtWidgets.QLabel("置信度阈值"))
         self.ml_score = QtWidgets.QDoubleSpinBox()
         self.ml_score.setRange(0.01, 0.99)
@@ -206,8 +210,8 @@ class DetectPageMixin:
 
         version = runtime_version()
         ready = version is not None
-        for name in ("ml_button", "ml_choose", "ml_score", "ml_iou", "ml_compare",
-                     "hops_ml_button", "hops_ml_choose", "hops_ml_traditional"):
+        for name in ("ml_button", "ml_picker", "ml_score", "ml_iou", "ml_compare",
+                     "hops_ml_button", "hops_picker", "hops_ml_traditional"):
             widget = getattr(self, name, None)
             if widget is not None:
                 widget.setEnabled(ready)

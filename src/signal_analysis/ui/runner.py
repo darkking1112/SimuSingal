@@ -19,7 +19,7 @@ def _budgets(action):
     if action in ("generate_collection", "torchsig_import",
                   "torchsig_probe", "import_files", "import_inspect"):
         return 3600.0, 120.0
-    if action in ("storage_report", "storage_cleanup", "migrate_legacy"):
+    if action in ("storage_report", "storage_cleanup"):
         return 300.0, 0.0
     return 30.0, 0.0
 

@@ -145,12 +145,6 @@ def main(argv=None):
     iq_manifest.add_argument("--dataset", help="训练数据来源与许可证说明")
     iq_manifest.add_argument("--notes", default="")
     commands.add_parser("list", help="列出最近数据")
-    migrate = commands.add_parser("migrate-legacy",
-                                  help="登记历史标注数据集与实验目录（幂等，可重复执行）")
-    migrate.add_argument("--datasets-dir", action="append",
-                         help="旧数据集目录，可重复；默认扫描工作区 datasets/")
-    migrate.add_argument("--experiments-dir",
-                         help="旧实验 runs 目录；默认工作区 training/runs")
     export = commands.add_parser("export", help="导出 JSON/HTML 报告")
     export.add_argument("run_id")
     export.add_argument("path")
@@ -321,9 +315,6 @@ def main(argv=None):
                 request["config"] = config
             elif args.command == "native":
                 request.update(asset_id=args.asset_id, manifest=args.manifest)
-            elif args.command == "migrate-legacy":
-                request["folders"] = args.datasets_dir
-                request["experiments"] = args.experiments_dir
             result = run_job(request)
         print(json.dumps(result, ensure_ascii=False, allow_nan=False, indent=2))
         return 0

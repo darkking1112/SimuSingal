@@ -2,7 +2,7 @@
 
 任务模型（2026-10）：每个后台任务都有独立标识、归属页面（``owner``，如“信号导入”）、
 取消事件与进度。同一 owner 同一时刻只允许一个任务；不同 owner 允许并发。
-``storage_cleanup`` 与 ``migrate_legacy`` 是独占动作，与任何运行中任务互斥。
+``storage_cleanup`` 是独占动作，与任何运行中任务互斥。
 窗口底部只保留状态文字与“正在运行 N 个任务”汇总；单个任务自己的进度与取消
 由发起页面内的 ``TaskBanner`` 提供（页面用 ``register_task_banner`` 注册）。
 
@@ -20,8 +20,8 @@ import pyqtgraph as pg
 
 from .reports import export_report
 
-#: 独占动作：与任何运行中任务互斥（清理会删除文件、迁移会批量改库）。
-EXCLUSIVE_ACTIONS = frozenset({"storage_cleanup", "migrate_legacy"})
+#: 独占动作：与任何运行中任务互斥（清理会删除文件）。
+EXCLUSIVE_ACTIONS = frozenset({"storage_cleanup"})
 
 
 class UiTask:

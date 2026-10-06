@@ -99,4 +99,8 @@ def test_native_failures_are_isolated(tmp_path, behavior, expected):
     assert caught.value.code == expected
     assert store.list_runs() == []
     # A fresh job remains usable after the previous worker failed.
-    assert run_job(_generate_request(store.root, 16))["sample_count"] == 16
+    fresh = run_job(_generate_request(store.root, 16))
+    assert fresh["kind"] == "generate"
+    assert fresh["summary"]["sample_count"] == 16
+    _, samples = store.load_samples(fresh["id"])
+    assert len(samples) == 16

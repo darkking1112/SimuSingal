@@ -119,7 +119,7 @@ def test_training_pages_use_collections_without_generation_or_exports(tmp_path):
         assert set(page.configuration()) == {
             "repository", "python", "task", "arch", "workspace", "train_collection_id",
             "val_collection_id", "weights", "framework_path", "framework_config",
-            "device", "epochs", "batch", "lr", "seed", "image_size", "nfft"}
+            "device", "epochs", "batch", "lr", "seed", "image_size", "nfft", "model_name"}
         assert amc_page.sections.tabText(0) == "信号标注"
 
         workspace = window.workspace

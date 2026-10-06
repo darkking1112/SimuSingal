@@ -1,5 +1,4 @@
 """信号集合侧栏与数据管理子页的离屏 GUI 测试（方案文档 §7.3、§7.5）。"""
-import json
 import os
 import time
 
@@ -209,7 +208,7 @@ def test_collections_panel_add_remove_archive(tmp_path, monkeypatch):
         window.remove_selected_asset_from_collection()
         assert window.workspace.count_assets(collection_id=collection_id) == 0
         assert window.workspace.count_assets() == 1
-        # 归档需要确认；确认后集合不再出现在面板与下拉中
+        # 归档需要确认；确认后集合不再出现在面板与下拉中，成员关系保留
         window.add_selected_asset_to_collection()
         monkeypatch.setattr(
             QtWidgets.QMessageBox, "question",
@@ -220,34 +219,58 @@ def test_collections_panel_add_remove_archive(tmp_path, monkeypatch):
         assert window.workspace.list_collections() == []
         assert window.collection_combo.findData(collection_id) == -1
         assert "已归档" in window.status.text()
+        # 勾选“显示已归档”后可选中并恢复，集合重新出现在面板与下拉中
+        assert window.workspace.count_assets(collection_id=collection_id) == 1
+        window.collection_show_archived.setChecked(True)
+        assert window.collection_panel.count() == 1
+        assert "已归档" in window.collection_panel.item(0).text()
+        window.collection_panel.setCurrentRow(0)
+        assert window.restore_collection_button.isEnabled()
+        assert not window.archive_collection_button.isEnabled()
+        window.restore_selected_collection()
+        assert "已恢复" in window.status.text()
+        assert window.workspace.get_collection(collection_id)["archived_at"] is None
+        assert window.collection_combo.findData(collection_id) >= 0
+        window.collection_show_archived.setChecked(False)
+        assert window.collection_panel.count() == 1
     finally:
         window.close()
 
 
 @pytest.mark.gui
-def test_migrate_legacy_button(tmp_path):
+def test_collections_panel_diversity(tmp_path):
+    """多样性分析：切换维度重画柱形图，并给出取值数与归一化多样性。"""
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = MainWindow(tmp_path)
     window.show()
     try:
-        legacy = window.workspace.root / "datasets" / "old"
-        (legacy / "images").mkdir(parents=True)
-        card = {"sample_count": 0, "splits": {}, "contract": {
-            "input_contract": "tf_image_v1", "layout": "time_frequency_grayscale_v1",
-            "output_layout": "normalized_boxes_v1", "image_size": 128, "channels": 1,
-            "spectrogram_nfft": 256, "dynamic_range_db": 60.0, "labels": ["emitter"],
-            "label_semantics": "session_v1"}}
-        (legacy / "dataset.json").write_text(json.dumps(card, ensure_ascii=False),
-                                             encoding="utf-8")
-        (legacy / "samples.jsonl").write_text("", encoding="utf-8")
-        window.migrate_button.click()
-        wait_job(app, window)
-        assert "历史数据登记完成" in window.status.text()
-        assert window.collection_panel.count() == 1
-        assert "旧标注" in window.collection_detail.toPlainText()
-        # 幂等：再次点击不新增集合
-        window.migrate_button.click()
-        wait_job(app, window)
-        assert window.collection_panel.count() == 1
+        collection = window.workspace.create_collection("多样集合")
+        for index, (mode, snr) in enumerate((("fm", 5.0), ("qpsk", 20.0), ("qpsk", 30.0))):
+            samples, summary = generate_iq(
+                200_000.0, 0.02,
+                [{"mode": mode, "offset": 0.0, "bandwidth": 40_000.0, "power_dbfs": -6.0}],
+                {"enabled": True, "snr_db": snr}, index)
+            asset = window.workspace.add_samples(samples, 200_000.0, f"多样{index}",
+                                                 f"generated:iq_{mode}_v1",
+                                                 metadata={"generation": summary})
+            window.workspace.add_collection_member(collection["id"], asset["id"])
+        window.refresh_collections_panel()
+        window.collection_panel.setCurrentRow(0)
+        assert window.diversity_axis.count() == len(window._DIVERSITY_AXES)
+        window.diversity_axis.setCurrentIndex(0)  # 信号样式
+        assert "取值数 2" in window.diversity_summary.text()
+        assert "综合多样性" in window.diversity_summary.text()
+        assert len(window.diversity_chart.listDataItems()) >= 1
+        # 切到 SNR：数值轴按分箱顺序画图，指标随之刷新
+        window.diversity_axis.setCurrentIndex(2)
+        assert "取值数" in window.diversity_summary.text()
+        assert len(window.diversity_chart.listDataItems()) >= 1
+        # 换成没有目标的集合，给出明确提示而不是空白
+        empty = window.workspace.create_collection("空集合")
+        window.refresh_collections_panel()
+        for row in range(window.collection_panel.count()):
+            if window.collection_panel.item(row).data(0x0100) == empty["id"]:
+                window.collection_panel.setCurrentRow(row)
+        assert "没有可统计的目标" in window.diversity_summary.text()
     finally:
         window.close()

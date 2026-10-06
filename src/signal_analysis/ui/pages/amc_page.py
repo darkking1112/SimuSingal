@@ -24,6 +24,7 @@ from ..dialogs import SignalParamsDialog
 from ..helpers import (_AMC_SOURCE_TEXT, _asset_format, _comparison_line,
                        _fmt_hz, _fmt_metric, _fmt_span, _mirrored_spectrum)
 from ..runner import _run_task
+from ..model_picker import ModelPicker
 from ..widgets import UnitSpinBox, _freq_spin, _plain_spin, _unit_row
 
 
@@ -85,14 +86,16 @@ class AmcPageMixin:
         layout.addLayout(bar)
         model_bar = QtWidgets.QHBoxLayout()
         model_bar.addWidget(QtWidgets.QLabel("识别模型"))
-        self.amc_model = QtWidgets.QLineEdit()
-        self.amc_model.setPlaceholderText("留空使用内置线性基线；也可选择自训练模型 JSON 或 ONNX 清单")
-        self.amc_model.setToolTip("模型 JSON 为 amc_model_v1；ONNX 清单为 amc-manifest（特征通路）或"
-                                  "amc-iq-manifest（原始 IQ 通路）生成的 JSON，本页按清单契约自动分流")
-        model_bar.addWidget(self.amc_model, 1)
-        self.amc_choose = QtWidgets.QPushButton("选择…")
-        self.amc_choose.clicked.connect(self.choose_amc_model)
-        model_bar.addWidget(self.amc_choose)
+        # 路径由模型下拉写入，界面不再重复放输入框与“选择…”按钮（见 detect_page 同款说明）
+        self.amc_model = QtWidgets.QLineEdit(self)
+        self.amc_model.hide()
+        self.amc_picker = ModelPicker(
+            self.amc_model, "amc", self, browse=self.choose_amc_model,
+            hint="模型 JSON 为 amc_model_v1；ONNX 清单为 amc-manifest（特征通路）或"
+                 "amc-iq-manifest（原始 IQ 通路）生成的 JSON，本页按清单契约自动分流。"
+                 "不指定模型时使用随包分发的内置线性基线（amc-linear-default）。")
+        self.register_model_picker(self.amc_picker)
+        model_bar.addWidget(self.amc_picker, 1)
         model_bar.addWidget(self.amc_button)  # 紧邻模型选择：选完模型即可点它开始识别
         self.amc_model_status = QtWidgets.QLabel()
         model_bar.addWidget(self.amc_model_status)

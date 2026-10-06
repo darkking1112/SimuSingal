@@ -198,3 +198,41 @@ def test_collection_summary_axis_stats_and_targets(tmp_path):
     assert targets[0]["target_key"] == "s0"
     assert targets[0]["current"]["source"] == "generator"
     assert "asset_name" in targets[0]
+
+
+def test_collection_diversity_metrics(tmp_path):
+    """多样性：归一化熵、最高占比、未知占比与“组合变体”按预期取值。"""
+    workspace = Workspace(tmp_path / "ws")
+    collection = workspace.create_collection("多样集", source_kind="generated")
+    for seed, (mode, snr) in enumerate((("fm", 5.0), ("qpsk", 12.0), ("qpsk", 25.0))):
+        samples, summary = generate_iq(
+            200_000.0, 0.05,
+            [{"mode": mode, "offset": 0.0, "bandwidth": 50_000.0, "power_dbfs": -6.0}],
+            {"enabled": True, "snr_db": snr}, seed)
+        asset = workspace.add_samples(samples, 200_000.0, f"多样{seed}",
+                                      f"generated:iq_{mode}_v1",
+                                      metadata={"generation": summary})
+        workspace.add_collection_member(collection["id"], asset["id"])
+    report = workspace.collection_diversity(collection["id"])
+    assert report["overall"]["targets"] == 3
+    waveform = report["axes"]["waveform_mode"]
+    # 取值数 2（fm/qpsk），分布 1:2 → 归一化熵 H/log2 ≈ 0.918
+    assert waveform["distinct"] == 2
+    assert waveform["top_share"] == pytest.approx(2 / 3)
+    assert waveform["diversity"] == pytest.approx(0.9183, abs=1e-3)
+    assert waveform["unknown_share"] == 0.0
+    assert waveform["items"][0] == ("qpsk", 2)  # 枚举轴保持数量降序
+    # SNR 是数值轴：按分箱顺序返回，三个目标各落一箱 → 完全均匀，归一化熵为 1
+    snr = report["axes"]["snr_db"]
+    assert snr["distinct"] == 3 and snr["diversity"] == pytest.approx(1.0)
+    assert sum(count for _, count in snr["items"]) == 3
+    # 组合变体（样式 | 调制 | 跳频）去重：fm|FM|0 与 qpsk|QPSK|0 共 2 种
+    assert report["overall"]["effective_axes"] >= 2
+    assert report["overall"]["combination_variants"] == 2
+    assert report["overall"]["combination_share"] == pytest.approx(2 / 3)
+    # 空集合：没有目标时各维度为空，不抛异常、不除零
+    empty = workspace.create_collection("空多样集")
+    blank = workspace.collection_diversity(empty["id"])
+    assert blank["overall"]["targets"] == 0
+    assert blank["overall"]["diversity"] == 0.0
+    assert blank["axes"]["modulation"]["items"] == []

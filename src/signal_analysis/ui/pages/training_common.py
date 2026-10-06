@@ -169,6 +169,13 @@ class TrainingPageBase(QtWidgets.QWidget):
         self.arch = QtWidgets.QComboBox()
         self.arch.addItems(self.model_options())
         form.addRow("模型", self.arch)
+        self.model_name = QtWidgets.QLineEdit()
+        self.model_name.setPlaceholderText("留空自动命名：<模型类型>-<训练用途>-<时间>")
+        self.model_name.setToolTip(
+            "留空按默认规则命名：<模型类型>-<训练用途>-<UTC 时间>，例如 "
+            "cnn-amc-20261006T105213。填写则作为模型库中的名称，重名会在开始训练前被拦下；"
+            "训练成功后就可在“数据管理 → 模型管理”查看、重命名或删除。")
+        form.addRow("模型名称（留空=自动）", self.model_name)
         self.train_collection = QtWidgets.QComboBox()
         self.train_collection.setToolTip("训练集：集合内已标注的信号就是本次训练的输入")
         self.val_collection = QtWidgets.QComboBox()
@@ -292,6 +299,7 @@ class TrainingPageBase(QtWidgets.QWidget):
             "batch": self.batch.value(),
             "lr": self.lr.value(),
             "seed": self.seed.value(),
+            "model_name": self.model_name.text().strip(),
         }
 
     def refresh_collections(self):
@@ -441,7 +449,18 @@ class TrainingPageBase(QtWidgets.QWidget):
         self.inputs_plan = inputs_plan(self.window.workspace,
                                        "amc" if self.TASK == "iq" else "detection",
                                        train_id, val_id)
+        self.validate_model_name(config)
         self.validate_task_config(config)
+
+    def validate_model_name(self, config):
+        """手动命名在开始训练前先校验：名称合法且未占用，避免训练完才失败。"""
+        name = str(config.get("model_name") or "").strip()
+        if not name:
+            return
+        from ...services import model_store
+        checked = model_store.validate_name(name)
+        if (model_store.models_root(self.window.workspace.root) / checked).exists():
+            raise ValueError(f"模型名称已存在：{checked}，请换一个名称或留空自动命名")
 
     def validate_task_config(self, config):
         pass
@@ -478,8 +497,25 @@ class TrainingPageBase(QtWidgets.QWidget):
     def _on_run_finished(self, record):
         self.progress.setRange(0, 1)
         self.progress.setValue(int(record.get("status") == "success"))
+        if record.get("status") == "success":
+            self.publish_model(record)
         if record.get("id"):
             self.refresh_history(select_id=record["id"])
+
+    def publish_model(self, record):
+        """训练成功后把模型登记进模型库，使命名、下拉与模型管理页立即可用。"""
+        from ...services import model_store
+        directory = self.root / "runs" / str(record.get("id") or "")
+        config = record.get("config") if isinstance(record.get("config"), dict) else {}
+        try:
+            entry = model_store.publish_from_run(
+                self.window.workspace.root, directory,
+                name=str(config.get("model_name") or "").strip() or None, record=record)
+        except (model_store.ModelError, OSError, ValueError) as exc:
+            self.log.appendPlainText(f"模型入库失败：{exc}")
+            return
+        self.log.appendPlainText(f"模型已入库：{entry['name']}（数据管理 → 模型管理）")
+        self.window.refresh_model_choices()
         self.refresh_controls()
 
     def refresh_history(self, *_args, select_id=None):

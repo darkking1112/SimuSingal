@@ -1,5 +1,4 @@
 """数据管理页（mixin）：容量盘点、一致性检查、安全清理与“信号集合”子页。"""
-import json
 import time
 from pathlib import Path
 
@@ -25,19 +24,10 @@ from ..runner import _run_task
 
 class DataPageMixin:
     # ------------------------------------------------------------ 数据管理页
-    _STORAGE_HEAD = (
-        "<!doctype html><html lang='zh'><head><meta charset='utf-8'>"
-        "<title>数据盘点报告</title><style>"
-        "body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;color:#23374d;"
-        "background:#f3f6fa;margin:0;padding:28px 34px;}"
-        "h1{font-size:22px;color:#183c65;margin:0 0 4px;}"
-        "h2{font-size:16px;color:#183c65;margin:26px 0 8px;}"
-        "p{margin:4px 0;font-size:13px;}"
-        "table{border-collapse:collapse;background:white;font-size:13px;margin-top:6px;}"
-        "th,td{border:1px solid #d8e1ec;padding:5px 10px;text-align:left;}"
-        "th{background:#e4edf8;} ul{margin:6px 0;font-size:13px;}"
-        "</style></head><body>"
-    )
+    #: 集合多样性分析维度：(统计轴, 显示标题)；轴名与 ``target_axis_stats`` 一致。
+    _DIVERSITY_AXES = (("waveform_mode", "信号样式"), ("modulation", "调制"),
+                       ("snr_db", "SNR"), ("is_hopping", "跳频"),
+                       ("bandwidth_hz", "带宽"), ("symbol_rate_baud", "符号率"))
 
     @staticmethod
     def _make_table(headers, editable=False):
@@ -74,9 +64,8 @@ class DataPageMixin:
         return text[:19].replace("T", " ") if text else "--"
 
     def build_data_management(self):
-        """数据管理页：盘点工作区占用、核对索引一致性，并给出可安全清理的条目。"""
+        """数据管理页：盘点当前工作目录占用、核对索引一致性，并给出可安全清理的条目。"""
         settings = read_settings(self.workspace)
-        self._extra_dirs = list(settings["extra_dirs"])
         self._storage_report = None
         self._cleanup_ready = False
         self._pending_preview = False
@@ -84,11 +73,12 @@ class DataPageMixin:
         box = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(box)
         intro = QtWidgets.QLabel(
-            "把 IQ 生成、检测、分析、调制识别与训练相关的结果统一盘点：按目录统计占用，核对索引与磁盘"
-            "是否一致（未入库文件、缺失文件、孤儿运行目录、源资产已删除的运行记录），并列出可安全清理的"
-            "条目。清理只覆盖“已结束且超过保留天数”的任务工件与无主文件；已入库的信号资产与运行目录"
-            "永远不在可删范围内。扫描与导出本身是只读的，不会写入运行记录。额外目录（如 training/data、"
-            "training/runs 或模型目录）只参与容量统计，不做索引一致性检查。"
+            "把 IQ 生成、检测、分析、调制识别与训练相关的结果统一盘点：统计当前工作目录"
+            "（workspace_data）的占用，核对索引与磁盘是否一致（未入库文件、缺失文件、孤儿运行目录、"
+            "源资产已删除的运行记录），并列出可安全清理的条目；同时在“信号集合”子页维护集合成员、"
+            "查看标注进度与多样性，在“模型管理”子页查看训练产出的模型（训练时间、大小与参数）"
+            "并重命名或删除。清理只覆盖“已结束且超过保留天数”的任务工件与无主文件；"
+            "已入库的信号资产与运行目录永远不在可删范围内。扫描本身是只读的，不会写入运行记录。"
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -101,30 +91,13 @@ class DataPageMixin:
         bar = QtWidgets.QHBoxLayout()
         self.storage_scan_button = QtWidgets.QPushButton("扫描 / 刷新")
         self.storage_scan_button.setObjectName("primary")
-        self.storage_scan_button.setToolTip("重新统计工作区与额外目录的占用（只读）")
+        self.storage_scan_button.setToolTip("重新统计当前工作目录的占用（只读）")
         self.storage_scan_button.clicked.connect(lambda: self.scan_storage())
         bar.addWidget(self.storage_scan_button)
         self.storage_open_button = QtWidgets.QPushButton("打开工作目录")
-        self.storage_open_button.setToolTip("用系统文件管理器打开工作区目录")
+        self.storage_open_button.setToolTip("用系统文件管理器打开当前工作区目录")
         self.storage_open_button.clicked.connect(self.open_workspace_folder)
         bar.addWidget(self.storage_open_button)
-        self.storage_export_button = QtWidgets.QPushButton("导出报告")
-        self.storage_export_button.setToolTip("把本次盘点写成 HTML 或 JSON 快照（不写入运行记录）")
-        self.storage_export_button.clicked.connect(self.export_storage_report)
-        bar.addWidget(self.storage_export_button)
-        bar.addSpacing(18)
-        bar.addWidget(QtWidgets.QLabel("额外目录"))
-        self.storage_extra_combo = QtWidgets.QComboBox()
-        self.storage_extra_combo.setMinimumWidth(240)
-        self.storage_extra_combo.currentIndexChanged.connect(lambda _: self._sync_extra_buttons())
-        bar.addWidget(self.storage_extra_combo, 2)
-        self.storage_extra_add = QtWidgets.QPushButton("添加目录…")
-        self.storage_extra_add.setToolTip("选择要纳入容量统计的目录（建议 training/data、training/runs）")
-        self.storage_extra_add.clicked.connect(self.add_extra_dir)
-        bar.addWidget(self.storage_extra_add)
-        self.storage_extra_remove = QtWidgets.QPushButton("移除")
-        self.storage_extra_remove.clicked.connect(self.remove_extra_dir)
-        bar.addWidget(self.storage_extra_remove)
         bar.addStretch(1)
         layout.addLayout(bar)
 
@@ -166,8 +139,6 @@ class DataPageMixin:
         splitter.addWidget(self.storage_chart)
 
         self.storage_tables = QtWidgets.QTabWidget()
-        self.storage_asset_table = self._make_table(
-            ["名称", "采样点", "采样率 Hz", "占用", "来源", "创建时间", "样本文件"])
         self.storage_run_table = self._make_table(
             ["类型", "占用", "索引冗余", "创建时间", "源资产", "结果文件"])
         self.storage_job_table = self._make_table(
@@ -176,24 +147,23 @@ class DataPageMixin:
         self.storage_cleanup_table = self._make_table(
             ["选择", "类别", "路径", "占用", "判定依据"], editable=True)
         self.storage_cleanup_table.itemChanged.connect(lambda _: self._sync_cleanup_button())
-        for widget, title in ((self.storage_asset_table, "信号资产"),
-                              (self.storage_run_table, "运行记录"),
+        self.storage_tables.addTab(self._build_collections_tab(), "信号集合")
+        self.storage_tables.addTab(self._build_models_tab(), "模型管理")
+        for widget, title in ((self.storage_run_table, "运行记录"),
                               (self.storage_job_table, "任务工件"),
                               (self.storage_issue_table, "一致性"),
                               (self.storage_cleanup_table, "可清理项")):
             self.storage_tables.addTab(widget, title)
-        self.storage_tables.addTab(self._build_collections_tab(), "信号集合")
         splitter.addWidget(self.storage_tables)
         splitter.setSizes([170, 640])
         layout.addWidget(splitter, 1)
 
-        self._reload_extra_combo()
         self.refresh_collections_panel()
         return box
 
     # ------------------------------------------------------------- 信号集合子页
     def _build_collections_tab(self):
-        """数据管理页的“信号集合”子页：成员增删、标注进度与参数统计。"""
+        """数据管理页的“信号集合”子页：成员增删、标注进度与多样性分析。"""
         box = QtWidgets.QWidget()
         layout = QtWidgets.QHBoxLayout(box)
         left = QtWidgets.QVBoxLayout()
@@ -210,35 +180,68 @@ class DataPageMixin:
                  self.remove_selected_asset_from_collection,
                  "只删除成员关系；资产、标注与数据版本不受影响"),
                 ("archive_collection_button", "归档集合", self.archive_selected_collection,
-                 "归档后集合不再出现在选择器中，成员关系保留"),
-                ("migrate_button", "登记历史数据…", self.migrate_legacy,
-                 "扫描工作区 datasets/ 与 training/runs/，把旧标注数据集与实验登记进索引（幂等）")):
+                 "归档后集合不再出现在选择器中，成员关系保留，可随时恢复"),
+                ("restore_collection_button", "恢复集合", self.restore_selected_collection,
+                 "把选中的已归档集合恢复为正常状态")):
             button = QtWidgets.QPushButton(text)
             button.setToolTip(tip)
             button.clicked.connect(callback)
             setattr(self, name, button)
             buttons.addWidget(button)
         left.addLayout(buttons)
+        self.collection_show_archived = QtWidgets.QCheckBox("显示已归档")
+        self.collection_show_archived.setToolTip("勾选后在列表里一并列出已归档集合，便于恢复")
+        self.collection_show_archived.toggled.connect(
+            lambda _: self.refresh_collections_panel())
+        left.addWidget(self.collection_show_archived)
         hint = QtWidgets.QLabel("集合成员来自左侧“数据资产”的当前选择；同一资产可属于多个集合，"
-                                "标注挂在目标上、全集合共享同一份当前标签。")
+                                "标注挂在目标上、全集合共享同一份当前标签。归档集合可随时恢复。")
         hint.setWordWrap(True)
         left.addWidget(hint)
         layout.addLayout(left, 2)
+        right = QtWidgets.QVBoxLayout()
         self.collection_detail = QtWidgets.QPlainTextEdit()
         self.collection_detail.setReadOnly(True)
         self.collection_detail.setPlaceholderText("选择集合后显示概览")
-        layout.addWidget(self.collection_detail, 3)
+        right.addWidget(self.collection_detail, 3)
+        diversity = QtWidgets.QGroupBox("多样性分析")
+        diversity_layout = QtWidgets.QVBoxLayout(diversity)
+        picker = QtWidgets.QHBoxLayout()
+        picker.addWidget(QtWidgets.QLabel("维度"))
+        self.diversity_axis = QtWidgets.QComboBox()
+        for axis, title in self._DIVERSITY_AXES:
+            self.diversity_axis.addItem(title, axis)
+        self.diversity_axis.currentIndexChanged.connect(lambda _: self._render_diversity())
+        picker.addWidget(self.diversity_axis, 1)
+        diversity_layout.addLayout(picker)
+        self.diversity_chart = pg.PlotWidget()
+        self.diversity_chart.setBackground("#ffffff")
+        self.diversity_chart.setMinimumHeight(150)
+        self.diversity_chart.setLabel("left", "目标数")
+        self.diversity_chart.showGrid(x=False, y=True, alpha=.15)
+        self.diversity_chart.setMenuEnabled(False)
+        diversity_layout.addWidget(self.diversity_chart)
+        self.diversity_summary = QtWidgets.QLabel("选择集合后显示多样性指标。")
+        self.diversity_summary.setWordWrap(True)
+        diversity_layout.addWidget(self.diversity_summary)
+        right.addWidget(diversity, 2)
+        layout.addLayout(right, 3)
         return box
 
     def refresh_collections_panel(self, *_):
         current = self.collection_panel.currentItem()
         keep = current.data(QtCore.Qt.ItemDataRole.UserRole) if current else None
+        show_archived = bool(getattr(self, "collection_show_archived", None)
+                             and self.collection_show_archived.isChecked())
         self.collection_panel.clear()
         selected_row = -1
-        for index, collection in enumerate(self.workspace.list_collections()):
-            item = QtWidgets.QListWidgetItem(
-                f"{collection['name']} · {collection['asset_count']} 个资产 · "
-                f"{_SOURCE_KIND_LABELS.get(collection['source_kind'], collection['source_kind'])}")
+        for index, collection in enumerate(
+                self.workspace.list_collections(include_archived=show_archived)):
+            text = (f"{collection['name']} · {collection['asset_count']} 个资产 · "
+                    f"{_SOURCE_KIND_LABELS.get(collection['source_kind'], collection['source_kind'])}")
+            if collection.get("archived_at"):
+                text += " · 已归档"
+            item = QtWidgets.QListWidgetItem(text)
             item.setData(QtCore.Qt.ItemDataRole.UserRole, collection["id"])
             self.collection_panel.addItem(item)
             if collection["id"] == keep:
@@ -254,15 +257,25 @@ class DataPageMixin:
         item = self.collection_panel.currentItem()
         return item.data(QtCore.Qt.ItemDataRole.UserRole) if item else None
 
+    def _sync_collection_buttons(self):
+        collection_id = self._selected_collection_id()
+        archived = bool(collection_id
+                        and self.workspace.get_collection(collection_id).get("archived_at"))
+        self.archive_collection_button.setEnabled(bool(collection_id) and not archived)
+        self.restore_collection_button.setEnabled(archived)
+
     def _collection_selected(self, *_):
         collection_id = self._selected_collection_id()
+        self._sync_collection_buttons()
         if not collection_id:
             self.collection_detail.setPlainText(
                 "尚未创建集合。点击「新建集合…」后，把左侧选中的数据资产加入。")
+            self._render_diversity()
             return
         summary = self.workspace.collection_summary(collection_id)
         lines = [f"集合：{summary['name']}"
-                 f"（{_SOURCE_KIND_LABELS.get(summary['source_kind'], summary['source_kind'])}）",
+                 f"（{_SOURCE_KIND_LABELS.get(summary['source_kind'], summary['source_kind'])}）"
+                 + ("　[已归档]" if summary.get("archived_at") else ""),
                  f"资产 {summary['asset_count']} · 目标 {summary['target_count']}"
                  f"（其中逐跳 {summary['hop_count']}）",
                  "来源分布：" + ("、".join(
@@ -293,6 +306,40 @@ class DataPageMixin:
                 lines.append("· " + title + "：" + "、".join(
                     f"{item['label']} {item['count']}" for item in stats))
         self.collection_detail.setPlainText("\n".join(lines))
+        self._render_diversity()
+
+    def _render_diversity(self):
+        """把所选集合在“多样性分析”维度上的分布画成柱形图并给出指标。"""
+        self.diversity_chart.clear()
+        collection_id = self._selected_collection_id()
+        if not collection_id:
+            self.diversity_summary.setText("选择集合后显示多样性指标。")
+            return
+        report = self.workspace.collection_diversity(collection_id)
+        overall = report["overall"]
+        if not overall["targets"]:
+            self.diversity_summary.setText("该集合没有可统计的目标（信号级）。")
+            return
+        info = report["axes"].get(self.diversity_axis.currentData()) or {}
+        items = list(info.get("items") or [])
+        if info.get("unknown"):
+            items.append(("未知", info["unknown"]))
+        if items:
+            values = [count for _, count in items]
+            bars = pg.BarGraphItem(x=np.arange(len(items), dtype=float),
+                                   height=np.asarray(values, dtype=float), width=0.6,
+                                   brush="#4c86c9", pen=pg.mkPen("#2c5f9e"))
+            self.diversity_chart.addItem(bars)
+            self.diversity_chart.getAxis("bottom").setTicks(
+                [[(index, label) for index, (label, _) in enumerate(items)]])
+            self.diversity_chart.setYRange(0, max(max(values) * 1.15, 1), padding=0)
+        self.diversity_summary.setText(
+            f"取值数 {info['distinct']} · 归一化多样性 {info['diversity']:.2f} · "
+            f"最高占比 {info['top_share']:.0%} · 未知 {info['unknown_share']:.0%}"
+            f"　|　综合多样性 {overall['diversity']:.2f}"
+            f"（有效维度 {overall['effective_axes']}/{len(self._DIVERSITY_AXES)}）"
+            f" · 组合变体 {overall['combination_variants']}/{overall['targets']}"
+            f"（覆盖 {overall['combination_share']:.0%}）")
 
     def _collections_changed(self):
         self.refresh_collections()
@@ -353,24 +400,31 @@ class DataPageMixin:
         answer = QtWidgets.QMessageBox.question(
             self, "归档信号集合",
             f"归档「{collection['name']}」？\n集合将不再出现在选择器中，成员关系与标注保留，"
-            "之后可重新启用。")
+            "勾选“显示已归档”后可随时恢复。")
         if answer != QtWidgets.QMessageBox.StandardButton.Yes:
             return
         self.workspace.archive_collection(collection_id)
         self._collections_changed()
         self.status.setText(f"已归档集合「{collection['name']}」")
 
-    def migrate_legacy(self):
-        """把旧标注数据集与旧实验登记进新索引（幂等，可重复点击）。"""
-        self.start_job("migrate_legacy", owner="数据管理", label="历史数据登记",
-                       cancel_text="取消本次登记")
+    def restore_selected_collection(self):
+        collection_id = self._selected_collection_id()
+        if not collection_id:
+            self.status.setText("请先选择集合")
+            return
+        collection = self.workspace.get_collection(collection_id)
+        if not collection.get("archived_at"):
+            self.status.setText(f"集合「{collection['name']}」未归档，无需恢复")
+            return
+        self.workspace.archive_collection(collection_id, archived=False)
+        self._collections_changed()
+        self.status.setText(f"已恢复集合「{collection['name']}」")
 
     def scan_storage(self, preview=False):
         """扫描工作区；``preview=True`` 时视为一次显式清理预览（解锁删除按钮）。"""
         self._pending_preview = bool(preview)
         self.start_job("storage_report", owner="数据管理", label="数据盘点",
                        cancel_text="取消本次盘点",
-                       extra_dirs=list(self._extra_dirs),
                        job_retention_days=int(self.storage_retention.value()))
 
     def _retention_changed(self, _value):
@@ -384,48 +438,6 @@ class DataPageMixin:
             write_settings(self.workspace, job_retention_days=int(self.storage_retention.value()))
         except (OSError, ValueError) as exc:
             self.status.setText(f"保留天数保存失败：{exc}")
-
-    def _reload_extra_combo(self):
-        self.storage_extra_combo.blockSignals(True)
-        self.storage_extra_combo.clear()
-        self.storage_extra_combo.addItems(self._extra_dirs)
-        self.storage_extra_combo.blockSignals(False)
-        self._sync_extra_buttons()
-
-    def _sync_extra_buttons(self):
-        self.storage_extra_remove.setEnabled(self.storage_extra_combo.count() > 0)
-
-    def _persist_extra_dirs(self):
-        try:
-            write_settings(self.workspace, extra_dirs=list(self._extra_dirs))
-        except (OSError, ValueError) as exc:
-            self.status.setText(f"额外目录保存失败：{exc}")
-
-    def add_extra_dir(self):
-        path = QtWidgets.QFileDialog.getExistingDirectory(
-            self, "选择要纳入统计的额外目录", str(self.workspace.root.parent))
-        if not path:
-            return
-        resolved = str(Path(path).expanduser().resolve())
-        if Path(resolved) == Path(self.workspace.root).resolve():
-            self.status.setText("工作区目录已包含在统计中，无需重复添加")
-            return
-        if any(Path(item).expanduser().resolve() == Path(resolved) for item in self._extra_dirs):
-            self.status.setText("该目录已在统计列表中")
-            return
-        self._extra_dirs.append(resolved)
-        self._persist_extra_dirs()
-        self._reload_extra_combo()
-        self.scan_storage()
-
-    def remove_extra_dir(self):
-        index = self.storage_extra_combo.currentIndex()
-        if not 0 <= index < len(self._extra_dirs):
-            return
-        self._extra_dirs.pop(index)
-        self._persist_extra_dirs()
-        self._reload_extra_combo()
-        self.scan_storage()
 
     def open_workspace_folder(self):
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(self.workspace.root)))
@@ -446,8 +458,6 @@ class DataPageMixin:
     def _render_storage_chart(self, report):
         self.storage_chart.clear()
         items = [(item["label"], item["bytes"]) for item in report["categories"] if item["bytes"]]
-        items += [(f"额外 · {Path(row['path']).name}", row["bytes"])
-                  for row in report.get("extra_dirs") or [] if row.get("bytes")]
         if not items:
             return
         values = [value / (1024 ** 2) for _, value in items]
@@ -460,13 +470,6 @@ class DataPageMixin:
 
     def _fill_storage_tables(self, report):
         tables = report["tables"]
-        asset_rows = [(item["name"], f"{item['sample_count']:,}", f"{item['sample_rate_hz']:g}",
-                       format_bytes(item["bytes"]), item["source"],
-                       self._time_text(item["created_at"]),
-                       "正常" if item["exists"] else "缺失")
-                      for item in tables["assets"]]
-        self._set_rows(self.storage_asset_table, asset_rows or [("（无）", "", "", "0 B", "", "", "")])
-
         run_rows = [(RUN_KIND_LABELS.get(item["kind"], item["kind"]), format_bytes(item["bytes"]),
                      format_bytes(item["sqlite_bytes"]), self._time_text(item["created_at"]),
                      (item["source_id"] or "--")[:8], "正常" if item["exists"] else "缺失")
@@ -533,19 +536,13 @@ class DataPageMixin:
         self._pending_preview = False
         totals = report["totals"]
         overview = [
-            f"<b>工作区</b> {report['root']}",
-            f"<b>总占用 {format_bytes(totals['bytes'])}</b> · {totals['files']:,} 个文件"
-            + (f" · 其中额外目录 {format_bytes(totals['extra_bytes'])}" if totals.get("extra_bytes") else ""),
+            f"<b>总占用 {format_bytes(totals['bytes'])}</b> · {totals['files']:,} 个文件",
             " · ".join(f"{item['label']} {format_bytes(item['bytes'])}"
                        for item in report["categories"] if item["bytes"]) or "（工作区为空）",
             f"索引冗余 {format_bytes(report['catalog']['index_bytes'])}（结果 JSON 在 SQLite 与磁盘各存一份）· "
             f"资产 {report['catalog']['assets']} · 运行 {report['catalog']['runs']} · "
             f"任务 {self._count_text(len(report['tables']['jobs']), report['tables']['jobs_truncated'])}"
         ]
-        for row in report.get("extra_dirs") or []:
-            overview.append(f"　额外目录 {row['path']} "
-                            + (f"{format_bytes(row['bytes'])} · {row['files']:,} 个文件"
-                               if row["exists"] else "不存在"))
         for item in report["warnings"]:
             overview.append(f"⚠ {item}")
         self.storage_overview.setText("<br>".join(overview))
@@ -600,69 +597,3 @@ class DataPageMixin:
         self.storage_overview.setText("<br>".join(lines) + "<br>正在重新扫描…")
         self._cleanup_ready = False
         self.scan_storage()
-
-    def export_storage_report(self):
-        report = self._storage_report
-        if report is None:
-            self.status.setText("请先扫描一次，再导出盘点报告")
-            return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "导出数据盘点报告", str(self.workspace.root / "storage_report.html"),
-            "HTML (*.html);;JSON (*.json)")
-        if not path:
-            return
-        try:
-            if Path(path).suffix.lower() == ".json":
-                Path(path).write_text(
-                    json.dumps(report, ensure_ascii=False, allow_nan=False, indent=2),
-                    encoding="utf-8")
-            else:
-                Path(path).write_text(self._storage_report_html(report), encoding="utf-8")
-            self.status.setText(f"盘点报告已导出：{path}")
-        except (OSError, ValueError) as exc:
-            self.status.setText(f"导出失败：{exc}")
-
-    def _storage_report_html(self, report):
-        import html as html_module
-
-        def esc(value):
-            return html_module.escape(str(value))
-
-        def table(headers, rows):
-            body = "".join("<tr>" + "".join(f"<td>{esc(cell)}</td>" for cell in row) + "</tr>"
-                           for row in rows)
-            head = "".join(f"<th>{esc(cell)}</th>" for cell in headers)
-            return f"<table><tr>{head}</tr>{body}</table>"
-
-        totals = report["totals"]
-        parts = [self._STORAGE_HEAD, "<h1>数据盘点报告</h1>",
-                 f"<p>工作区：{esc(report['root'])}</p>",
-                 f"<p>生成时间：{esc(report['generated_at'])}</p>",
-                 f"<p>总占用：<b>{esc(format_bytes(totals['bytes']))}</b> · "
-                 f"{esc(totals['files'])} 个文件（其中额外目录 "
-                 f"{esc(format_bytes(totals['extra_bytes']))}）</p>",
-                 "<h2>目录占用</h2>",
-                 table(["目录", "文件数", "占用"],
-                       [(item["label"], item["files"], format_bytes(item["bytes"]))
-                        for item in report["categories"]]
-                       + [(f"额外 · {row['path']}",
-                           row["files"] if row["exists"] else "--",
-                           format_bytes(row["bytes"]) if row["exists"] else "不存在")
-                          for row in report.get("extra_dirs") or []])]
-        parts.append("<h2>按类型统计的运行记录</h2>")
-        parts.append(table(["类型", "条数", "磁盘占用", "索引冗余"],
-                           [(item["label"], item["count"], format_bytes(item["disk_bytes"]),
-                             format_bytes(item["sqlite_bytes"])) for item in report["runs_by_kind"]]
-                           or [("（无）", 0, "0 B", "0 B")]))
-        parts.append(f"<h2>可清理项（保留 {esc(report['cleanup']['retention_days'])} 天）</h2>")
-        parts.append(table(["路径", "占用", "判定依据"],
-                           [(item["path"], format_bytes(item["bytes"]), item["reason"])
-                            for item in report["cleanup"]["targets"]]
-                           or [("（无）", "0 B", "没有可清理项")]))
-        parts.append("<h2>提示</h2><ul>"
-                     + ("".join(f"<li>{esc(item)}</li>" for item in report["warnings"])
-                        or "<li>索引与磁盘一致，没有需要关注的问题。</li>")
-                     + "</ul>")
-        parts.append("<p>本报告由“数据管理”页生成，扫描过程为只读，未写入运行记录。</p>")
-        parts.append("</body></html>")
-        return "".join(parts)

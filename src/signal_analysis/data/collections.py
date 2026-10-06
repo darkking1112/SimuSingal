@@ -4,6 +4,7 @@
 目标/参数分布。由 :class:`signal_analysis.data.workspace.Workspace` 组合使用。
 """
 
+import math
 import uuid
 
 from common.storage import utc_now
@@ -222,3 +223,61 @@ class CollectionMixin:
         if top:
             items = items[:top]
         return [{"label": name, "count": int(count)} for name, count in items]
+
+    #: ``collection_diversity`` 的默认分析维度。
+    DIVERSITY_AXES = ("waveform_mode", "modulation", "snr_db", "is_hopping",
+                      "bandwidth_hz", "symbol_rate_baud")
+
+    def collection_diversity(self, collection_id, *, scope="signal", axes=None):
+        """集合内目标在各参数维度上的多样性：分布 + 归一化熵 + 未知占比。
+
+        每个维度的 ``diversity`` 是归一化 Shannon 熵 ``H / log(取值数)``（取值数 ≤ 1
+        时为 0），``top_share`` 为最高占比，``unknown_share`` 为未知占比；``NULL``
+        与空串归入“未知”，不用 0 冒充。``items`` 保留 ``target_axis_stats`` 的既有
+        顺序（枚举轴按数量降序、数值轴按分箱顺序）。``overall`` 给出有效维度数、各维度
+        归一化熵的平均值，以及“组合变体”（样式 / 调制 / 跳频三元组去重数）与其占比。
+        """
+        self.get_collection(collection_id)
+        axes = tuple(axes) if axes else self.DIVERSITY_AXES
+        clause = "AND t.scope != 'hop'" if scope == "signal" else ""
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n, COUNT(DISTINCT COALESCE(v.waveform_mode,'') || '|' || "
+                "COALESCE(v.modulation,'') || '|' || COALESCE(v.is_hopping,'')) AS combos "
+                "FROM targets t JOIN collection_members m ON m.asset_id=t.asset_id "
+                "JOIN target_versions v ON v.target_id=t.id AND v.version_no = "
+                "(SELECT MAX(version_no) FROM target_versions WHERE target_id=t.id) "
+                f"WHERE m.collection_id=? {clause}", (collection_id,)).fetchone()
+        total = int(row["n"])
+        result = {}
+        normalized = []
+        for axis in axes:
+            ordered = [(item["label"], int(item["count"]))
+                       for item in self.target_axis_stats(collection_id, axis, scope=scope)
+                       if item["count"]]
+            unknown = dict(ordered).pop("未知", 0)
+            items = [(label, value) for label, value in ordered if label != "未知"]
+            known_total = sum(value for _, value in items)
+            if not items:
+                result[axis] = {"axis": axis, "total": unknown, "distinct": 0,
+                                "diversity": 0.0, "top_share": 0.0,
+                                "unknown_share": 1.0 if unknown else 0.0,
+                                "unknown": unknown, "items": []}
+                continue
+            denominator = known_total + unknown
+            shares = [value / known_total for _, value in items]
+            entropy = -sum(p * math.log(p) for p in shares)
+            diversity = entropy / math.log(len(items)) if len(items) > 1 else 0.0
+            result[axis] = {"axis": axis, "total": denominator, "distinct": len(items),
+                            "diversity": diversity,
+                            "top_share": max(value for _, value in items) / denominator,
+                            "unknown_share": unknown / denominator,
+                            "unknown": unknown, "items": items}
+            if len(items) > 1:
+                normalized.append(diversity)
+        combos = int(row["combos"])
+        return {"axes": result, "overall": {
+            "targets": total, "effective_axes": len(normalized),
+            "diversity": (sum(normalized) / len(normalized)) if normalized else 0.0,
+            "combination_variants": combos,
+            "combination_share": (combos / total) if total else 0.0}}

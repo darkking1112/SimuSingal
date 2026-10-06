@@ -24,6 +24,7 @@ from .pages.hops_page import HopsPageMixin
 from .pages.amc_page import AmcPageMixin
 from .pages.history_page import HistoryPageMixin
 from .pages.data_page import DataPageMixin
+from .pages.models_page import ModelsPageMixin
 from .training_coordinator import TrainingCoordinator
 from .constants import (IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
                         IMPORT_COL_FILE, IMPORT_COL_FORMAT, IMPORT_COL_MOD,
@@ -41,7 +42,7 @@ from .runner import _run_task
 from .widgets import UnitSpinBox, _freq_spin, _plain_spin, _unit_row
 
 
-class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, ComparePageMixin, DetectPageMixin, HopsPageMixin, AmcPageMixin, HistoryPageMixin, DataPageMixin, DesktopWindow):
+class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, ComparePageMixin, DetectPageMixin, HopsPageMixin, AmcPageMixin, HistoryPageMixin, DataPageMixin, ModelsPageMixin, DesktopWindow):
     run_task = staticmethod(_run_task)
 
     def __init__(self, workspace):
@@ -54,6 +55,8 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
         super().__init__(Workspace(workspace), "电磁信号分析 · SignalAnalysis",
                          "离线数据 · 通用统计与时频展示 · IQ 信号生成 · 信号检测与调制识别 · "
                          "算法对比与离线报告 · 原生插件")
+        #: 模型下拉：页面创建时登记，「数据管理 → 模型管理」增删后统一刷新。
+        self._model_pickers = []
         self.training_coordinator = TrainingCoordinator(self)
         self.training_pages_by_owner = {}
         # 页面注册表：顺序即界面顺序，也是全项目唯一决定标签下标的地方。
@@ -73,6 +76,8 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             "运行记录": self.build_history,
         }
         self.page_index = {title: index for index, title in enumerate(pages)}
+        # 页面构建前先登记既有训练模型，页面里的模型下拉首屏就能列出它们（幂等）
+        self.reconcile_models()
         for title, builder in pages.items():
             self.tabs.addTab(builder(), title)
         self.training_pages = tuple(self.training_pages_by_owner.values())
@@ -126,13 +131,32 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
         """按页面名取标签下标；下标只由 __init__ 的页面注册表决定。"""
         return self.page_index[title]
 
+    # ------------------------------------------------------------- 模型库同步
+    def reconcile_models(self):
+        """启动时把已训练但未登记的模型补进模型库；失败不阻塞窗口启动。"""
+        from ..services import model_store
+        try:
+            return model_store.reconcile(self.workspace.root)
+        except (model_store.ModelError, OSError, ValueError):
+            return {"added": [], "updated": [], "failed": []}
+
+    def register_model_picker(self, picker):
+        self._model_pickers.append(picker)
+
+    def refresh_model_choices(self):
+        """模型库变化后统一刷新：各页模型下拉 + 数据管理页的模型管理表格。"""
+        for picker in getattr(self, "_model_pickers", ()):
+            picker.refresh()
+        if getattr(self, "models_table", None) is not None:
+            self.refresh_models_panel()
+
 
     def job_buttons(self):
         return (self.analyze_button, self.native_button,
                 self.generate_button, self.detect_button, self.hops_button, self.ml_button,
                 self.hops_ml_button, self.amc_button, self.storage_scan_button,
                 self.storage_preview_button, self.storage_cleanup_button,
-                self.migrate_button, self.import_start_button,
+                self.import_start_button,
                 *self.gen_panel.action_buttons())
 
     def owner_buttons(self, owner):
@@ -154,7 +178,7 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             "跳频参数": (self.hops_button, self.hops_ml_button, adopt["跳频参数"]),
             "调制识别": (self.amc_button, adopt["调制识别"]),
             "数据管理": (self.storage_scan_button, self.storage_preview_button,
-                        self.storage_cleanup_button, self.migrate_button),
+                        self.storage_cleanup_button),
         }
         return mapping.get(owner, tuple(self.job_buttons()))
 
@@ -191,16 +215,12 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
                 "调制识别": getattr(self, "adopt_amc_button", None)}
 
     def result_status(self, result):
-        """数据盘点/清理/历史登记不写运行记录，状态栏不能沿用“结果已保存”文案。"""
+        """数据盘点/清理不写运行记录，状态栏不能沿用“结果已保存”文案。"""
         kind = result.get("kind")
         if kind == "storage_cleanup":
             return "清理完成 · 正在重新扫描（未写入运行记录）"
         if kind == "storage_report":
             return "数据盘点完成（只读，未写入运行记录）"
-        if kind == "legacy_migration":
-            return (f"历史数据登记完成：数据集 {len(result['datasets']['registered'])} · "
-                    f"实验 {len(result['experiments']['registered'])} · "
-                    f"跳过 {len(result['datasets']['skipped'])} 项（幂等，可重复执行）")
         if kind == "recipe_preview":
             return f"参数预览完成：{result.get('count')} 组参数（未合成 IQ）"
         if kind == "generate_collection":
@@ -261,9 +281,7 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
     def result_ready(self, result):
         self.refresh_history()
         self.refresh_assets()
-        if result.get("kind") == "legacy_migration":
-            self._collections_changed()
-        elif result.get("kind") == "recipe_preview":
+        if result.get("kind") == "recipe_preview":
             self.gen_panel.show_preview(result)
         elif result.get("kind") == "generate_collection":
             self.last_result = result
@@ -359,9 +377,6 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
         self.target_list.setMaximumHeight(150)
         self.target_list.setToolTip("目标参考参数与标注状态；参数标注在“信号导入”页维护")
         layout.addWidget(self.target_list)
-        workspace_label = QtWidgets.QLabel(f"工作目录\n{self.workspace.root}")
-        workspace_label.setWordWrap(True)
-        layout.addWidget(workspace_label)
         return box
 
 

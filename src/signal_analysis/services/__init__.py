@@ -72,6 +72,4 @@ def execute(request):
         return generation.torchsig_import(workspace, request)
     if action == "torchsig_probe":
         return generation.torchsig_probe(workspace, request)
-    if action == "migrate_legacy":
-        return management.migrate_legacy(workspace, request)
     raise ValueError(f"不支持的任务类型：{action}")

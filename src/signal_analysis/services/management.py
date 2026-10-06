@@ -15,8 +15,7 @@ def native(workspace, request):
 
 def storage_report(workspace, request):
     # 只读盘点：刻意不写入运行记录，否则报告本身会撑大存储。
-    return build_report(workspace, extra_dirs=request.get("extra_dirs"),
-                        job_retention_days=request.get("job_retention_days"))
+    return build_report(workspace, job_retention_days=request.get("job_retention_days"))
 
 
 def storage_cleanup(workspace, request):
@@ -25,13 +24,4 @@ def storage_cleanup(workspace, request):
         raise ValueError("未指定要清理的条目")
     if len(targets) > 5000:
         raise ValueError("单次清理条目过多，请分批执行")
-    return apply_cleanup(workspace, targets, extra_dirs=request.get("extra_dirs"),
-                         job_retention_days=request.get("job_retention_days"))
-
-
-def migrate_legacy(workspace, request):
-    from ..storage.maintenance import register_legacy_experiments, scan_legacy_datasets
-
-    datasets = scan_legacy_datasets(workspace, request.get("folders"))
-    experiments = register_legacy_experiments(workspace, request.get("experiments"))
-    return {"kind": "legacy_migration", "datasets": datasets, "experiments": experiments}
+    return apply_cleanup(workspace, targets, job_retention_days=request.get("job_retention_days"))

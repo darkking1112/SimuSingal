@@ -1,6 +1,6 @@
 # AMC 识别训练
 
-版本：0.1.0。更新日期：2026-10-04。
+版本：0.1.1。更新日期：2026-10-06。
 
 「AMC 识别训练」是信号分析桌面应用的第八个标签页，负责**调制识别（AMC）任务的数据标注与外部训练**：查看并修改当前集合内所选资产的 AMC 类别与目标参数，选好「训练集」「验证集」两个**信号集合**后启动 `training/` 下的 IQ 波形分类训练与验收，并在「实验与日志」里查看指标、加载验收通过的模型。它对应[00 技术方案](00电磁信号分析识别系统_Python技术方案.md) §4.4「数据评估与信号识别训练」的机器侧训练入口：产物是 ONNX 模型与 `iq_manifest.json` 清单，由「调制识别」页的 AI 入口加载推理（见[调制识别](05调制识别.md)）。
 
@@ -19,7 +19,7 @@
 | 信号标注：当前集合内左侧选中资产的 AMC 类别与目标参数 | 生成或修改集合内容（「IQ 信号生成 → 信号集合生成」） |
 | 训练配置：训练集／验证集集合、CNN/TCN、启动前预检 | 导出训练集、构建 `iq_dataset` 目录、登记数据版本 |
 | 外部训练进程的启动、进度、日志与取消 | 集合、标注集、类别字典的新建与归档 |
-| 进程树收尾与运行槽释放 | 数据资产与集合的浏览、迁移（「数据管理」页） |
+| 进程树收尾与运行槽释放 | 数据资产与集合的浏览、容量盘点与清理（「数据管理」页） |
 | 历史实验浏览、指标（含按 SNR 分档）展示、加载模型到识别页 | 模型推理本身（「调制识别」页）与特征通路分类器的训练 |
 
 三条硬约束：
@@ -127,11 +127,12 @@
 
 ### 4.1 字段
 
-与检测页共用的字段：训练源码根目录、训练环境 Python、训练集（信号集合）、验证集（信号集合）、训练设备（cpu/cuda）、轮数（默认 20）、批大小（默认 8）、学习率（默认 0.001）、随机种子（默认 7）。本页差异：
+与检测页共用的字段：训练源码根目录、训练环境 Python、训练集（信号集合）、验证集（信号集合）、训练设备（cpu/cuda）、轮数（默认 20）、批大小（默认 8）、学习率（默认 0.001）、随机种子（默认 7）、**模型名称（留空=自动）**。本页差异：
 
 | 字段 | 说明 |
 | --- | --- |
 | 模型 | `cnn` 或 `tcn`（IQCNN 步长卷积 / IQTCN 膨胀因果卷积），默认 `cnn` |
+| 模型名称（留空=自动） | 入库到模型库（`training/models/<名称>/`）时用的名称。留空按 `<模型类型>-<训练用途>-<UTC 时间>` 自动命名，本页用途固定为 `amc`（如 `cnn-amc-20261006T105213`）；手动填写时在预检里校验合法性（1–64 字符、不含 `/ \ : * ? " < > |`）与重名 |
 | 初始权重 / RT-DETR 目录与 YAML / 时频图边长 | **不存在**：这些是检测专属字段 |
 | IQ 数据契约摘要 | 只读（§3.4） |
 | IQ 窗口长度 `samples` | 固定契约，页面只读显示默认值 1024；worker 从配置取 `samples`，缺省用 `DEFAULT_IQ_SAMPLES`。窗口长度必须与清单 `input.samples` 一致，训练、验收与推理只有一份实现 |
@@ -153,6 +154,7 @@
 | 已确认类别 | 字典外与未知标签**不阻止训练**：它们被跳过并计数，只有「一个可训练样本都没有」才拒绝 |
 | 高级训练参数（勾选后） | `channels/kernel/dropout/weight_decay/patience` 由 `iq_tuning_args` 校验：cnn 需 3 个正整数通道、核长不小于 3 的奇数；tcn 通道 1～3 个、核长正整数；dropout ∈ [0,1)、权重衰减 ≥ 0、早停轮数 ≥ 1。非法值在起任务前报错，不创建实验目录 |
 | 快照为空 | 窗口生成全部失败时由 worker 报「没有可训练的 AMC 样本（需要已确认的类别，且频带内样本足够长）：<原因>（N 条）」 |
+| 模型名称 | 名称不合法时给出名称规则报错；模型库里已有同名模型时报「模型名称已存在：<名称>，请换一个名称或留空自动命名」 |
 
 预检失败不占槽、不创建实验目录，错误同时显示在配置页红字与实验页状态。
 
@@ -258,6 +260,8 @@
 
 「加载验收通过的模型」把 `model/iq_manifest.json` 路径写入「调制识别」页的 AI 入口并切换到该页；清单缺失或不可解析时页面报错，不改动路径。验收报告 `verification.json` 与 `per_snr` 分档保存在实验目录，供复核；验收通过只表示链路正确，**不代表精度达标**（识别准确率的合格门限仍是待确认项）。
 
+训练成功后模型还会自动入库到 `training/models/<模型名称>/`（命名规则与入库过程见[信号检测训练](07信号检测训练.md) §6.7）。「调制识别」页的识别模型下拉按用途 `amc` 过滤模型库条目，选中即填入清单路径，页面再按清单契约分流到特征通路或原始 IQ 通路；未登记的清单用下拉里的「浏览本地文件…」指定。模型的查看、重命名与删除在「数据管理 → 模型管理」。
+
 ---
 
 ## 8. 操作流程
@@ -315,6 +319,7 @@
 | 运行器进度/日志/收尾与运行槽 | `ui/training_runner.py`、`ui/training_coordinator.py`、`ui/training_process.py` | `test_training_page_split.py::test_progress_reports_epochs_and_resets_on_stage_change`、`::test_stop_and_close_terminate_worker_and_spawned_child`、`test_progress_channel.py` |
 | 指标展示（含 per_snr）与加载 | `ui/pages/training_common.py::metric_text`/`load_model`、`services/training_jobs.py`（`list_experiments`/`decode_worker_log`） | `test_training_page_split.py::test_metric_text_shows_per_snr_buckets`、`test_iq_training_tools.py::test_train_iq_per_snr_buckets_are_explicit_about_empty_bands` |
 | 识别侧契约（加载后的推理） | `contracts/iq.py`、`ml/iq.py`、`ui/pages/amc_page.py` | `test_amc.py` |
+| 模型命名、入库与管理 | `services/model_store.py`、`ui/pages/training_common.py::publish_model`、`ui/pages/models_page.py` | `test_model_store.py`、`test_models_gui.py` |
 
 ---
 

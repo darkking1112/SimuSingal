@@ -44,17 +44,12 @@ def test_format_bytes_handles_edges():
 
 def test_settings_round_trip_and_validation(tmp_path):
     workspace = Workspace(tmp_path / "ws")
-    assert read_settings(workspace) == {"extra_dirs": [], "job_retention_days":
-                                        DEFAULT_JOB_RETENTION_DAYS}
-    write_settings(workspace, extra_dirs=[str(tmp_path), str(tmp_path)], job_retention_days=7)
+    assert read_settings(workspace) == {"job_retention_days": DEFAULT_JOB_RETENTION_DAYS}
+    write_settings(workspace, job_retention_days=7)
     settings = read_settings(workspace)
     assert settings["job_retention_days"] == 7
-    assert settings["extra_dirs"] == [str(tmp_path)]
     with pytest.raises(ValueError):
         write_settings(workspace, job_retention_days=4000)
-    # 工作区自身不能作为额外目录（否则容量会被重复计算）
-    write_settings(workspace, extra_dirs=[str(workspace.root)])
-    assert read_settings(workspace)["extra_dirs"] == []
     # 损坏的设置文件回退默认值而不是抛异常
     (tmp_path / "ws" / SETTINGS_NAME).write_text("{ not json", encoding="utf-8")
     assert read_settings(workspace)["job_retention_days"] == DEFAULT_JOB_RETENTION_DAYS
@@ -240,25 +235,24 @@ def test_apply_cleanup_still_skips_running_and_keeps_catalog_runs(tmp_path):
     assert (workspace.root / "jobs" / "analysis100").is_dir()
 
 
-def test_extra_dirs_are_statistics_only(tmp_path):
+def test_storage_report_counts_shard_assets_by_share(tmp_path):
+    """分片资产按自己的采样点份额计占用，且分片文件不算无主文件。"""
     workspace = Workspace(tmp_path / "ws")
-    outside = tmp_path / "training" / "data"
-    outside.mkdir(parents=True)
-    (outside / "amc.json").write_bytes(b"y" * 512)
-    missing = tmp_path / "training" / "runs"
-
-    report = build_report(workspace, extra_dirs=[str(outside), str(missing), str(workspace.root)])
-    # 工作区自身被去重，不计入 extra_bytes
-    assert [row["path"] for row in report["extra_dirs"]] == [str(outside.resolve()),
-                                                            str(missing.resolve())]
-    assert report["totals"]["extra_bytes"] == 512
-    assert report["totals"]["bytes"] == report["totals"]["workspace_bytes"] + 512
-    assert report["extra_dirs"][0]["files"] == 1
-    assert report["extra_dirs"][1]["exists"] is False
-    assert any("额外目录不存在" in item for item in report["warnings"])
-    # 额外目录不参与一致性检查，也不产生清理候选
+    writer = workspace.create_shard(name="批量")
+    writer.append(np.ones(100, dtype=np.complex64), 1000.0, "分片一", "imported:x")
+    writer.append(np.ones(50, dtype=np.complex64), 1000.0, "分片二", "imported:x")
+    writer.seal()
+    report = build_report(workspace)
+    rows = {item["name"]: item for item in report["tables"]["assets"]}
+    assert rows["分片一"]["bytes"] == 100 * 8
+    assert rows["分片二"]["bytes"] == 50 * 8
+    assert rows["分片一"]["exists"] is True
+    # 分片文件在 assets/shards/ 子目录：不能算作无主文件
     assert report["consistency"]["orphan_files_count"] == 0
-    assert report["cleanup"]["targets"] == []
+    # 磁盘总占用仍按整份分片计入“信号资产”类别
+    shard_file = next((workspace.root / "assets" / "shards").glob("*.bin"))
+    assets_category = next(item for item in report["categories"] if item["key"] == "assets")
+    assert assets_category["bytes"] >= shard_file.stat().st_size
 
 
 def test_report_is_stable_on_empty_workspace(tmp_path):

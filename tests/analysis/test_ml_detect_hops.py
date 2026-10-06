@@ -446,7 +446,7 @@ def test_gui_ml_hops_entry_builds_per_hop_request(tmp_path):
     try:
         assert window.hops_ml_button.text() == "AI 估计逐跳参数"
         assert window.hops_ml_traditional.isChecked()
-        assert "per_hop_v1" in window.hops_manifest.placeholderText()
+        assert "per_hop_v1" in window.hops_picker.toolTip()
         window.hops_ml_button.click()
         assert "请先导入并选择数据" in window.status.text()
         run_job({"workspace": str(workspace), "action": "generate", "sample_rate": RATE,

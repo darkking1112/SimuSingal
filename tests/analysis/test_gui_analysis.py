@@ -818,7 +818,7 @@ def test_ml_controls_follow_runtime_availability(tmp_path, monkeypatch):
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = MainWindow(tmp_path)
     try:
-        widgets = (window.ml_button, window.ml_choose, window.ml_score, window.ml_iou,
+        widgets = (window.ml_button, window.ml_picker, window.ml_score, window.ml_iou,
                    window.ml_compare)
         monkeypatch.setattr(ml_runtime, "runtime_version", lambda: None)
         window.update_ml_controls()
@@ -846,16 +846,20 @@ def test_data_management_tab_scan_and_cleanup_gating(tmp_path):
         assert not window.storage_cleanup_button.isEnabled()
         window.storage_scan_button.click()
         wait_job(app, window)
-        assert "工作区" in window.storage_overview.text()
+        assert "总占用" in window.storage_overview.text()
         assert len(window.storage_chart.listDataItems()) >= 1
-        # 空工作区各表格给出一行占位而不是空白
-        assert window.storage_asset_table.item(0, 0).text() == "（无）"
+        # 空工作区各表格给出一行占位而不是空白；“信号资产”页签与导出/额外目录控件已移除
+        assert window.storage_run_table.item(0, 0).text() == "（无）"
         assert window.storage_issue_table.item(0, 0).text() == "无"
+        assert not hasattr(window, "storage_asset_table")
+        assert not hasattr(window, "storage_export_button")
+        assert not hasattr(window, "storage_extra_combo")
         assert "没有可清理项" in window.storage_cleanup_hint.text()
-        # 页签计数必须写在自己的页签上（历史上按固定下标写会错位到相邻页签）
-        assert window.storage_tables.tabText(3) == "一致性（0）"
-        assert window.storage_tables.tabText(4) == "可清理项（0）"
-        assert window.storage_tables.tabText(5) == "信号集合"
+        # 页签顺序：信号集合、模型管理置首；计数必须写在自己的页签上（历史上按固定下标写会错位）
+        assert window.storage_tables.tabText(0) == "信号集合"
+        assert window.storage_tables.tabText(1) == "模型管理"
+        assert window.storage_tables.tabText(4) == "一致性（0）"
+        assert window.storage_tables.tabText(5) == "可清理项（0）"
         # 普通扫描不解锁删除，必须先“预览清理”
         assert not window.storage_cleanup_button.isEnabled()
         window.storage_retention.setValue(0)
@@ -864,8 +868,8 @@ def test_data_management_tab_scan_and_cleanup_gating(tmp_path):
         wait_job(app, window)
         assert window.storage_cleanup_table.rowCount() >= 1
         assert "运行中" in window.storage_cleanup_hint.text()
-        assert window.storage_tables.tabText(4).startswith("可清理项（")
-        assert window.storage_tables.tabText(5) == "信号集合"
+        assert window.storage_tables.tabText(5).startswith("可清理项（")
+        assert window.storage_tables.tabText(0) == "信号集合"
         # 预览后仍需勾选才能删除
         assert not window.storage_cleanup_button.isEnabled()
         window.storage_cleanup_table.item(0, 0).setCheckState(QtCore.Qt.CheckState.Checked)
@@ -879,9 +883,8 @@ def test_data_management_tab_scan_and_cleanup_gating(tmp_path):
 
 
 @pytest.mark.gui
-def test_data_management_scan_and_export_never_write_runs(tmp_path, monkeypatch):
-    import json
-
+def test_data_management_scan_never_writes_runs(tmp_path):
+    """只读盘点不写运行记录；导出入口已下线。"""
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = MainWindow(tmp_path)
     window.show()
@@ -890,19 +893,8 @@ def test_data_management_scan_and_export_never_write_runs(tmp_path, monkeypatch)
         wait_job(app, window)
         assert window.history.count() == 0  # 只读盘点不写运行记录
         assert "未写入运行记录" in window.status.text()
-        output = tmp_path / "storage_report.json"
-        monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
-                            lambda *args: (str(output), "JSON (*.json)"))
-        window.export_storage_report()
-        payload = json.loads(output.read_text(encoding="utf-8"))
-        assert payload["kind"] == "storage_report"
-        assert payload["root"] == str(tmp_path)
+        assert not hasattr(window, "export_storage_report")
         assert window.history.count() == 0
-        assert "已导出" in window.status.text()
-        # 未扫描时导出给出提示而不是报错
-        window._storage_report = None
-        window.export_storage_report()
-        assert "请先扫描" in window.status.text()
     finally:
         window.close()
         app.processEvents()

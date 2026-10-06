@@ -23,6 +23,7 @@ from ..dialogs import SignalParamsDialog
 from ..helpers import (_AMC_SOURCE_TEXT, _asset_format, _comparison_line,
                        _fmt_hz, _fmt_metric, _fmt_span, _mirrored_spectrum)
 from ..runner import _run_task
+from ..model_picker import ModelPicker
 from ..widgets import UnitSpinBox, _freq_spin, _plain_spin, _unit_row
 
 
@@ -115,16 +116,16 @@ class HopsPageMixin:
         layout.addLayout(bar)
         ai_bar = QtWidgets.QHBoxLayout()
         ai_bar.addWidget(QtWidgets.QLabel("逐跳模型清单"))
-        self.hops_manifest = QtWidgets.QLineEdit()
-        self.hops_manifest.setPlaceholderText(
-            "选择声明 label_semantics=per_hop_v1 的 JSON（逐跳训练产出或 ml-manifest --label-semantics）")
-        self.hops_manifest.setToolTip(
-            "只有逐跳标签（per_hop_v1）训练的模型可以走这条通路；会话级模型会被直接拒绝并提示"
-            "改用“信号检测”页，避免把整条跳频链路当成一跳。")
-        ai_bar.addWidget(self.hops_manifest, 1)
-        self.hops_ml_choose = QtWidgets.QPushButton("选择…")
-        self.hops_ml_choose.clicked.connect(self.choose_hops_manifest)
-        ai_bar.addWidget(self.hops_ml_choose)
+        # 路径由模型下拉写入，界面不再重复放输入框与“选择…”按钮（见 detect_page 同款说明）
+        self.hops_manifest = QtWidgets.QLineEdit(self)
+        self.hops_manifest.hide()
+        self.hops_picker = ModelPicker(
+            self.hops_manifest, "hop", self, browse=self.choose_hops_manifest,
+            hint="只有逐跳标签（per_hop_v1）训练的模型可以走这条通路；会话级模型会被直接拒绝并提示"
+                 "改用“信号检测”页，避免把整条跳频链路当成一跳。逐跳模型必选，"
+                 "选“默认”时点「AI 估计逐跳参数」会被拦下。")
+        self.register_model_picker(self.hops_picker)
+        ai_bar.addWidget(self.hops_picker, 1)
         self.hops_ml_traditional = QtWidgets.QCheckBox("并排对比传统逐跳")
         self.hops_ml_traditional.setChecked(True)
         self.hops_ml_traditional.setToolTip(

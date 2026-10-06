@@ -18,14 +18,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 import shutil
 
-from common.storage import utc_now, file_digest
+from common.storage import utc_now
 
 VERSION = "storage_report_v1"
 SETTINGS_NAME = "maintenance.json"
 LOG_NAME = "maintenance.log"
 DEFAULT_JOB_RETENTION_DAYS = 30
 
-#: 扫描软上限：额外目录指到巨型目录树时截断，保证页面不挂死。
+#: 扫描软上限：目录树过大时截断，保证页面不挂死。
 MAX_FILES = 200_000
 #: 表格行上限；总计另有独立的目录遍历口径，不受截断影响。
 MAX_ASSET_ROWS = 500
@@ -130,18 +130,18 @@ def _relative(workspace, path):
 
 
 def read_settings(workspace):
-    """读取页面设置；缺失或损坏时回退默认值（不抛异常）。"""
+    """读取页面设置；缺失或损坏时回退默认值（不抛异常）。
+
+    旧版本写入的 ``extra_dirs`` 键已不再使用，读取时直接忽略。
+    """
     path = Path(workspace.root) / SETTINGS_NAME
-    settings = {"extra_dirs": [], "job_retention_days": DEFAULT_JOB_RETENTION_DAYS}
+    settings = {"job_retention_days": DEFAULT_JOB_RETENTION_DAYS}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return settings
     if not isinstance(data, dict):
         return settings
-    extra = data.get("extra_dirs")
-    if isinstance(extra, list):
-        settings["extra_dirs"] = [str(item) for item in extra if isinstance(item, str) and item.strip()]
     days = data.get("job_retention_days")
     if isinstance(days, bool):
         days = None
@@ -150,19 +150,9 @@ def read_settings(workspace):
     return settings
 
 
-def write_settings(workspace, *, extra_dirs=None, job_retention_days=None):
+def write_settings(workspace, *, job_retention_days=None):
     """写回页面设置（原子替换）。"""
     current = read_settings(workspace)
-    if extra_dirs is not None:
-        cleaned = []
-        root = str(Path(workspace.root).resolve())
-        for item in extra_dirs:
-            text = str(item).strip()
-            if not text or str(Path(text).expanduser().resolve()) == root:
-                continue
-            if text not in cleaned:
-                cleaned.append(text)
-        current["extra_dirs"] = cleaned
     if job_retention_days is not None:
         days = int(job_retention_days)
         if not 0 <= days <= 3650:
@@ -378,11 +368,9 @@ def _candidate_cleanup(workspace, job_rows, orphan_state, retention_days):
     return targets, skipped_running
 
 
-def build_report(workspace, *, extra_dirs=None, job_retention_days=None):
+def build_report(workspace, *, job_retention_days=None):
     """扫描工作区并返回 JSON-safe 的盘点报告（只读，不写 ``runs``）。"""
     settings = read_settings(workspace)
-    if extra_dirs is None:
-        extra_dirs = settings["extra_dirs"]
     if job_retention_days is None:
         job_retention_days = settings["job_retention_days"]
     retention = int(job_retention_days)
@@ -413,30 +401,6 @@ def build_report(workspace, *, extra_dirs=None, job_retention_days=None):
     orphan_runs = [{"path": f"runs/{row['id']}", "bytes": row["bytes"], "reason": "源资产已删除"}
                    for row in run_rows if row["source_id"] and row["source_id"] not in {a["id"] for a in assets}]
 
-    extra_rows = []
-    extra_total = 0
-    extra_count = 0
-    for item in extra_dirs:
-        path = Path(item).expanduser()
-        if not path.is_absolute():
-            path = (root / path).resolve()
-        else:
-            path = path.resolve()
-        if path == root.resolve():
-            continue
-        try:
-            exists = path.is_dir()
-        except OSError:
-            exists = False
-        if not exists:
-            extra_rows.append({"path": str(path), "exists": False, "bytes": 0, "files": 0})
-            continue
-        size, count, clipped = _scan_tree(path)
-        truncated = truncated or clipped
-        extra_total += size
-        extra_count += count
-        extra_rows.append({"path": str(path), "exists": True, "bytes": size, "files": count})
-
     kinds = {}
     for row in run_rows:
         bucket = kinds.setdefault(row["kind"], {"kind": row["kind"],
@@ -462,23 +426,19 @@ def build_report(workspace, *, extra_dirs=None, job_retention_days=None):
         warnings.append(f"{len(broken)} 个资产的样本文件缺失（校验会失败）")
     if orphan_runs:
         warnings.append(f"{len(orphan_runs)} 条运行记录的源资产已删除")
-    if extra_rows and any(not row["exists"] for row in extra_rows):
-        warnings.append("部分额外目录不存在，已按 0 计入")
 
-    totals = sum(item["bytes"] for item in categories) + extra_total
-    files = sum(item["files"] for item in categories) + extra_count
+    totals = sum(item["bytes"] for item in categories)
+    files = sum(item["files"] for item in categories)
 
     return {
         "kind": "storage_report",
         "version": VERSION,
         "root": str(root),
         "generated_at": utc_now(),
-        "settings": {"extra_dirs": list(extra_dirs), "job_retention_days": retention},
+        "settings": {"job_retention_days": retention},
         "totals": {"bytes": int(totals), "files": int(files),
-                   "workspace_bytes": int(sum(item["bytes"] for item in categories)),
-                   "extra_bytes": int(extra_total)},
+                   "workspace_bytes": int(totals)},
         "categories": categories,
-        "extra_dirs": extra_rows,
         "runs_by_kind": runs_by_kind,
         "tables": {
             "assets": asset_rows[:MAX_ASSET_ROWS],
@@ -503,10 +463,9 @@ def build_report(workspace, *, extra_dirs=None, job_retention_days=None):
     }
 
 
-def preview_cleanup(workspace, *, extra_dirs=None, job_retention_days=None):
+def preview_cleanup(workspace, *, job_retention_days=None):
     """只返回清理候选清单（dry-run），不删除任何文件。"""
-    report = build_report(workspace, extra_dirs=extra_dirs,
-                          job_retention_days=job_retention_days)
+    report = build_report(workspace, job_retention_days=job_retention_days)
     return {"version": VERSION, "kind": "storage_preview",
             "generated_at": report["generated_at"],
             "root": report["root"], **report["cleanup"]}
@@ -533,13 +492,12 @@ def _safe_target(workspace, relative):
     return resolved
 
 
-def apply_cleanup(workspace, targets, *, extra_dirs=None, job_retention_days=None):
+def apply_cleanup(workspace, targets, *, job_retention_days=None):
     """执行清理：先按当前磁盘与索引**重算**候选，只删命中的路径。
 
     任何不在最新候选清单里的请求项都会被跳过（防 TOCTOU 与越界）。
     """
-    report = build_report(workspace, extra_dirs=extra_dirs,
-                          job_retention_days=job_retention_days)
+    report = build_report(workspace, job_retention_days=job_retention_days)
     allowed = {}
     for item in report["cleanup"]["targets"]:
         resolved = _safe_target(workspace, item["path"])
@@ -586,220 +544,3 @@ def apply_cleanup(workspace, targets, *, extra_dirs=None, job_retention_days=Non
             "removed": removed, "skipped": skipped, "errors": errors,
             "bytes": log_entry["bytes"], "requested": requested,
             "remaining": report["totals"]["bytes"]}
-
-
-# ---------------------------------------------------------------------------
-# 旧数据迁移（方案文档 §9）：把历史标注数据集与实验目录登记进新索引
-# ---------------------------------------------------------------------------
-
-LEGACY_MIGRATION_VERSION = "legacy_migration_v1"
-LEGACY_DETECTION_NAME = "检测标注（历史）"
-
-
-def _read_json(path):
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-
-
-def _parse_json_text(text):
-    try:
-        return json.loads(text)
-    except (TypeError, ValueError):
-        return None
-
-
-def register_legacy_dataset(workspace, directory):
-    """旧版标注数据集 → 集合 + 标注集 + 历史数据版本（兼容封装）。"""
-    return register_annotation_dataset(workspace, directory, source_kind="legacy")
-
-
-def register_annotation_dataset(workspace, directory, *, source_kind="legacy", name=None,
-                                raw_iq=False, card_note=None):
-    """把旧版标注数据集登记为集合 + 检测任务标注集 + 数据版本（幂等）。
-
-    * 数据版本 ``status='ready'``，卡片记录 ``raw_iq``（默认 False：只有处理后的
-      时频图、没有原始 IQ）；清单直接引用旧 ``samples.jsonl``，不复制、不改旧目录；
-    * 类别字典取卡片声明（默认 ``emitter``），标签粒度同卡片；
-    * ``source_asset_id`` 能对上资产库的样本建立集合成员关联，对不上的计数报告；
-    * 训练页“使用所选集合”导出的数据集若需要登记也能复用（当前导出为训练目录格式，不登记）；
-    """
-    directory = Path(directory).resolve()
-    card = _read_json(directory / "dataset.json")
-    if not isinstance(card, dict):
-        raise ValueError("不是旧版标注数据集：缺少 dataset.json")
-    manifest = directory / "samples.jsonl"
-    if not manifest.is_file():
-        raise ValueError("不是旧版标注数据集：缺少 samples.jsonl")
-    records = []
-    for line in manifest.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            payload = _parse_json_text(line)
-            if isinstance(payload, dict):
-                records.append(payload)
-    contract = card.get("contract") or {}
-    classes = [str(item) for item in (contract.get("labels") or ["emitter"])]
-    semantics = str(contract.get("label_semantics") or "session_v1")
-    name = name or f"{'旧标注' if source_kind == 'legacy' else '生成'} · {directory.name}"
-    task_label = "历史" if source_kind == "legacy" else source_kind
-    collection = next((item for item in workspace.list_collections(include_archived=True)
-                       if item["name"] == name), None)
-    if collection is None:
-        collection = workspace.create_collection(name, description=str(directory),
-                                                 source_kind=source_kind)
-    task_set_name = f"检测标注（{task_label}）"
-    task_set = next((item for item in workspace.list_task_sets(collection["id"], "detection")
-                     if item["name"] == task_set_name), None)
-    if task_set is None:
-        taxonomy = next((item for item in workspace.list_taxonomies("detection")
-                         if _parse_json_text(item["classes_json"]) == classes), None)
-        if taxonomy is None:
-            taxonomy = workspace.create_taxonomy("detection", task_label,
-                                                 LEGACY_MIGRATION_VERSION, classes)
-        task_set = workspace.create_task_set(collection["id"], "detection",
-                                             name=task_set_name,
-                                             taxonomy_id=taxonomy["id"],
-                                             label_semantics=semantics)
-    linked = missing = 0
-    seen = set()
-    for record in records:
-        source_asset = record.get("source_asset_id")
-        if not source_asset or source_asset in seen:
-            continue
-        seen.add(source_asset)
-        try:
-            workspace.get_asset(source_asset)
-        except ValueError:
-            missing += 1
-            continue
-        if workspace.add_collection_member(collection["id"], source_asset):
-            linked += 1
-    for version in workspace.list_dataset_versions(task_set["id"]):
-        stored = _parse_json_text(version.get("card_json"))
-        if isinstance(stored, dict) and stored.get("source") == str(directory):
-            return {"collection": collection, "task_set": task_set, "version": version,
-                    "linked_assets": 0, "missing_assets": 0, "already": True}
-    splits = {key: 0 for key in ("train", "val", "test")}
-    for record in records:
-        if record.get("split") in splits:
-            splits[record["split"]] += 1
-    try:
-        relative = manifest.relative_to(Path(workspace.root).resolve()).as_posix()
-    except ValueError:
-        relative = str(manifest)
-    version = workspace.add_dataset_version(
-        task_set["id"], status="ready", manifest_path=relative,
-        manifest_sha256=file_digest(manifest), sample_count=len(records),
-        asset_count=len(seen) - missing, split=splits,
-        preprocessing={"legacy": source_kind == "legacy", "raw_iq": raw_iq,
-                       "nfft": contract.get("spectrogram_nfft"),
-                       "image_size": contract.get("image_size"),
-                       "dynamic_range_db": contract.get("dynamic_range_db")},
-        taxonomy_snapshot={"name": task_label, "version": LEGACY_MIGRATION_VERSION,
-                           "classes": classes},
-        card={"contract": LEGACY_MIGRATION_VERSION, "source": str(directory),
-              "raw_iq": raw_iq, "samples": len(records),
-              "note": card_note or ("历史时频图数据：保留训练能力，无原始 IQ"
-                                    if source_kind == "legacy"
-                                    else "外部生成器产出的检测数据集（无原始 IQ 资产）")})
-    return {"collection": collection, "task_set": task_set, "version": version,
-            "linked_assets": linked, "missing_assets": missing, "already": False}
-
-
-def scan_legacy_datasets(workspace, folders=None):
-    """扫描并登记旧标注数据集；默认扫描工作区 ``datasets/``，单个失败不中断。"""
-    root = Path(workspace.root).resolve()
-    if folders:
-        candidates = []
-        for folder in folders:
-            path = Path(folder).expanduser()
-            path = path if path.is_absolute() else (root / path)
-            candidates.extend(sorted(item for item in path.glob("*")
-                                     if item.is_dir()))
-    else:
-        base = root / "datasets"
-        candidates = sorted(base.glob("*")) if base.is_dir() else []
-    registered, skipped, errors = [], [], []
-    for entry in candidates:
-        if not (entry / "dataset.json").is_file():
-            continue
-        try:
-            result = register_legacy_dataset(workspace, entry)
-        except ValueError as exc:
-            errors.append({"path": str(entry), "error": str(exc)})
-            continue
-        if result["already"]:
-            skipped.append(str(entry))
-        else:
-            registered.append({"path": str(entry),
-                               "collection_id": result["collection"]["id"],
-                               "version_id": result["version"]["id"],
-                               "samples": result["version"]["sample_count"],
-                               "linked_assets": result["linked_assets"],
-                               "missing_assets": result["missing_assets"]})
-    return {"version": LEGACY_MIGRATION_VERSION, "kind": "legacy_datasets",
-            "registered": registered, "skipped": skipped, "errors": errors}
-
-
-def _match_dataset_version(workspace, data_path):
-    """把实验的数据目录匹配到已登记的数据版本（旧目录或清单所在目录）。"""
-    if not data_path:
-        return None
-    try:
-        target = str(Path(data_path).expanduser().resolve())
-    except OSError:
-        return None
-    for version in workspace.list_dataset_versions():
-        stored = _parse_json_text(version.get("card_json"))
-        if isinstance(stored, dict) and stored.get("source") == target:
-            return version["id"]
-        manifest = version.get("manifest_path")
-        if manifest:
-            parent = Path(workspace.root) / manifest
-            if str(parent.resolve().parent) == target:
-                return version["id"]
-    return None
-
-
-def register_legacy_experiments(workspace, directory=None):
-    """把旧 ``experiment.json`` 登记进 ``experiments`` 表（幂等，按文件目录匹配）。
-
-    记录里能确定的引用（数据目录 → 数据版本）补上索引；其余字段原样保留，
-    状态沿用旧记录；不修改旧目录与旧文件。
-    """
-    base = (Path(directory).expanduser() if directory
-            else Path(workspace.root) / "training" / "runs")
-    if not base.is_dir():
-        return {"version": LEGACY_MIGRATION_VERSION, "kind": "legacy_experiments",
-                "registered": [], "skipped": 0, "errors": []}
-    registered, skipped, errors = [], 0, []
-    for path in sorted(base.glob("*/experiment.json"), reverse=True):
-        record = _read_json(path)
-        if not isinstance(record, dict) or not isinstance(record.get("config"), dict):
-            skipped += 1
-            continue
-        identifier = str(record.get("id") or path.parent.name)
-        if workspace.find_experiment(identifier) is not None:
-            skipped += 1
-            continue
-        config = record["config"]
-        started = record.get("started")
-        if not isinstance(started, str) or not started:
-            started = datetime.fromtimestamp(path.stat().st_mtime,
-                                             timezone.utc).isoformat()
-        finished = record.get("finished") if isinstance(record.get("finished"), str) else None
-        try:
-            row = workspace.register_experiment(
-                str(config.get("task") or "unknown"), config,
-                dataset_version_id=_match_dataset_version(workspace, config.get("data")),
-                status=str(record.get("status") or "unknown"),
-                output_path=str(path.parent), experiment_id=identifier,
-                finished_at=finished, created_at=started)
-        except (ValueError, OSError) as exc:
-            errors.append({"path": str(path), "error": str(exc)})
-            continue
-        registered.append({"id": row["id"], "status": row["status"],
-                           "dataset_version_id": row["dataset_version_id"]})
-    return {"version": LEGACY_MIGRATION_VERSION, "kind": "legacy_experiments",
-            "registered": registered, "skipped": skipped, "errors": errors}
