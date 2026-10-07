@@ -425,7 +425,9 @@ def test_training_scripts_do_not_import_torch_or_torchsig_at_module_level(traine
         text = (TRAINING / name).read_text(encoding="utf-8")
         assert not [line for line in text.splitlines() if pattern.match(line)], name
     for name in ("amc_models/cnn.py", "amc_models/tcn.py", "amc_models/mcldnn.py",
-                 "amc_models/petcgdnn.py", "amc_models/trainer.py", "amc_models/checkpoint.py"):
+                 "amc_models/petcgdnn.py", "amc_models/cv_trn.py", "amc_models/poet.py",
+                 "amc_models/amc_net.py", "amc_models/ascs.py", "amc_models/trainer.py",
+                 "amc_models/checkpoint.py"):
         text = (TRAINING / name).read_text(encoding="utf-8")
         assert [line for line in text.splitlines() if pattern.match(line)], name
     assert "torchsig" not in sys.modules
