@@ -99,7 +99,9 @@ class ModelsPageMixin:
             parts = [f"{params.get('window_samples')} 点" if params.get("window_samples") else "",
                      f"{params.get('channels')} 通道" if params.get("channels") else "",
                      f"{len(params.get('classes') or [])} 类" if params.get("classes") else "",
-                     f"{params.get('epochs')} 轮" if params.get("epochs") else ""]
+                     f"{params.get('epochs')} 轮" if params.get("epochs") else "",
+                     f"结构版本 {params.get('model_revision')}"
+                     if params.get("model_revision") else ""]
         else:
             size = params.get("image_size")
             parts = [f"{size}×{size}" if size else "",

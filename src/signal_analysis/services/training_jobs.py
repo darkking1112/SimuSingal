@@ -4,6 +4,9 @@ import math
 from pathlib import Path
 import shutil
 
+from ..algorithms.amc.ai_model import check_samples, merge_param_sources, model_spec
+from ..contracts.iq import DEFAULT_IQ_SAMPLES
+
 
 def decode_worker_log(data):
     """解码 worker.log 字节：新实验为 UTF-8；历史实验由管道默认编码（GBK）写出，逐级回退。"""
@@ -39,55 +42,87 @@ def list_experiments(root):
     return records
 
 
-def iq_tuning_args(config, arch):
-    """校验 IQ 训练的"高级"可选项并返回对应的 CLI 参数（未提供的键不产生参数）。
-
-    缺省行为与 ``training/train_iq.py`` 的默认值一致：cnn 通道 32,64,128 / 核长 7、
-    tcn 通道 64 / 核长 3、dropout 0.1、权重衰减 1e-4、早停 8 轮。GUI 勾选"覆盖默认
-    训练参数"后才会带上这些键；结构超参没有搜索证据，改动即视为新的实验口径。
-    """
-    args = []
+def _model_param_sources(config, arch):
+    """取出模型参数的两个来源（旧单参数 + ``model_params`` 字典），只做类型转换。"""
+    legacy = {}
     channels = config.get("channels")
     if channels not in (None, ""):
         try:
             widths = [int(part) for part in str(channels).replace("，", ",").split(",")]
         except ValueError as exc:
             raise ValueError(f"channels 需要逗号分隔的整数，收到 {channels!r}") from exc
-        if any(width < 1 for width in widths):
-            raise ValueError("channels 的每个通道数都应为正整数")
-        if arch == "cnn" and len(widths) != 3:
-            raise ValueError("cnn 的 channels 需要 3 个正整数（如 64,128,256）")
-        if arch == "tcn" and len(widths) > 3:
-            raise ValueError("tcn 的 channels 给出 1～3 个正整数（只用第 1 个）")
-        args += ["--channels", ",".join(str(width) for width in widths)]
+        legacy["channels"] = widths
     kernel = config.get("kernel")
     if kernel is not None:
-        if isinstance(kernel, bool) or not isinstance(kernel, int):
-            raise ValueError("卷积核长应为整数")
-        if arch == "cnn" and (kernel < 3 or kernel % 2 == 0):
-            raise ValueError("cnn 的卷积核长应是不小于 3 的奇数")
-        if arch == "tcn" and kernel < 1:
-            raise ValueError("tcn 的卷积核长应为正整数")
-        args += ["--kernel", str(kernel)]
-    for key, flag, low, high in (("dropout", "--dropout", 0.0, 1.0),
-                                 ("weight_decay", "--weight-decay", 0.0, None)):
-        value = config.get(key)
-        if value is None:
-            continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)) \
-                or not math.isfinite(float(value)):
-            raise ValueError(f"{key} 应为有限数值")
-        number = float(value)
-        if number < low or (high is not None and number >= high):
-            limit = "[0, 1)" if high is not None else "不小于 0"
-            raise ValueError(f"{key} 应在 {limit} 范围内")
-        args += [flag, repr(number)]
+        legacy["kernel"] = kernel
+    dropout = config.get("dropout")
+    if dropout is not None:
+        legacy["dropout"] = dropout
+    explicit = config.get("model_params") or {}
+    if not isinstance(explicit, dict):
+        raise ValueError("model_params 应为字典（模型参数 JSON 的解析结果）")
+    return legacy, explicit
+
+
+def model_params(config, arch):
+    """解析并校验配置里的模型参数，返回含目录默认值的完整参数字典（非法即报错）。"""
+    spec = model_spec(arch)
+    legacy, explicit = _model_param_sources(config, spec.id)
+    return merge_param_sources(spec, legacy=legacy, explicit=explicit)
+
+
+def iq_tuning_args(config, arch):
+    """校验 IQ 训练的可选项并返回对应的 CLI 参数（未提供的键不产生参数）。
+
+    模型结构参数（channels/kernel/dropout 与 ``model_params``）按模型目录
+    （``signal_analysis.algorithms.amc.ai_model``）校验：未知参数、非法取值与
+    "同一参数写在两处"都在起任务前拒绝。权重衰减与早停轮数属公共训练配置，
+    规则与模型无关；不提供任何键 = 使用目录声明的默认值。
+    """
+    spec = model_spec(arch)
+    legacy, explicit = _model_param_sources(config, spec.id)
+    merged = merge_param_sources(spec, legacy=legacy, explicit=explicit)
+    args = []
+    if "channels" in legacy:
+        args += ["--channels", ",".join(str(width) for width in merged["channels"])]
+    if "kernel" in legacy:
+        args += ["--kernel", str(merged["kernel"])]
+    if "dropout" in legacy:
+        args += ["--dropout", repr(float(merged["dropout"]))]
+    rest = {key: value for key, value in explicit.items() if key not in legacy}
+    if rest:
+        args += ["--model-params", json.dumps(rest, ensure_ascii=False)]
+    weight_decay = config.get("weight_decay")
+    if weight_decay is not None:
+        if isinstance(weight_decay, bool) or not isinstance(weight_decay, (int, float)) \
+                or not math.isfinite(float(weight_decay)):
+            raise ValueError("weight_decay 应为有限数值")
+        if float(weight_decay) < 0:
+            raise ValueError("weight_decay 应不小于 0")
+        args += ["--weight-decay", repr(float(weight_decay))]
     patience = config.get("patience")
     if patience is not None:
         if isinstance(patience, bool) or not isinstance(patience, int) or patience < 1:
             raise ValueError("早停轮数应为不小于 1 的整数")
         args += ["--patience", str(patience)]
     return args
+
+
+def preflight_iq(config):
+    """快照之前的最小预检：模型存在且可导出、参数与窗口约束合法。
+
+    返回补齐窗口长度（``samples``）的配置副本。依赖检查在训练环境内做
+    （见 ``training/desktop_worker.py``）：GUI 进程可能没有 torch，不能在这里查。
+    """
+    arch = config.get("arch", "cnn")
+    spec = model_spec(arch)
+    if not spec.exportable:
+        raise ValueError(f"模型 {spec.id} 尚未通过 ONNX 导出验证，不能作为训练任务运行")
+    iq_tuning_args(config, spec.id)
+    samples = config.get("samples")
+    samples = DEFAULT_IQ_SAMPLES if samples is None else int(samples)
+    check_samples(spec, samples)
+    return dict(config, samples=samples)
 
 
 def iq_plan(config, directory):
@@ -105,8 +140,9 @@ def iq_plan(config, directory):
         if not (scripts / name).is_file():
             raise ValueError(f"训练源码目录缺少 training/{name}")
     arch = config["arch"]
-    if arch not in ("cnn", "tcn"):
-        raise ValueError("IQ 模型只支持 CNN / TCN")
+    spec = model_spec(arch)
+    if not spec.exportable:
+        raise ValueError(f"模型 {spec.id} 尚未通过 ONNX 导出验证，不能作为训练任务运行")
     for key, minimum, maximum in (("epochs", 1, 10000), ("batch", 1, 65536)):
         value = config[key]
         if not isinstance(value, int) or not minimum <= value <= maximum:
@@ -127,14 +163,19 @@ def iq_plan(config, directory):
     for name in ("iq_dataset.json", "iq_dataset.npz"):
         if not (data / name).is_file():
             raise ValueError(f"已有数据集缺少 {name}")
-    # Run the existing full data-contract validator in the selected environment first.
+    # 先在选定的训练环境里做完整校验：数据契约 + 依赖 + 按目录参数构建一次模型。
     stages.append({"name": "校验环境与数据", "argv": [python, "-u", "-c",
-        "import sys; sys.path.insert(0, sys.argv[1]); "
+        "import sys, json; sys.path.insert(0, sys.argv[1]); "
         "import torch, onnx, onnxruntime; from train_iq import load_dataset, _split; "
         "card,x,y,s,snr,source=load_dataset(sys.argv[2]); _split(x,y,s,snr); "
         "assert sys.argv[3]!='cuda' or torch.cuda.is_available(), 'CUDA 不可用'; "
-        "print('类别:', card['contract']['classes'], flush=True)",
-        str(scripts), str(data), config["device"]]})
+        "from amc_models import build_model; "
+        "model=build_model(sys.argv[4], classes=len(card['contract']['classes']), "
+        "samples=card['contract']['samples'], params=json.loads(sys.argv[5])); "
+        "print('类别:', card['contract']['classes'], "
+        "'参数量:', sum(p.numel() for p in model.parameters()), flush=True)",
+        str(scripts), str(data), config["device"], arch,
+        json.dumps(model_params(config, arch), ensure_ascii=False)]})
     stage("训练与导出", "train_iq.py", "--data", data, "--arch", arch,
           "--epochs", config["epochs"], "--batch-size", config["batch"],
           "--learning-rate", config["lr"], "--seed", config["seed"],

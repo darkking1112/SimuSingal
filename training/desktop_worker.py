@@ -9,7 +9,11 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
+# 训练源码目录（含 amc_models 实现注册表）与核心包都要在路径上：
+# 本文件可能由 GUI 通过 runpy 引导启动，sys.path[0] 不一定是 training/。
+for _extra in (ROOT / "src", Path(__file__).resolve().parent):
+    if str(_extra) not in sys.path:
+        sys.path.insert(0, str(_extra))
 
 
 def event(**values):
@@ -56,22 +60,59 @@ def build_training_input(config, output):
     return dict(config, data=report["path"])
 
 
-def execute(config, output):
-    from signal_analysis.data.annotations import AnnotationDataset
-    output = Path(output).resolve()
+def _package_versions(config):
+    """采集训练环境的依赖版本；IQ 任务按模型目录声明的依赖动态追加。"""
     import importlib.metadata
+
+    names = ["torch", "torchvision", "onnx", "onnxruntime", "ultralytics", "torchsig"]
+    if config.get("task", "iq") == "iq":
+        try:
+            from signal_analysis.algorithms.amc.ai_model import model_spec
+
+            names += [name for name in model_spec(config.get("arch", "cnn")).requires
+                      if name not in names]
+        except ValueError:
+            pass
     packages = {}
-    for name in ("torch", "torchvision", "onnx", "onnxruntime", "ultralytics", "torchsig"):
+    for name in names:
         try:
             packages[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
             pass
+    return packages
+
+
+def preflight(config):
+    """快照之前的最小预检：模型/参数/窗口（纯 Python）+ 训练环境依赖（torch 侧）。
+
+    参数非法、模型未通过导出验证或缺依赖时直接报错，不必先花时间装配训练输入。
+    """
+    if config.get("task", "iq") != "iq":
+        return config
+    from signal_analysis.services.training_jobs import preflight_iq
+
+    config = preflight_iq(config)
+    from amc_models import missing_requirements
+
+    missing = missing_requirements(config["arch"])
+    if missing:
+        raise ValueError(f"训练环境缺少依赖：{'、'.join(missing)}"
+                         f"（模型 {config['arch']}，请在训练 Python 环境安装）")
+    return config
+
+
+def execute(config, output):
+    from signal_analysis.data.annotations import AnnotationDataset
+    output = Path(output).resolve()
     (output / "environment.json").write_text(json.dumps(
-        {"python": sys.executable, "version": sys.version, "packages": packages}, indent=2),
+        {"python": sys.executable, "version": sys.version,
+         "packages": _package_versions(config)}, indent=2),
         encoding="utf-8")
     task = config.get("task", "iq")
     if task not in ("iq", "detection"):
         raise ValueError("未知训练任务")
+    # 模型与参数预检先于数据装配：非法配置不必先构建快照。
+    config = preflight(config)
     # 训练外部进程只训练：数据由本次运行从信号集合现场装配（第 10 节）。
     config = build_training_input(config, output)
     if task == "iq":

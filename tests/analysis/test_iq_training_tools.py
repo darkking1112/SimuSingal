@@ -6,8 +6,8 @@
   复现**、类别字典（A09 / 更宽字典）、TorchSig 混入的显式映射与跳过计数；
 * ``train_iq.py``：``load_dataset`` 的契约校验（形状/通道/类别/字段缺失一律报错）、
   分信噪比统计语义、**不导入 torch 也能 ``--help``**；
-* ``iq_cnn.py``：结构形状、训练可跑通、导出 ONNX 后与 PyTorch 数值一致且输入形状为
-  ``(1, 2, N)``（这一条只有真导出一次才能验证）、TCN 残差块确实参与前向与反传。
+* ``iq_cnn.py``（兼容转发层）与 ``training/amc_models``：结构形状、训练可跑通、导出 ONNX 后与
+  PyTorch 数值一致且输入形状为 ``(1, 2, N)``、TCN 残差块确实参与前向与反传。
 
 torch 相关用例统一 ``importorskip("torch")``：本仓库的常驻测试不依赖 torch，
 训练依赖放在 ``[train]`` extra 里。
@@ -413,17 +413,20 @@ def test_train_iq_per_snr_buckets_are_explicit_about_empty_bands(trainer):
 
 
 def test_training_scripts_do_not_import_torch_or_torchsig_at_module_level(trainer):
-    """``--help`` 与纯 NumPy 的数据集构建/验收不依赖 torch / torchsig。
+    """``--help``、纯 NumPy 的数据集构建/验收与模型目录查询都不依赖 torch / torchsig。
 
-    ``iq_cnn.py`` 是**故意的例外**：它整份都是 torch 网络定义，由 ``train_iq``
-    在真正训练时才导入（torch 属于 ``[train]`` extra，不是常驻依赖）。
+    网络定义在 ``training/amc_models``（由 ``train_iq`` 在真正训练时才导入），
+    ``iq_cnn.py`` 只是兼容转发层；``amc_models/__init__.py`` 与 ``src`` 侧的模型目录
+    必须保持零 torch，GUI 与 ``--help`` 才不用装 ``[train]``。
     """
     pattern = re.compile(r"^(?:import|from)\s+(torch|torchsig)(?:\.|\s|$)")
-    for name in ("train_iq.py", "build_iq_dataset.py", "verify_iq.py"):
+    for name in ("train_iq.py", "build_iq_dataset.py", "verify_iq.py",
+                 "amc_models/__init__.py"):
         text = (TRAINING / name).read_text(encoding="utf-8")
         assert not [line for line in text.splitlines() if pattern.match(line)], name
-    assert [line for line in (TRAINING / "iq_cnn.py").read_text(
-        encoding="utf-8").splitlines() if pattern.match(line)]
+    for name in ("amc_models/cnn.py", "amc_models/tcn.py", "amc_models/trainer.py"):
+        text = (TRAINING / name).read_text(encoding="utf-8")
+        assert [line for line in text.splitlines() if pattern.match(line)], name
     assert "torchsig" not in sys.modules
 
 
@@ -459,18 +462,41 @@ def test_iq_plan_passes_advanced_tuning_args(tmp_path):
 
     argv = iq_plan(base, tmp_path / "run2")[1]["argv"]
     for flag in ("--channels", "--kernel", "--dropout", "--weight-decay", "--patience"):
-        assert flag not in argv, flag  # 缺省 = 沿用 train_iq.py 默认值
+        assert flag not in argv, flag  # 缺省 = 沿用模型目录声明的默认值
+
+    # 新参数入口：没有旧 flag 的键走 --model-params JSON
+    argv = iq_plan({**base, "model_params": {"channels": [64, 128, 256]}},
+                   tmp_path / "run3")[1]["argv"]
+    assert "--model-params" in argv
+    assert json.loads(argv[argv.index("--model-params") + 1]) == {"channels": [64, 128, 256]}
 
     with pytest.raises(ValueError, match="3 个正整数"):
-        iq_plan({**tuned, "channels": "64,128"}, tmp_path / "run3")
+        iq_plan({**tuned, "channels": "64,128"}, tmp_path / "run4")
     with pytest.raises(ValueError, match="奇数"):
-        iq_plan({**tuned, "kernel": 4}, tmp_path / "run4")
-    with pytest.raises(ValueError, match="dropout"):
-        iq_plan({**tuned, "dropout": 1.0}, tmp_path / "run5")
+        iq_plan({**tuned, "kernel": 4}, tmp_path / "run5")
+    with pytest.raises(ValueError, match="[Dd]ropout"):
+        iq_plan({**tuned, "dropout": 1.0}, tmp_path / "run6")
     with pytest.raises(ValueError, match="早停轮数"):
-        iq_plan({**tuned, "patience": 0}, tmp_path / "run6")
-    with pytest.raises(ValueError, match="CNN / TCN"):
-        iq_plan({**tuned, "arch": "conv"}, tmp_path / "run7")
+        iq_plan({**tuned, "patience": 0}, tmp_path / "run7")
+    with pytest.raises(ValueError, match="未知架构"):
+        iq_plan({**tuned, "arch": "conv"}, tmp_path / "run8")
+    with pytest.raises(ValueError, match="不小于 2"):
+        iq_plan({**base, "arch": "tcn", "kernel": 1}, tmp_path / "run9")
+    with pytest.raises(ValueError, match="不认识参数"):
+        iq_plan({**base, "model_params": {"nope": 1}}, tmp_path / "run10")
+    with pytest.raises(ValueError, match="不能同时"):
+        iq_plan({**tuned, "model_params": {"kernel": 9}}, tmp_path / "run11")
+
+
+def test_preflight_iq_fills_window_and_rejects_unknown_model():
+    """preflight_iq 在快照之前补齐窗口长度并拒绝未知模型（纯 Python，无 torch）。"""
+    from signal_analysis.services.training_jobs import preflight_iq
+    from signal_analysis.contracts.iq import DEFAULT_IQ_SAMPLES
+    config = {"arch": "cnn", "epochs": 1, "batch": 2, "lr": 1e-3}
+    assert preflight_iq(config)["samples"] == DEFAULT_IQ_SAMPLES
+    assert preflight_iq({**config, "samples": 512})["samples"] == 512
+    with pytest.raises(ValueError, match="未知架构"):
+        preflight_iq({**config, "arch": "nope"})
 
 
 # --------------------------------------------------------------------------- IQCNN / TCN

@@ -14,6 +14,9 @@
 
 约定
 ----
+* 模型与参数由 :mod:`signal_analysis.algorithms.amc.ai_model` 目录声明（``--arch`` 取其 ID），
+  实现在 ``training/amc_models``；``--model-params`` 与旧 ``--channels/--kernel/--dropout``
+  等价，同一参数两处都显式给出会直接报错，未知参数一律拒绝；
 * 训练与推理共用 :func:`signal_analysis.algorithms.amc.iq_model.iq_waveform` 产出的窗口——数据集里存的
   就是推理端会拿到的**同一种** ``(2, N)`` 单位 RMS 张量，窗口长度由数据集契约给出；
 * 类别顺序即模型输出下标顺序，写进清单的 ``output.classes``，推理端按同一顺序解读；
@@ -36,6 +39,13 @@ for _extra in (REPO_ROOT / "src", Path(__file__).resolve().parent):
         sys.path.insert(0, str(_extra))
 
 from signal_analysis.evaluation import classification_metrics  # noqa: E402
+from signal_analysis.algorithms.amc.ai_model import (  # noqa: E402
+    CATALOG_VERSION,
+    available_models,
+    check_samples,
+    merge_param_sources,
+    model_spec,
+)
 from signal_analysis.contracts.iq import (  # noqa: E402
     IQ_DEFAULT_MODEL_NAME,
     IQ_INPUT_CHANNELS,
@@ -43,6 +53,8 @@ from signal_analysis.contracts.iq import (  # noqa: E402
     MIN_IQ_SAMPLES,
     write_iq_manifest,
 )
+
+from amc_models import export_onnx, train_classifier  # noqa: E402  （延迟导入 torch）
 
 #: 训练脚本自身产出的清单文件名
 MANIFEST_NAME = "iq_manifest.json"
@@ -52,10 +64,11 @@ TRAIN_EXTRA = "pip install .[train]"
 
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="训练原始 IQ 分类模型（CNN/TCN）并导出 ONNX",
+        description="训练原始 IQ 分类模型（--arch 取模型目录登记项）并导出 ONNX",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--data", required=True, help="数据集目录（build_iq_dataset.py 的输出）")
-    parser.add_argument("--arch", choices=("cnn", "tcn"), default="cnn", help="网络结构")
+    parser.add_argument("--arch", choices=available_models(), default="cnn",
+                        help="模型 ID（signal_analysis.algorithms.amc.ai_model 目录）")
     parser.add_argument("--epochs", type=int, default=30, help="训练轮数")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--events", action="store_true", help="输出 GUI 结构化进度")
@@ -63,9 +76,14 @@ def _parse_args(argv=None):
     parser.add_argument("--learning-rate", type=float, default=1e-3, help="学习率")
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="权重衰减")
     parser.add_argument("--patience", type=int, default=8, help="验证准确率不升即早停的轮数")
-    parser.add_argument("--dropout", type=float, default=0.1, help="dropout 比例")
-    parser.add_argument("--channels", default="", help="卷积通道数，逗号分隔（默认按结构取）")
-    parser.add_argument("--kernel", type=int, default=0, help="卷积核长度（0 = 按结构取默认）")
+    parser.add_argument("--dropout", type=float, default=None,
+                        help="dropout 比例（默认取模型目录声明值）")
+    parser.add_argument("--channels", default=None,
+                        help="卷积通道数，逗号分隔（默认取模型目录声明值）")
+    parser.add_argument("--kernel", type=int, default=None,
+                        help="卷积核长度（默认取模型目录声明值）")
+    parser.add_argument("--model-params", default="", metavar="JSON",
+                        help='模型参数 JSON（如 \'{"kernel": 9}\'）；与旧参数冲突时报错')
     parser.add_argument("--seed", type=int, default=0, help="随机种子")
     parser.add_argument("--min-snr", type=float, default=None,
                         help="只用带内信噪比不低于该值的样本训练（默认不过滤）")
@@ -199,16 +217,62 @@ def _channels(text):
         raise SystemExit(f"--channels 需要整数，逗号分隔：{text!r}") from exc
 
 
+def _model_params(args):
+    """把旧参数（--channels/--kernel/--dropout）与 --model-params 合并成参数字典。
+
+    默认值来自模型目录；同一参数两处都显式给出、或出现未知参数时直接报错，
+    不静默取其一。
+    """
+    spec = model_spec(args.arch)
+    legacy = {}
+    if args.channels:
+        legacy["channels"] = _channels(args.channels)
+    if args.kernel is not None:
+        legacy["kernel"] = args.kernel
+    if args.dropout is not None:
+        legacy["dropout"] = args.dropout
+    explicit = {}
+    if args.model_params:
+        try:
+            explicit = json.loads(args.model_params)
+        except ValueError as exc:
+            raise SystemExit(f"--model-params 需要 JSON 对象：{exc}") from exc
+        if not isinstance(explicit, dict):
+            raise SystemExit('--model-params 需要 JSON 对象（如 \'{"kernel": 9}\'）')
+    try:
+        return merge_param_sources(spec, legacy=legacy, explicit=explicit)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _dependency_versions(requires):
+    """按模型目录声明的依赖采集已安装版本（缺失记 None，不猜测）。"""
+    import importlib.metadata
+
+    versions = {}
+    for name in requires:
+        try:
+            versions[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            versions[name] = None
+    return versions
+
+
 def main(argv=None):
     args = _parse_args(argv)
     _require_torch()
     import torch
 
-    from iq_cnn import ARCH_REVISIONS, export_onnx, train_classifier
+    spec = model_spec(args.arch)
+    model_params = _model_params(args)
 
     card, waveforms, labels, splits, snrs, sources = load_dataset(args.data)
     classes = list((card.get("contract") or {}).get("classes") or [])
     samples = int((card.get("contract") or {})["samples"])
+    try:
+        check_samples(spec, samples)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     order = {name: position for position, name in enumerate(classes)}
     train_x, train_labels, train_snr, val_x, val_labels, val_snr = _split(
         waveforms, labels, splits, snrs)
@@ -222,11 +286,12 @@ def main(argv=None):
     val_y = np.asarray([order[name] for name in val_labels], dtype=np.int64)
     print(f"数据集 {args.data}：训练 {len(train_x)} / 验证 {len(val_x)}，"
           f"窗口 {samples} 点，类别 {len(classes)} 个")
+    print(f"模型 {args.arch}（结构版本 {spec.model_revision}）参数："
+          f"{json.dumps(model_params, ensure_ascii=False)}")
 
-    channels = _channels(args.channels)
     outcome = train_classifier(
-        train_x, train_y, val_x, val_y, classes=classes, arch=args.arch, channels=channels,
-        kernel=args.kernel or None, dropout=args.dropout, epochs=args.epochs,
+        train_x, train_y, val_x, val_y, classes=classes, arch=args.arch, params=model_params,
+        epochs=args.epochs,
         batch_size=args.batch_size, learning_rate=args.learning_rate,
         weight_decay=args.weight_decay, patience=args.patience, seed=args.seed,
         device=args.device, progress=(lambda item: print(
@@ -258,7 +323,11 @@ def main(argv=None):
     training_info = {
         "script": "training/train_iq.py",
         "arch": args.arch,
-        "arch_revision": ARCH_REVISIONS.get(args.arch, 1),
+        "model_revision": spec.model_revision,
+        "catalog_version": CATALOG_VERSION,
+        "model_params": model_params,
+        "num_params": int(sum(parameter.numel() for parameter in model.parameters())),
+        "model_deps": _dependency_versions(spec.requires),
         "dataset": str(Path(args.data)),
         "dataset_seed": card.get("seed"),
         "dataset_samples": card.get("sample_count"),
@@ -272,9 +341,9 @@ def main(argv=None):
         "batch_size": args.batch_size,
         "learning_rate": args.learning_rate,
         "weight_decay": args.weight_decay,
-        "dropout": args.dropout,
-        "channels": list(channels) if channels else None,
-        "kernel": args.kernel or None,
+        "dropout": model_params["dropout"],
+        "channels": model_params["channels"],
+        "kernel": model_params["kernel"],
         "seed": args.seed,
         "device": args.device,
         "best_epoch": outcome["best_epoch"],
@@ -297,7 +366,9 @@ def main(argv=None):
         raise SystemExit("清单里的类别顺序与训练时不一致，请删除清单后重跑")
     print(f"  清单类别：{manifest['classes']}（标签集合 {manifest['class_set']}）")
     (onnx_dir / "metrics.json").write_text(json.dumps(
-        {"arch": args.arch, "arch_revision": ARCH_REVISIONS.get(args.arch, 1),
+        {"arch": args.arch, "model_revision": spec.model_revision,
+         "model_params": model_params,
+         "num_params": int(sum(parameter.numel() for parameter in model.parameters())),
          "validation": validation, "history": outcome["history"],
          "note": "验证集标签评分；独立于资产 generation 真值评分"},
         ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")

@@ -323,6 +323,8 @@ def _manifest_params(task, payload):
         output = payload.get("output") if isinstance(payload.get("output"), dict) else {}
         params.update({"window_samples": source.get("samples"), "channels": source.get("channels"),
                        "classes": list(output.get("classes") or []),
+                       "model_revision": training.get("model_revision"),
+                       "num_params": training.get("num_params"),
                        "epochs": training.get("epochs"), "batch_size": training.get("batch_size"),
                        "learning_rate": training.get("learning_rate"),
                        "dropout": training.get("dropout"),

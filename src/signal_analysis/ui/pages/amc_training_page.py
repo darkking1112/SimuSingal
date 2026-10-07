@@ -8,6 +8,7 @@ import json
 from PySide6 import QtCore, QtWidgets
 
 from common.gui import direct_entry
+from ...algorithms.amc.ai_model import available_models
 from ...contracts.iq import (CLASS_SET_A09, DEFAULT_IQ_SAMPLES, IQ_INPUT_CHANNELS,
                              IQ_NORMALIZATION)
 from ...data.targets import carryover_fields
@@ -25,7 +26,8 @@ class AmcTrainingPage(TrainingPageBase):
     TASK = "iq"
     OWNER = "AMC 识别训练"
     TITLE = "AMC 识别训练"
-    MODEL_OPTIONS = ("cnn", "tcn")
+    #: 模型列表来自模型目录（signal_analysis.algorithms.amc.ai_model），与 CLI/服务层共用
+    MODEL_OPTIONS = available_models()
     HISTORY_TASKS = ("iq",)
     HAS_ANNOTATIONS = True
     ANNOTATION_TITLE = "信号标注"

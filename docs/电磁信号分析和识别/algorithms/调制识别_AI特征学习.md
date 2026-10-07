@@ -4,7 +4,7 @@
 | --- | --- |
 | 波形契约 | `iq_waveform_v1`（`(2, N)` float32、通道排布 `iq_channels_first_v1`、归一化 `unit_rms`） |
 | 结果契约 | `amc_iq_classify_v1` |
-| 分类网络 | `IQCNN`（步长一维卷积）/ `IQTCN`（膨胀因果卷积残差块），`training/iq_cnn.py` |
+| 分类网络 | `IQCNN`（步长一维卷积）/ `IQTCN`（膨胀因果卷积残差块）；模型目录 `algorithms/amc/ai_model/`（声明结构/参数/版本），实现在 `training/amc_models/`（`training/iq_cnn.py` 为兼容转发层） |
 | 训练实现 | `training/train_iq.py`（**不随 wheel 分发**，需要 `.[train]`） |
 | 数据集 | `training/build_iq_dataset.py`（每个样本：`(2, N)` 波形 + 调制标签 + SNR 等 metadata） |
 | 验收 | `training/verify_iq.py`（清单 / 契约 / 形状 / 确定性场景端到端 / 重复推理 / 数据集独立验证，共十项） |
@@ -74,7 +74,7 @@ IQ 通路的对手只有它自己的基线（同一数据划分上的 CNN vs TCN
 
 > **2026-10-07 更正**：`IQTCN.forward` 此前未调用残差块堆叠（实际等价于"1×1 卷积 + 池化 + MLP"），
 > 残差块参数从不训练、也不进导出图；现已修复（并补"残差块必须参与前向与反传"的结构回归测试），
-> 架构版本 `ARCH_REVISIONS["tcn"]` 由 1 升为 2（`cnn` 保持 1），见 §5.1 复测。
+> 架构版本 `model_revision` 由 1 升为 2（`cnn` 保持 1；兼容别名 `ARCH_REVISIONS`），见 §5.1 复测。
 
 **模型容量**（以本次实例的 `IQCNN`、6 类、$N=1024$ 为例）：三级步长卷积
 2→32→64→128（核长 7/5/3，每级 BatchNorm + GELU），时间维"平均池化 ⊕ 最大池化"拼成
@@ -84,7 +84,7 @@ IQ 通路的对手只有它自己的基线（同一数据划分上的 CNN vs TCN
 「覆盖默认训练参数（高级）」可直接设置通道/核长/dropout/权重衰减/早停轮数，
 不勾选即沿用默认值（详见 [AMC 识别训练](../08AMC识别训练.md) §4.3）。
 
-设计约束（都是踩过的坑，写进 `training/iq_cnn.py`）：
+设计约束（都是踩过的坑，写进 `training/amc_models/`）：
 
 * **softmax 写进图内**：图外再算 softmax 会让"ONNX 输出"与"产品展示的概率"失去唯一的定义处；
 * **导出按 batch = 1 探测**：产品侧 `iq_scores` 永远喂 `(1, 2, N)`，若按批导出静态形状，
@@ -139,7 +139,7 @@ $f_\text{analysis}=f_s/8$ 与滤波器完全一致，差别只在"交给判别�
 
 ### 2.2 分类网络结构
 
-**`IQCNN`**（`training/iq_cnn.py`）：三级带步长的一维卷积
+**`IQCNN`**（`training/amc_models/cnn.py`）：三级带步长的一维卷积
 $2\to32\to64\to128$（核长逐级 7→5→3，每级
 `Conv1d(stride=2, padding=kernel//2) + BatchNorm1d + GELU`），
 时间维**全局平均池化 ⊕ 最大池化**拼接成 256 维，接两层全连接
@@ -160,7 +160,7 @@ $$y[n]=\sum_{i=0}^{k-1} w_i\,u[n-i\cdot d],\qquad \text{pad}_\text{left}=(k-1)d$
 
 $$\mathcal{L}=-\frac{1}{B}\sum_{i=1}^{B}\ln p_{i,y_i}\quad(\text{CrossEntropyLoss})$$
 
-| 超参 | 默认值（`training/iq_cnn.py`，CLI 可覆盖） |
+| 超参 | 默认值（模型目录 `algorithms/amc/ai_model/cnn.py` 声明，CLI 可覆盖） |
 | --- | --- |
 | 优化器 | AdamW（学习率 $10^{-3}$、权重衰减 $10^{-4}$） |
 | 学习率调度 | CosineAnnealingLR |
@@ -225,8 +225,8 @@ flowchart TD
 | 1 集合生成 | 生成器按配方产出 IQ 集合（单信号、类别均衡、SNR 覆盖） | 信号集合（保留在工作区，可复现） | [02IQ信号生成页面](../02IQ信号生成页面.md) 的生成流程 |
 | 2 取窗 | 按真值逐条取目标 → 混频/低通/抽取/居中取 N 点/单位 RMS；**一条录制只出一个窗口** | `(2, N)` float32 + 波形摘要 | `algorithms/amc/iq_model.py::iq_waveform`（训练与推理同源） |
 | 3 数据集 | 抽好的窗口落盘，按集合切分写卡 | `iq_dataset.npz` + `iq_dataset.json` | `training/build_iq_dataset.py` |
-| 4 训练 | IQCNN / IQTCN 训练（AdamW + 早停，恢复最优轮） | `metrics.json` | `training/train_iq.py`、`training/iq_cnn.py` |
-| 5 导出 | softmax 写进图、batch=1 探测、`2e-4` 容差自检 | `iq.onnx` + `iq_manifest.json` | `training/iq_cnn.py::export_onnx` |
+| 4 训练 | IQCNN / IQTCN 训练（AdamW + 早停，恢复最优轮） | `metrics.json` | `training/train_iq.py`、`training/amc_models/` |
+| 5 导出 | softmax 写进图、batch=1 探测、`2e-4` 容差自检 | `iq.onnx` + `iq_manifest.json` | `training/amc_models/trainer.py::export_onnx` |
 | 6 验收 | 十项检查 + 数据集独立验证（+ 按 SNR 分档） | `verification.json` | `training/verify_iq.py` |
 | 7 推理 | 按清单口径取窗 → ONNX 会话 → 结果契约 | `amc_iq_classify_v1` | CLI `amc-iq-classify`；GUI「调制识别」页 |
 
@@ -332,8 +332,8 @@ A09 六类是交付口径，而 IQ 通路允许把数据里真实存在的类别
 
 | 对象 | 说明 |
 | --- | --- |
-| `train_iq.py` | `--data --arch {cnn,tcn} --epochs 30 --batch-size 64 --learning-rate 1e-3 --weight-decay 1e-4 --patience 8 --dropout 0.1 --channels --kernel --seed --min-snr --onnx-dir --identifier --version --opset --threads --default-offset-hz --default-bandwidth-hz --note`（另有 `--device`、`--events`） |
-| `train_classifier(train_x, train_y, val_x, val_y, *, classes, arch="cnn", …, device="cpu", progress=None)` | 返回 `{model, arch, best_accuracy, best_epoch, epochs_run, history}`；只依赖 torch，不引入训练框架 |
+| `train_iq.py` | `--data --arch {cnn,tcn} --epochs 30 --batch-size 64 --learning-rate 1e-3 --weight-decay 1e-4 --patience 8 --dropout --channels --kernel --model-params --seed --min-snr --onnx-dir --identifier --version --opset --threads --default-offset-hz --default-bandwidth-hz --note`（另有 `--device`、`--events`）；`--arch` 的候选来自模型目录，旧 `--channels/--kernel/--dropout` 与 `--model-params` 等价、同一参数写在两处会报错 |
+| `train_classifier(train_x, train_y, val_x, val_y, *, classes, arch="cnn", params=None, …, device="cpu", progress=None)` | 返回 `{model, arch, best_accuracy, best_epoch, epochs_run, history}`；参数由模型目录校验（旧 `channels/kernel/dropout` 关键字保留为兼容入口）；只依赖 torch，不引入训练框架 |
 | `export_onnx(model, path, *, classes, samples, opset=17)` | 导出并自检（图内 softmax、batch=1 探测、容差 `2e-4`、概率和） |
 | `verify_iq.py` | `--manifest --data --rate --duration --seed --threads --json`；`--data` 给出后额外报验证集指标与 `per_snr` |
 | GUI「覆盖默认训练参数（高级）」 | 通道/核长/dropout/权重衰减/早停轮数；与 CLI 共用同一套校验（`services/training_jobs.py::iq_tuning_args`） |
@@ -424,8 +424,9 @@ GUI、CLI、HTML 报表的每一个 IQ 分类结果都会带上这三条，**不
 | TCN 冒烟（512 点、每类 24、120 轮，与本节同规模） | 最佳验证准确率 0.4667（第 39 轮）；训练集损失降到 0.03，仍是小样本过拟合 |
 | TCN 单轮（§8 的 4400 条、1024 点、1 轮） | 独立验证集 0.7550（同数据集 CNN 3 轮为 0.8275），`verify_iq.py` 10 项检查通过 |
 
-`tcn` 的架构版本由 `ARCH_REVISIONS`（`training/iq_cnn.py`）记录并写入 `metrics.json` 与清单
-（`arch`/`arch_revision`）；**修正前的 TCN 数字一律作废**，与后续结果对比时按版本区分口径。
+`tcn` 的架构版本由模型目录（`algorithms/amc/ai_model/tcn.py` 的 `model_revision`）声明，
+并写入 `metrics.json` 与清单（`arch`/`model_revision`；`training/iq_cnn.py` 仍保留
+`ARCH_REVISIONS` 兼容别名）；**修正前的 TCN 数字一律作废**，与后续结果对比时按版本区分口径。
 
 ---
 
@@ -550,7 +551,7 @@ flowchart TD
 | 训练 / 验证集合 | `train-signal-test2` / `check-signal-test2` | 页面选择 |
 | `device` | `cpu` | 页面选择（无 GPU 也能跑） |
 | `epochs` / `batch` / `lr` / `seed` | 60（上限）/ 64 / 1e-3 / 7 | 页面设置；**上一版把 lr 写成 1e-7（界面最小值），loss 卡在 1.78 不动** |
-| 通道 / 核长 / dropout / 权重衰减 / 早停轮数 | 默认 32·64·128 / 7·5·3 / 0.1 / 1e-4 / 8 | `training/iq_cnn.py`、`train_iq.py` 的默认值（本次未覆盖，覆盖方式见 [AMC 识别训练](../08AMC识别训练.md) §4.3） |
+| 通道 / 核长 / dropout / 权重衰减 / 早停轮数 | 默认 32·64·128 / 7·5·3 / 0.1 / 1e-4 / 8 | 模型目录（`algorithms/amc/ai_model/`）声明结构参数默认值，训练配置沿用 `train_iq.py` 默认值（本次未覆盖，覆盖方式见 [AMC 识别训练](../08AMC识别训练.md) §4.3） |
 
 * 可训练参数 **103,270**（另 451 个 BatchNorm 缓冲量）；导出时 BN 折进卷积，
   ONNX 里 **102,822** 个张量元素、`iq.onnx` **419 KB**；

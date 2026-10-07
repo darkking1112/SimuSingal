@@ -347,7 +347,7 @@ CNN / TCN，让网络自己学调制特征。两者是**互不替代**的两条�
 | 波形契约 | `iq_waveform_v1`：`(2, N)`、通道排布 `iq_channels_first_v1`、归一化 `unit_rms` | `contracts/iq.py` |
 | 窗口长度 | 64 ≤ N ≤ 65536，默认 1024；**必须与清单 `input.samples` 一致** | `iq_waveform(window_samples=...)` |
 | 前端口径 | 抽取比 `samples_per_band = 8.0`、低通抽头 `lowpass_taps = 65`，与特征通路**同一份实现**（`algorithms/dsp/preprocess.py` 的混频/抽取） | `algorithms/amc/iq_model.py::_require_front_end` |
-| ONNX 契约 | 输入 `iq (1, 2, N)` float32、输出 `scores (1, C)` 概率（softmax 已写进图） | `training/iq_cnn.py::export_onnx` |
+| ONNX 契约 | 输入 `iq (1, 2, N)` float32、输出 `scores (1, C)` 概率（softmax 已写进图） | `training/amc_models/trainer.py::export_onnx` |
 | 清单 | `iq_waveform_v1` + `runtime=onnxruntime` + sha256 + 类别字典 + 前端口径 + 声明式默认中心/带宽 | `contracts/iq.py::write_iq_manifest` |
 | 结果契约 | `amc_iq_classify_v1`：波形摘要、`snr_estimate_db`、概率、可信度提示、待确认项 | `ml/iq.py::amc_iq_classify` |
 
