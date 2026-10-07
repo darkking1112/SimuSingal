@@ -81,8 +81,8 @@ IQ 通路的对手只有它自己的基线（同一数据划分上的 CNN vs TCN
 256 维，接 `256→256→6` 全连接与**图内 softmax**：**可训练参数 103,270 个**
 （导出时 BatchNorm 折叠进卷积，ONNX 里剩 102,822 个张量元素，文件约 419 KB）。
 结构超参此前只能在 `train_iq.py` 的命令行上给；现在 AMC 训练页的
-「覆盖默认训练参数（高级）」可直接设置通道/核长/dropout/权重衰减/早停轮数，
-不勾选即沿用默认值（详见 [AMC 识别训练](../08AMC识别训练.md) §4.3）。
+「覆盖默认结构参数（高级）」可直接设置目录里的结构参数（通道/核长/dropout，权重衰减与早停轮数
+在其下方单独给出），不勾选即沿用模型目录声明的默认值（详见 [AMC 识别训练](../08AMC识别训练.md) §4.3）。
 
 设计约束（都是踩过的坑，写进 `training/amc_models/`）：
 
@@ -170,8 +170,8 @@ $$\mathcal{L}=-\frac{1}{B}\sum_{i=1}^{B}\ln p_{i,y_i}\quad(\text{CrossEntropyLos
 | 结构 | `cnn`：通道 32/64/128、核长 7 → 7/5/3；`tcn`：通道 64、5 级、核长 3 |
 
 训练循环是"最朴素的确定性循环"（种子固定后逐轮可复现），逐轮 loss / 验证准确率写进
-`metrics.json`；结构超参可在 AMC 训练页「覆盖默认训练参数（高级）」手工覆盖
-（与 CLI 共用同一套校验，见 [AMC 识别训练](../08AMC识别训练.md) §4.3）。
+`metrics.json`；结构超参可在 AMC 训练页「覆盖默认结构参数（高级）」手工覆盖
+（与 CLI 共用模型目录的参数 schema，见 [AMC 识别训练](../08AMC识别训练.md) §4.3）。
 
 ### 2.4 导出与 ONNX 约定
 
@@ -336,7 +336,8 @@ A09 六类是交付口径，而 IQ 通路允许把数据里真实存在的类别
 | `train_classifier(train_x, train_y, val_x, val_y, *, classes, arch="cnn", params=None, …, device="cpu", progress=None)` | 返回 `{model, arch, best_accuracy, best_epoch, epochs_run, history}`；参数由模型目录校验（旧 `channels/kernel/dropout` 关键字保留为兼容入口）；只依赖 torch，不引入训练框架 |
 | `export_onnx(model, path, *, classes, samples, opset=17)` | 导出并自检（图内 softmax、batch=1 探测、容差 `2e-4`、概率和） |
 | `verify_iq.py` | `--manifest --data --rate --duration --seed --threads --json`；`--data` 给出后额外报验证集指标与 `per_snr` |
-| GUI「覆盖默认训练参数（高级）」 | 通道/核长/dropout/权重衰减/早停轮数；与 CLI 共用同一套校验（`services/training_jobs.py::iq_tuning_args`） |
+| GUI「覆盖默认结构参数（高级）」 | 目录声明的结构参数（通道/核长/dropout）走 `--model-params`；权重衰减/早停轮数是公共训练配置，走 `--weight-decay/--patience`；与 CLI 共用同一套校验（`services/training_jobs.py::iq_tuning_args`） |
+| AMC 训练页模型列表 | 「刷新模型列表」按训练环境查询目录（`services/training_jobs.py::query_catalog`），页面显示架构、窗口约束与依赖状态；配置带 `catalog_version` 与训练源码握手 |
 
 ```bash
 # 训练 CNN/TCN 并导出 ONNX + 清单
@@ -615,7 +616,7 @@ flowchart LR
 | 旧版 200/50 条训练，验证 0.58、loss 卡在 1.78 | ① 配方混入 `am`，落在 A09 六类字典之外 → 90 条被标 `out_of_taxonomy` **静默丢弃**（200 条只剩 171 个训练样本）；② 学习率写成 1e-7 | 新配方只用六类；生成结果与训练页现在显示"跳过的标签状态 / 实际样本数"，不再静默 |
 | 数字调制偶发"生成失败" | `_place_signals` 按**实际占用带宽**摆位，而真值校验用**标称带宽**，SPS 取整后两者不一致 | 摆位改为按名义带宽留保护带并回写真值（回归 3.6 万次摆位 0 失败） |
 | 页面上看不出走的是传统特征通路还是原始 IQ 通路 | 状态文本从不随模型切换刷新 | AMC 页新增状态指示器（通路名 · 模型 id@version · 结构），模型不可读时红字提示 |
-| CNN 超参只能改命令行 | 页面无入口 | 训练页新增「覆盖默认训练参数（高级）」，与 CLI 共用同一套校验 |
+| CNN 超参只能改命令行 | 页面无入口 | 训练页新增「覆盖默认结构参数（高级）」，与 CLI 共用同一套校验 |
 | 14 GB 集合，训练只用了 34 MB | 一条录制只取一个窗口（§2.1） | 记录在案；改进方向见 §7 第 7、8 条 |
 
 ### 8.8 自己复验的步骤

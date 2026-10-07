@@ -10,9 +10,10 @@ GUI、服务层与 CLI 共用这一份目录：``SPECS`` 显式聚合各模型�
 
 from __future__ import annotations
 
-from .base import (CATALOG_VERSION, KINDS, ModelSpec, ParamSpec, check_samples, describe,
-                   merge_param_sources, param_hint, samples_constraint, spec_json,
-                   validate_params, validate_value)
+from .base import (CATALOG_VERSION, KINDS, ModelSpec, ParamSpec, check_model_samples,
+                   check_samples, describe, describe_model, merge_param_sources, param_hint,
+                   parse_samples_constraint, samples_constraint, spec_json, validate_params,
+                   validate_value)
 from .base import catalog_json as _catalog_json
 from .cnn import SPEC as _CNN_SPEC
 from .tcn import SPEC as _TCN_SPEC
@@ -21,8 +22,9 @@ from .tcn import SPEC as _TCN_SPEC
 SPECS: dict[str, ModelSpec] = {spec.id: spec for spec in (_CNN_SPEC, _TCN_SPEC)}
 
 __all__ = ["CATALOG_VERSION", "KINDS", "ModelSpec", "ParamSpec", "SPECS", "available_models",
-           "catalog_json", "check_samples", "describe", "merge_param_sources", "model_spec",
-           "param_hint", "samples_constraint", "spec_json", "validate_params", "validate_value"]
+           "catalog_json", "check_model_samples", "check_samples", "describe", "describe_model",
+           "merge_param_sources", "model_spec", "param_hint", "parse_samples_constraint",
+           "samples_constraint", "spec_json", "validate_params", "validate_value"]
 
 
 def available_models() -> tuple[str, ...]:

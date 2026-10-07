@@ -8,6 +8,7 @@ import time
 
 import pytest
 
+from signal_analysis.contracts.iq import DEFAULT_IQ_SAMPLES
 from signal_analysis.data.datasets import build_rows
 from signal_analysis.ui.pages.training_common import metric_text
 from signal_analysis.ui.training_process import PROCESS_BOOTSTRAP
@@ -103,8 +104,8 @@ def test_amc_advanced_training_fields_are_opt_in(training_window):
     use_collection(window, app, name="高级参数集合", count=2)
     config = page.configuration()
     assert page.advanced_toggle.isChecked() is False
-    for key in ("channels", "kernel", "dropout", "weight_decay", "patience"):
-        assert key not in config, key          # 默认沿用 train_iq.py 的默认值
+    for key in ("model_params", "weight_decay", "patience"):
+        assert key not in config, key          # 默认沿用模型目录声明的默认值
     assert not page.iq_channels.isEnabled()
 
     page.advanced_toggle.setChecked(True)
@@ -116,9 +117,8 @@ def test_amc_advanced_training_fields_are_opt_in(training_window):
     page.iq_weight_decay.setValue(0.001)
     page.iq_patience.setValue(4)
     config = page.configuration()
-    assert config["channels"] == "64,128,256" and config["kernel"] == 9
-    assert config["dropout"] == 0.20 and config["weight_decay"] == 0.001
-    assert config["patience"] == 4
+    assert config["model_params"] == {"channels": [64, 128, 256], "kernel": 9, "dropout": 0.20}
+    assert config["weight_decay"] == 0.001 and config["patience"] == 4
 
     # 校验与执行侧共用同一份逻辑：cnn 通道数不对 / 核长为偶数直接拒绝
     from signal_analysis.services.training_jobs import iq_tuning_args
@@ -129,6 +129,55 @@ def test_amc_advanced_training_fields_are_opt_in(training_window):
     page.iq_kernel.setValue(4)
     with pytest.raises(ValueError, match="奇数"):
         iq_tuning_args(page.configuration(), "cnn")
+
+
+@pytest.mark.gui
+def test_amc_model_catalog_drives_architecture_window_and_parameters(training_window):
+    """模型目录驱动模型列表、架构展示、窗口长度与参数表单；刷新按训练环境核对。"""
+    app, window = training_window
+    page = window.amc_training_page
+    from signal_analysis.algorithms.amc.ai_model import (CATALOG_VERSION, model_spec,
+                                                         spec_json)
+    assert page.model_options() == ["cnn", "tcn"]
+    assert "IQCNN" in page.model_arch.toPlainText()
+    assert page.iq_channels is not None and page.iq_kernel is not None
+    assert page.model_hint.text() == ""                 # cnn 无窗口/依赖问题
+    config = page.configuration()
+    assert config["samples"] == DEFAULT_IQ_SAMPLES
+    assert config["catalog_version"] == CATALOG_VERSION
+
+    train_id = use_collection(window, app, name="目录训练集")
+    val_id = use_collection(window, app, name="目录验证集")
+    page.train_collection.setCurrentIndex(page.train_collection.findData(train_id))
+    page.val_collection.setCurrentIndex(page.val_collection.findData(val_id))
+    page.validate_training_config(page.configuration())   # 合法配置：先建 inputs_plan
+    app.processEvents()
+
+    # 按训练环境刷新：目录来自训练环境子进程（依赖状态随目录返回）
+    page.repository.setText(str(Path(__file__).resolve().parents[2]))
+    page.python.setText(sys.executable)
+    page._refresh_catalog()
+    app.processEvents()
+    assert "训练环境" in page.catalog_status.text()
+    assert page.model_options() == ["cnn", "tcn"]
+
+    # 伪目录：exact 窗口约束联动输入框；缺依赖的模型显示原因并拒绝起任务
+    fake = dict(spec_json(model_spec("cnn")))
+    fake.update(title="CV_TRN（示意）", samples="exact:128", missing=["timm"])
+    page._apply_catalog({"catalog_version": CATALOG_VERSION, "models": [fake]})
+    app.processEvents()
+    assert page.samples.value() == 128                  # 只有一个合法窗口长度
+    assert "timm" in page.model_hint.text() and "不可训练" in page.model_hint.text()
+    with pytest.raises(ValueError, match="缺少 cnn 的依赖"):
+        page.validate_task_config(page.configuration())
+
+    # 依赖齐备但窗口长度非法：同一处校验拒绝（手动改回 256 点）
+    page._apply_catalog({"catalog_version": CATALOG_VERSION,
+                         "models": [{**fake, "missing": []}]})
+    app.processEvents()
+    assert page.model_hint.text() == ""
+    with pytest.raises(ValueError, match="固定要求 128 点"):
+        page.validate_task_config({**page.configuration(), "samples": 256})
 
 
 @pytest.mark.gui

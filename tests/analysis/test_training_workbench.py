@@ -154,6 +154,7 @@ def test_gui_external_iq_training_from_collections_verify_and_load(window):
     page.arch.setCurrentText("cnn")
     page.epochs.setValue(1)
     page.batch.setValue(4)
+    page.samples.setValue(512)          # 窗口长度由页面配置，一路进数据快照与清单
     page.val_collection.setCurrentIndex(
         page.val_collection.findData(val["collection_id"]))
     assert page.train_collection.currentData() == train["collection_id"]
@@ -165,6 +166,10 @@ def test_gui_external_iq_training_from_collections_verify_and_load(window):
     # 本次运行的输入快照与集合溯源记录
     directory = page.runner.directory
     assert (directory / "collection_data" / "iq_dataset.json").is_file()
+    card = json.loads((directory / "collection_data" / "iq_dataset.json").read_text(encoding="utf-8"))
+    assert card["contract"]["samples"] == 512
+    manifest = json.loads((directory / "model" / "iq_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["input"]["samples"] == 512
     inputs = json.loads((directory / "training_inputs.json").read_text(encoding="utf-8"))
     assert inputs["train_collection"]["collection_id"] == train["collection_id"]
     assert inputs["val_collection"]["collection_id"] == val["collection_id"]

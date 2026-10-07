@@ -8,12 +8,14 @@ import json
 from PySide6 import QtCore, QtWidgets
 
 from common.gui import direct_entry
-from ...algorithms.amc.ai_model import available_models
+from ...algorithms.amc.ai_model import (available_models, catalog_json, check_model_samples,
+                                        describe_model, model_spec, parse_samples_constraint,
+                                        spec_json)
 from ...contracts.iq import (CLASS_SET_A09, DEFAULT_IQ_SAMPLES, IQ_INPUT_CHANNELS,
                              IQ_NORMALIZATION)
 from ...data.targets import carryover_fields
 from ...services.training_inputs import collection_task_set
-from ...services.training_jobs import iq_tuning_args
+from ...services.training_jobs import iq_tuning_args, query_catalog
 from .training_common import TrainingPageBase
 
 #: AMC 类别状态：与数据层 ``CLASS_STATES`` 一致。
@@ -46,31 +48,50 @@ class AmcTrainingPage(TrainingPageBase):
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         form.addRow("IQ 数据契约（只读）", self.iq_summary)
 
-        # 高级训练参数：默认关闭 = 用 train_iq.py 的默认结构超参；勾选后才写进配置
-        self.advanced_toggle = QtWidgets.QCheckBox("覆盖默认训练参数（高级）")
+        # 模型目录：默认用应用内置目录（未核对训练环境），按钮按下时按训练环境重新查询
+        self._catalog = json.loads(catalog_json())
+        catalog_row = QtWidgets.QWidget()
+        catalog_layout = QtWidgets.QHBoxLayout(catalog_row)
+        catalog_layout.setContentsMargins(0, 0, 0, 0)
+        self.refresh_catalog_button = QtWidgets.QPushButton("刷新模型列表")
+        self.refresh_catalog_button.setToolTip(
+            "按「训练源码根目录」与「训练环境 Python」查询模型目录：训练目录里新增模型文件即可"
+            "出现在模型列表，并显示依赖是否满足。查询失败时保留应用内置目录，依赖状态标注为未核对。")
+        self.refresh_catalog_button.clicked.connect(self._refresh_catalog)
+        catalog_layout.addWidget(self.refresh_catalog_button)
+        self.catalog_status = QtWidgets.QLabel()
+        self.catalog_status.setWordWrap(True)
+        catalog_layout.addWidget(self.catalog_status, 1)
+        form.addRow("模型目录", catalog_row)
+
+        self.model_arch = QtWidgets.QPlainTextEdit()
+        self.model_arch.setReadOnly(True)
+        self.model_arch.setMaximumHeight(150)
+        self.model_arch.setToolTip("来自模型目录的只读架构与参数说明（结构参数改动后需重新验收）")
+        form.addRow("模型架构（只读）", self.model_arch)
+
+        self.samples = QtWidgets.QSpinBox()
+        self.samples.setRange(1, 1 << 20)
+        self.samples.setValue(DEFAULT_IQ_SAMPLES)
+        self.samples.setToolTip("IQ 窗口长度（samples）：训练与验证数据都按该长度切片，"
+                                "模型必须支持该长度（约束见下方模型提示）")
+        self.samples.valueChanged.connect(self._sync_model_hint)
+        form.addRow("窗口长度（samples）", self.samples)
+
+        # 高级结构参数：默认关闭 = 用模型目录声明的默认值；勾选后才写进配置
+        self.advanced_toggle = QtWidgets.QCheckBox("覆盖默认结构参数（高级）")
         self.advanced_toggle.setToolTip(
-            "默认关闭：结构超参用 train_iq.py 的默认值（cnn 32,64,128 / 核长 7；"
-            "tcn 64 / 核长 3、dropout 0.1、权重衰减 1e-4、早停 8 轮）。勾选后下列字段"
-            "才写入训练配置；结构超参没有搜索证据，改动即视为新的实验口径，需要重新验收。")
+            "默认关闭：结构参数用模型目录声明的默认值（cnn 32,64,128 / 核长 7；"
+            "tcn 64 / 核长 3、dropout 0.1）。勾选后下列字段才写入训练配置；结构超参没有"
+            "搜索证据，改动即视为新的实验口径，需要重新验收。")
         self.advanced_toggle.toggled.connect(self._sync_advanced_enabled)
         form.addRow(self.advanced_toggle)
 
-        self.iq_channels = QtWidgets.QLineEdit()
-        self.iq_channels.setPlaceholderText("留空 = 默认；cnn 需 3 个宽度（如 64,128,256），tcn 只用第 1 个")
-        form.addRow("卷积通道", self.iq_channels)
-
-        self.iq_kernel = QtWidgets.QSpinBox()
-        self.iq_kernel.setRange(0, 65)
-        self.iq_kernel.setSpecialValueText("按结构默认（cnn 7 / tcn 3）")
-        self.iq_kernel.setToolTip("cnn 需不小于 3 的奇数；tcn 为正整数")
-        form.addRow("卷积核长", self.iq_kernel)
-
-        self.iq_dropout = QtWidgets.QDoubleSpinBox()
-        self.iq_dropout.setRange(0.0, 0.9)
-        self.iq_dropout.setDecimals(2)
-        self.iq_dropout.setSingleStep(0.05)
-        self.iq_dropout.setValue(0.10)
-        form.addRow("Dropout", self.iq_dropout)
+        self.params_box = QtWidgets.QWidget()
+        self.params_form = QtWidgets.QFormLayout(self.params_box)
+        self.params_form.setContentsMargins(0, 0, 0, 0)
+        form.addRow(self.params_box)
+        self._param_widgets = {}
 
         self.iq_weight_decay = QtWidgets.QDoubleSpinBox()
         self.iq_weight_decay.setRange(0.0, 1.0)
@@ -86,24 +107,175 @@ class AmcTrainingPage(TrainingPageBase):
         self.iq_patience.setToolTip("验证准确率连续多少轮不提升就早停（默认 8）")
         form.addRow("早停轮数", self.iq_patience)
 
-        self._advanced_fields = (self.iq_channels, self.iq_kernel, self.iq_dropout,
-                                 self.iq_weight_decay, self.iq_patience)
+        self._advanced_fields = (self.params_box, self.iq_weight_decay, self.iq_patience)
+        self.model_hint = QtWidgets.QLabel()
+        self.model_hint.setWordWrap(True)
+        form.addRow(self.model_hint)
+        self._specs = {}
+        self.arch.currentIndexChanged.connect(self._sync_model_hint)
+        self._apply_catalog(self._catalog)
         self._sync_advanced_enabled(False)
 
     def _sync_advanced_enabled(self, enabled):
-        """未勾选"覆盖默认训练参数"时字段置灰（配置里也不出现这些键）。"""
+        """未勾选"覆盖默认结构参数"时字段置灰（配置里也不出现这些键）。"""
         for field in getattr(self, "_advanced_fields", ()):
             field.setEnabled(bool(enabled))
 
+    # ------------------------------------------------------- 模型目录与参数
+    def model_options(self):
+        """模型列表来自当前目录（应用内置，或最近一次按训练环境刷新的结果）。"""
+        catalog = getattr(self, "_catalog", None) or json.loads(catalog_json())
+        return [model["id"] for model in catalog.get("models") or ()]
+
+    def _apply_catalog(self, payload, *, source=None):
+        """按目录重建模型下拉、架构展示与参数表单（模型列表即目录内容）。"""
+        self._catalog = payload
+        models = list(payload.get("models") or ())
+        keep = self.arch.currentText()
+        self.arch.blockSignals(True)
+        self.arch.clear()
+        self.arch.addItems([model["id"] for model in models])
+        index = self.arch.findText(keep)
+        self.arch.setCurrentIndex(max(index, 0))
+        self.arch.blockSignals(False)
+        self._specs = {model["id"]: model for model in models}
+        self._rebuild_param_fields()
+        self._update_catalog_status(payload, source)
+        self._sync_model_hint()
+        if hasattr(self, "train_button"):
+            self.refresh_controls()
+
+    def _rebuild_param_fields(self):
+        """按当前模型的结构参数声明重建控件：控件初值 = 目录声明的默认值。"""
+        while self.params_form.count():
+            item = self.params_form.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._param_widgets = {}
+        for param in (self._specs.get(self.arch.currentText(), {}).get("params") or ()):
+            field = self._param_widget(param)
+            self._param_widgets[param["name"]] = field
+            self.params_form.addRow(param.get("label") or param["name"], field)
+        # 兼容既有属性名：页面脚本与测试按 channels/kernel/dropout 取控件
+        self.iq_channels = self._param_widgets.get("channels")
+        self.iq_kernel = self._param_widgets.get("kernel")
+        self.iq_dropout = self._param_widgets.get("dropout")
+
+    def _param_widget(self, param):
+        """按参数类型造控件；约束（区间、奇数、长度、枚举）写进控件范围与提示。"""
+        kind, default = param["kind"], param["default"]
+        low, high = param.get("minimum"), param.get("maximum")
+        if kind == "int":
+            field = QtWidgets.QSpinBox()
+            field.setRange(int(low) if low is not None else 0,
+                           int(high) if high is not None else 10 ** 6)
+            if param.get("odd"):
+                field.setSingleStep(2)
+            field.setValue(int(default))
+        elif kind == "float":
+            field = QtWidgets.QDoubleSpinBox()
+            field.setDecimals(4)
+            field.setSingleStep(0.05 if (high is None or high > 1) else 0.01)
+            field.setRange(float(low) if low is not None else 0.0,
+                           float(high) if high is not None else 10 ** 6)
+            field.setValue(float(default))
+            direct_entry(field)
+        elif kind == "bool":
+            field = QtWidgets.QCheckBox()
+            field.setChecked(bool(default))
+        elif kind == "choice":
+            field = QtWidgets.QComboBox()
+            field.addItems([str(item) for item in param.get("choices") or ()])
+            field.setCurrentText(str(default))
+        else:  # int-list
+            field = QtWidgets.QLineEdit()
+            field.setPlaceholderText("留空 = 目录默认（{}）；多个值用逗号分隔".format(
+                ",".join(str(item) for item in default)))
+        field.setToolTip(param.get("hint") or param.get("help") or "")
+        return field
+
+    def _param_values(self):
+        """收集显式给出的结构参数；留空的列表参数不写入（沿用目录默认值）。"""
+        values = {}
+        for name, field in self._param_widgets.items():
+            if isinstance(field, QtWidgets.QLineEdit):
+                text = field.text().strip()
+                if not text:
+                    continue
+                tokens = [token.strip() for token in text.replace("，", ",").split(",")]
+                try:
+                    values[name] = [int(token) for token in tokens if token]
+                except ValueError:
+                    values[name] = text  # 交给目录参数校验统一报错
+            elif isinstance(field, QtWidgets.QSpinBox):
+                values[name] = int(field.value())
+            elif isinstance(field, QtWidgets.QDoubleSpinBox):
+                values[name] = float(field.value())
+            elif isinstance(field, QtWidgets.QCheckBox):
+                values[name] = bool(field.isChecked())
+            else:
+                values[name] = field.currentText()
+        return values
+
+    def _update_catalog_status(self, payload, source=None):
+        models = list(payload.get("models") or ())
+        if source == "env":
+            text = f"目录来自训练环境（版本 {payload.get('catalog_version')}）：{len(models)} 个模型"
+        else:
+            text = (f"目录为应用内置版本（版本 {payload.get('catalog_version')}，未与训练环境核对，"
+                    f"依赖状态未知）：{len(models)} 个模型；点“刷新模型列表”按训练环境核对")
+        unavailable = [model["id"] for model in models if model.get("missing")]
+        if unavailable:
+            text += f"；依赖不满足：{'、'.join(unavailable)}"
+        self.catalog_status.setText(text)
+
+    def _refresh_catalog(self):
+        """按训练环境查询模型目录；查询失败时保留内置目录并说明原因。"""
+        try:
+            payload = query_catalog(self.python.text().strip(), self.repository.text().strip())
+        except ValueError as exc:
+            self.catalog_status.setText(f"{exc}；继续使用应用内置目录（依赖状态未核对）")
+            return
+        self._apply_catalog(payload, source="env")
+
+    def _sync_model_hint(self, *_):
+        """刷新当前模型的架构文本、窗口约束与可用状态。"""
+        if not hasattr(self, "model_hint"):
+            return
+        model = self._specs.get(self.arch.currentText())
+        if model is None:
+            self.model_arch.setPlainText("")
+            self.model_hint.setText("")
+            return
+        self.model_arch.setPlainText(describe_model(model))
+        samples = int(self.samples.value())
+        kind, value = parse_samples_constraint(model["id"], model["samples"])
+        if kind == "exact" and samples != value:
+            # 只有一个合法长度时直接对齐，避免用户配出必被拒绝的窗口
+            self.samples.blockSignals(True)
+            self.samples.setValue(value)
+            self.samples.blockSignals(False)
+            samples = value
+        notes = []
+        try:
+            check_model_samples(model["id"], model["samples"], samples)
+        except ValueError as exc:
+            notes.append(str(exc))
+        unavailable = list(model.get("missing") or ())
+        if unavailable:
+            notes.append(f"训练环境缺少依赖：{'、'.join(unavailable)}：不可训练")
+        if not model.get("exportable", True):
+            notes.append("该模型尚未通过 ONNX 导出验证：暂不能作为训练任务运行")
+        self.model_hint.setText("；".join(notes))
+        self.model_hint.setStyleSheet("color: #b00020;" if notes else "")
+
     def configuration(self):
         config = super().configuration()
+        config["samples"] = int(self.samples.value())
+        config["catalog_version"] = int(self._catalog.get("catalog_version") or 0)
         if self.advanced_toggle.isChecked():
-            text = self.iq_channels.text().strip()
-            if text:
-                config["channels"] = text
-            if self.iq_kernel.value() > 0:
-                config["kernel"] = int(self.iq_kernel.value())
-            config["dropout"] = float(self.iq_dropout.value())
+            config["model_params"] = self._param_values()
             config["weight_decay"] = float(self.iq_weight_decay.value())
             config["patience"] = int(self.iq_patience.value())
         return config
@@ -113,8 +285,17 @@ class AmcTrainingPage(TrainingPageBase):
             self.inputs_plan["train"]["task_set"]["taxonomy_id"])["classes_json"])
         if len(classes) < 2:
             raise ValueError("AMC 训练至少需要 2 个类别：请检查训练集的类别字典")
-        # 高级训练参数在这里先校验一遍（iq_plan 会在起任务前复核同一份逻辑）
-        iq_tuning_args(config, config.get("arch", "cnn"))
+        arch = config.get("arch", "cnn")
+        # 用界面当前目录的条目校验（刷新后即训练环境目录）；版本握手保证两边一致
+        entry = self._specs.get(arch) or spec_json(model_spec(arch))
+        missing = list(entry.get("missing") or ())
+        if missing:
+            raise ValueError(f"训练环境缺少 {arch} 的依赖：{'、'.join(missing)}："
+                             "请在训练环境安装后重新刷新模型列表")
+        # 结构参数与窗口长度在这里先校验一遍（worker 起任务前复核同一份逻辑）
+        iq_tuning_args(config, arch)
+        check_model_samples(arch, entry.get("samples") or "any",
+                            int(config.get("samples") or DEFAULT_IQ_SAMPLES))
 
     # ------------------------------------------------------------------ 摘要
     def update_data_summary(self):
@@ -133,7 +314,7 @@ class AmcTrainingPage(TrainingPageBase):
                     task_set["taxonomy_id"])["classes_json"])
                 source = f"类别字典来自集合『{task_set['name']}』的 AMC 标注集"
         self.iq_summary.setText(
-            f"窗口长度：{DEFAULT_IQ_SAMPLES} samples · 通道：{IQ_INPUT_CHANNELS}"
+            f"窗口长度：{int(self.samples.value())} samples · 通道：{IQ_INPUT_CHANNELS}"
             f" · 归一化：{IQ_NORMALIZATION}\n类别顺序：{' / '.join(map(str, classes))}\n{source}")
         if hasattr(self, "target_table"):
             self._reload_annotation()

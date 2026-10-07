@@ -1,10 +1,12 @@
 """Training plans and persistent experiment records; no torch or Qt dependency."""
 import json
 import math
+import subprocess
 from pathlib import Path
 import shutil
 
-from ..algorithms.amc.ai_model import check_samples, merge_param_sources, model_spec
+from ..algorithms.amc.ai_model import (CATALOG_VERSION, check_samples, merge_param_sources,
+                                       model_spec)
 from ..contracts.iq import DEFAULT_IQ_SAMPLES
 
 
@@ -118,11 +120,58 @@ def preflight_iq(config):
     spec = model_spec(arch)
     if not spec.exportable:
         raise ValueError(f"模型 {spec.id} 尚未通过 ONNX 导出验证，不能作为训练任务运行")
+    declared = config.get("catalog_version")
+    if declared is not None and int(declared) != CATALOG_VERSION:
+        raise ValueError(f"模型目录版本不一致（界面 {declared} / 训练源码 {CATALOG_VERSION}）："
+                         "请在「训练配置」里重新点「刷新模型列表」再开始训练")
     iq_tuning_args(config, spec.id)
     samples = config.get("samples")
     samples = DEFAULT_IQ_SAMPLES if samples is None else int(samples)
     check_samples(spec, samples)
     return dict(config, samples=samples)
+
+
+#: 模型目录查询脚本：在训练环境里读目录并补上每个模型的依赖可用性（界面刷新模型列表用）
+_CATALOG_QUERY = (
+    "import json, sys; "
+    "sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[2]); "
+    "from signal_analysis.algorithms.amc.ai_model import catalog_json; "
+    "import amc_models; "
+    "payload = json.loads(catalog_json()); "
+    "[model.update(missing=list(amc_models.missing_requirements(model['id']))) "
+    "for model in payload['models']]; "
+    "print(json.dumps(payload, ensure_ascii=False))")
+
+
+def query_catalog(python, repository, *, timeout=30):
+    """用训练环境查询模型目录（含每个模型的依赖可用性）。
+
+    查询失败（Python/仓库路径不对、导入失败、输出无法解析）一律抛 ``ValueError``，
+    由界面回退到应用内置目录并标注"未验证"。
+    """
+    repo = Path(repository).expanduser().resolve()
+    for name in ("src", "training"):
+        if not (repo / name).is_dir():
+            raise ValueError(f"训练源码目录缺少 {name}/：{repo}")
+    interpreter = shutil.which(python) or python
+    try:
+        result = subprocess.run(
+            [interpreter, "-c", _CATALOG_QUERY, str(repo / "src"), str(repo / "training")],
+            capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError(f"无法在训练环境执行模型目录查询：{exc}") from exc
+    if result.returncode != 0:
+        lines = (result.stderr or result.stdout).strip().splitlines()
+        raise ValueError("训练环境模型目录查询失败：" + (lines[-1] if lines else "未知错误"))
+    try:
+        payload = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
+        int(payload["catalog_version"])
+        models = payload["models"]
+    except (ValueError, KeyError, TypeError, IndexError) as exc:
+        raise ValueError(f"训练环境返回的模型目录无法解析：{exc}") from exc
+    if not isinstance(models, list) or not models:
+        raise ValueError("训练环境返回的模型目录为空")
+    return payload
 
 
 def iq_plan(config, directory):

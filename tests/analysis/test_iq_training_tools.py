@@ -491,12 +491,36 @@ def test_iq_plan_passes_advanced_tuning_args(tmp_path):
 def test_preflight_iq_fills_window_and_rejects_unknown_model():
     """preflight_iq 在快照之前补齐窗口长度并拒绝未知模型（纯 Python，无 torch）。"""
     from signal_analysis.services.training_jobs import preflight_iq
+    from signal_analysis.algorithms.amc.ai_model import CATALOG_VERSION
     from signal_analysis.contracts.iq import DEFAULT_IQ_SAMPLES
     config = {"arch": "cnn", "epochs": 1, "batch": 2, "lr": 1e-3}
     assert preflight_iq(config)["samples"] == DEFAULT_IQ_SAMPLES
     assert preflight_iq({**config, "samples": 512})["samples"] == 512
+    assert preflight_iq({**config, "catalog_version": CATALOG_VERSION})["samples"] == 1024
     with pytest.raises(ValueError, match="未知架构"):
         preflight_iq({**config, "arch": "nope"})
+    # 界面声明的目录版本与训练源码不一致：先刷新模型列表，避免按旧参数起任务
+    with pytest.raises(ValueError, match="刷新模型列表"):
+        preflight_iq({**config, "catalog_version": CATALOG_VERSION + 1})
+
+
+def test_query_catalog_reads_the_catalog_from_a_training_environment(tmp_path):
+    """query_catalog 在训练环境子进程里读目录，并补上每个模型的依赖可用性。"""
+    from signal_analysis.services.training_jobs import query_catalog
+    from signal_analysis.algorithms.amc.ai_model import CATALOG_VERSION, available_models
+    repo = Path(__file__).resolve().parents[2]
+    payload = query_catalog(sys.executable, str(repo))
+    assert payload["catalog_version"] == CATALOG_VERSION
+    assert [model["id"] for model in payload["models"]] == list(available_models())
+    cnn = payload["models"][0]
+    assert cnn["layers"] and cnn["params"] and cnn["missing"] == []
+    assert all("missing" in model for model in payload["models"])
+
+    with pytest.raises(ValueError, match="缺少 src"):
+        query_catalog(sys.executable, str(tmp_path))
+    # 解释器路径非法时给出可读报错，而不是崩溃
+    with pytest.raises(ValueError, match="无法在训练环境执行"):
+        query_catalog(str(tmp_path / "python"), str(repo))
 
 
 # --------------------------------------------------------------------------- IQCNN / TCN

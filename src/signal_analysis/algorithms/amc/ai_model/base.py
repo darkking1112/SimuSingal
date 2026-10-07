@@ -186,7 +186,12 @@ def merge_param_sources(spec: ModelSpec, *, legacy: dict | None = None,
 
 def samples_constraint(spec: ModelSpec) -> tuple[str, int | None]:
     """解析 ``spec.samples``：返回 ``(kind, value)``，kind 为 any/exact/min。"""
-    text = str(spec.samples).strip().lower()
+    return parse_samples_constraint(spec.id, spec.samples)
+
+
+def parse_samples_constraint(model_id: str, constraint: str) -> tuple[str, int | None]:
+    """解析窗口约束文本：``"any"`` / ``"exact:<N>"`` / ``"min:<N>"``。"""
+    text = str(constraint).strip().lower()
     if text == "any":
         return "any", None
     for kind in ("exact", "min"):
@@ -195,23 +200,28 @@ def samples_constraint(spec: ModelSpec) -> tuple[str, int | None]:
             try:
                 return kind, int(text[len(prefix):])
             except ValueError as exc:  # pragma: no cover - 目录数据错误
-                raise ValueError(f"模型 {spec.id} 的窗口约束 {spec.samples!r} 非法") from exc
-    raise ValueError(f"模型 {spec.id} 的窗口约束 {spec.samples!r} 非法")
+                raise ValueError(f"模型 {model_id} 的窗口约束 {constraint!r} 非法") from exc
+    raise ValueError(f"模型 {model_id} 的窗口约束 {constraint!r} 非法")
+
+
+def check_model_samples(model_id: str, constraint: str, samples: int) -> None:
+    """校验窗口长度是否满足目录约束（不满足即报错，不做静默截断/补零）。"""
+    kind, value = parse_samples_constraint(model_id, constraint)
+    if kind == "any":
+        return
+    if kind == "exact" and int(samples) != value:
+        raise ValueError(f"模型 {model_id} 固定要求 {value} 点窗口，数据集是 {int(samples)} 点")
+    if kind == "min" and int(samples) < int(value):
+        raise ValueError(f"模型 {model_id} 要求窗口不少于 {value} 点，数据集是 {int(samples)} 点")
 
 
 def check_samples(spec: ModelSpec, samples: int) -> None:
     """校验窗口长度是否满足模型约束（不满足即报错，不做静默截断/补零）。"""
-    kind, value = samples_constraint(spec)
-    if kind == "any":
-        return
-    if kind == "exact" and int(samples) != value:
-        raise ValueError(f"模型 {spec.id} 固定要求 {value} 点窗口，数据集是 {int(samples)} 点")
-    if kind == "min" and int(samples) < int(value):
-        raise ValueError(f"模型 {spec.id} 要求窗口不少于 {value} 点，数据集是 {int(samples)} 点")
+    check_model_samples(spec.id, spec.samples, samples)
 
 
 def spec_json(spec: ModelSpec) -> dict:
-    """目录条目的 JSON 形式（GUI 的元数据查询接口用）。"""
+    """目录条目的 JSON 形式（GUI 的元数据查询接口用，含构建控件所需的约束字段）。"""
     return {
         "id": spec.id,
         "title": spec.title,
@@ -224,25 +234,45 @@ def spec_json(spec: ModelSpec) -> dict:
         "requires": list(spec.requires),
         "exportable": spec.exportable,
         "notes": spec.notes,
-        "params": [{"name": param.name, "kind": param.kind, "default": param.default,
+        "params": [{"name": param.name, "kind": param.kind,
+                    # 元组是目录里的写法，JSON 里统一成数组（GUI 直接当列表用）
+                    "default": list(param.default) if isinstance(param.default, tuple)
+                    else param.default,
                     "help": param.help, "hint": param_hint(param),
-                    "label": param.label or param.name} for param in spec.params],
+                    "label": param.label or param.name,
+                    "minimum": param.minimum, "maximum": param.maximum,
+                    "exclusive_minimum": param.exclusive_minimum,
+                    "exclusive_maximum": param.exclusive_maximum,
+                    "odd": param.odd, "choices": list(param.choices),
+                    "length": param.length, "minimum_length": param.minimum_length,
+                    "maximum_length": param.maximum_length,
+                    "element_minimum": param.element_minimum,
+                    "element_odd": param.element_odd, "divides": param.divides}
+                   for param in spec.params],
     }
+
+
+def describe_model(model: dict) -> str:
+    """按目录条目（``spec_json`` 形式）渲染只读文本（GUI 展示、日志与文档共用）。"""
+    lines = [f"{model['title']}（{model['id']} · 结构版本 {model['model_revision']}）",
+             model["summary"], "", "结构："]
+    lines.extend(f"  - {row}" for row in model["layers"])
+    if model.get("params"):
+        lines.extend(["", "参数："])
+        lines.extend(f"  - {param['label']}（默认 {param['default']}）：{param['hint']}"
+                     for param in model["params"])
+    lines.extend(["", f"窗口：{model['samples']} · 输入布局：{model['input_layout']}"
+                      f" · 依赖：{'、'.join(model['requires'])}"])
+    if model.get("missing"):
+        lines.append(f"当前训练环境不可用：缺少 {'、'.join(model['missing'])}")
+    if model.get("notes"):
+        lines.append(f"说明：{model['notes']}")
+    return "\n".join(lines)
 
 
 def describe(spec: ModelSpec) -> str:
     """模型架构与参数的只读文本（GUI 展示、日志与文档共用）。"""
-    lines = [f"{spec.title}（{spec.id} · 结构版本 {spec.model_revision}）", spec.summary, "", "结构："]
-    lines.extend(f"  - {row}" for row in spec.layers)
-    if spec.params:
-        lines.extend(["", "参数："])
-        lines.extend(f"  - {param.label or param.name}（默认 {param.default}）：{param_hint(param)}"
-                     for param in spec.params)
-    lines.extend(["", f"窗口：{spec.samples} · 输入布局：{spec.input_layout}"
-                      f" · 依赖：{'、'.join(spec.requires)}"])
-    if spec.notes:
-        lines.append(f"说明：{spec.notes}")
-    return "\n".join(lines)
+    return describe_model(spec_json(spec))
 
 
 def catalog_json(specs: dict[str, ModelSpec]) -> str:

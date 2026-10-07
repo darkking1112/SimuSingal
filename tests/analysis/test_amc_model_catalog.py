@@ -30,8 +30,10 @@ from signal_analysis.algorithms.amc.ai_model import (  # noqa: E402
     SPECS,
     catalog_json,
     check_samples,
+    describe_model,
     merge_param_sources,
     model_spec,
+    spec_json,
     validate_params,
 )
 
@@ -146,3 +148,20 @@ def test_catalog_json_lists_models_and_params():
     assert {param["name"] for param in cnn["params"]} == {"channels", "kernel", "dropout"}
     assert cnn["model_revision"] == SPECS["cnn"].model_revision
     assert cnn["layers"]
+
+
+def test_spec_json_carries_the_constraints_needed_to_build_controls():
+    """GUI 只凭 spec_json 就要能造控件：类型、默认值、区间/长度/奇数约束与提示都在。"""
+    entry = spec_json(model_spec("cnn"))
+    params = {param["name"]: param for param in entry["params"]}
+    channels = params["channels"]
+    assert channels["kind"] == "int-list" and channels["default"] == [32, 64, 128]
+    assert channels["length"] == 3 and channels["element_minimum"] == 1
+    kernel = params["kernel"]
+    assert kernel["kind"] == "int" and kernel["odd"] is True and kernel["minimum"] >= 3
+    assert params["dropout"]["kind"] == "float" and params["dropout"]["exclusive_maximum"]
+    assert all(param["label"] and param["hint"] for param in entry["params"])
+
+    text = describe_model(entry)
+    assert "IQCNN" in text and "结构：" in text and "参数：" in text
+    assert "窗口：" in text and "依赖：torch" in text

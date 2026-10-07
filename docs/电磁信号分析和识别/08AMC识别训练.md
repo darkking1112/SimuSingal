@@ -131,12 +131,15 @@
 
 | 字段 | 说明 |
 | --- | --- |
-| 模型 | 模型目录（`algorithms/amc/ai_model/`）登记的 `cnn` 或 `tcn`（IQCNN 步长卷积 / IQTCN 膨胀因果卷积），默认 `cnn` |
+| 模型 | 当前**模型目录**登记的模型 ID（默认 `cnn`、`tcn`，即 IQCNN 步长卷积 / IQTCN 膨胀因果卷积），默认 `cnn`；目录里的每个模型文件对应一个条目，页面只读文件里的元数据 |
+| 模型目录 | 「刷新模型列表」按钮 + 状态行：按「训练源码根目录」+「训练环境 Python」在训练环境里查询目录（含每个模型的依赖是否满足）。查询失败时保留应用内置目录，状态行注明"未与训练环境核对"；依赖或目录版本对不上时不允许起任务 |
+| 模型架构（只读） | 由目录渲染的架构文本：结构分层、参数与默认值、窗口约束、依赖与说明；切换模型即刷新 |
 | 模型名称（留空=自动） | 入库到模型库（`training/models/<名称>/`）时用的名称。留空按 `<模型类型>-<训练用途>-<UTC 时间>` 自动命名，本页用途固定为 `amc`（如 `cnn-amc-20261006T105213`）；手动填写时在预检里校验合法性（1–64 字符、不含 `/ \ : * ? " < > |`）与重名 |
 | 初始权重 / RT-DETR 目录与 YAML / 时频图边长 | **不存在**：这些是检测专属字段 |
 | IQ 数据契约摘要 | 只读（§3.4） |
-| IQ 窗口长度 `samples` | 固定契约，页面只读显示默认值 1024；worker 从配置取 `samples`，缺省用 `DEFAULT_IQ_SAMPLES`。窗口长度必须与清单 `input.samples` 一致，训练、验收与推理只有一份实现 |
-| 高级训练参数（可选） | 复选框「覆盖默认训练参数（高级）」**默认关闭**：关闭时配置里不出现这些键，沿用 `train_iq.py` 默认值（cnn 通道 32,64,128 / 核长 7；tcn 通道 64 / 核长 3；dropout 0.1、权重衰减 1e-4、早停 8 轮）。勾选后才写入 `channels`（cnn 需 3 个正整数；tcn 取第 1 个）、`kernel`、`dropout`、`weight_decay`、`patience`，由 `services/training_jobs.iq_tuning_args` 统一校验并转成 `train_iq.py` 的 `--channels/--kernel/--dropout/--weight-decay/--patience`——页面预检与 worker 执行**共用同一份逻辑**。结构超参没有搜索证据，改动即视为新的实验口径，需要重新验收 |
+| IQ 窗口长度 `samples` | **可改**，默认 1024（`DEFAULT_IQ_SAMPLES`）：写进配置后由 worker 按它装配数据快照，`train_iq.py` 再校验数据集声明的窗口与模型约束一致。模型声明 `exact:<N>` 时输入框自动对齐到唯一合法值，`min:<N>` 则在预检里拦截过短窗口；窗口长度必须与清单 `input.samples` 一致，训练、验收与推理只有一份实现 |
+| 结构参数（可选） | 复选框「覆盖默认结构参数（高级）」**默认关闭**：关闭时配置里不出现 `model_params`，一律用模型目录声明的默认值（cnn 通道 32,64,128 / 核长 7；tcn 通道 64 / 核长 3；dropout 0.1）。勾选后才写入 `model_params`（JSON），由 `services/training_jobs.iq_tuning_args` 按目录参数 schema 校验后转成 `train_iq.py` 的 `--model-params`——页面预检与 worker 执行**共用同一份逻辑**。结构超参没有搜索证据，改动即视为新的实验口径，需要重新验收 |
+| 权重衰减 / 早停轮数 | 公共训练参数（与模型结构无关），同样只在勾选高级后才写入配置，走 `--weight-decay` / `--patience` |
 
 页内说明：「训练数据取自信号集合：选择训练集与验证集集合即可，页内不生成数据、不导出训练集。“信号标注”查看并修改当前集合内左侧选中资产的参数与调制类别。」
 
@@ -148,11 +151,13 @@
 
 | 检查 | 拒绝文案 / 行为 |
 | --- | --- |
-| 任务与模型 | 「AMC 识别训练 只接受 iq 训练任务」；模型不在 `cnn`/`tcn` 内时「请选择当前页面支持的模型」 |
+| 任务与模型 | 「AMC 识别训练 只接受 iq 训练任务」；模型不在当前目录（默认 `cnn`/`tcn`）内时「请选择当前页面支持的模型」 |
 | 类别字典一致 | 「训练集与验证集的类别字典不同，无法一起训练：请统一后重试」 |
 | 类别数 | 「AMC 训练至少需要 2 个类别：请检查训练集的类别字典」（训练集标注集的类别数 < 2 时拒绝） |
 | 已确认类别 | 字典外与未知标签**不阻止训练**：它们被跳过并计数，只有「一个可训练样本都没有」才拒绝 |
-| 高级训练参数（勾选后） | `channels/kernel/dropout/weight_decay/patience` 由 `iq_tuning_args` 校验：cnn 需 3 个正整数通道、核长不小于 3 的奇数；tcn 通道 1～3 个、核长正整数；dropout ∈ [0,1)、权重衰减 ≥ 0、早停轮数 ≥ 1。非法值在起任务前报错，不创建实验目录 |
+| 结构参数（勾选后） | `model_params` 按模型目录的参数 schema 校验（未知参数、长度、区间、奇数、整除等规则都声明在目录里）：cnn 需 3 个正整数通道、核长不小于 3 的奇数；tcn 通道 1～3 个、核长不小于 2；dropout ∈ [0,1)；权重衰减 ≥ 0、早停轮数 ≥ 1。非法值在起任务前报错，不创建实验目录 |
+| 窗口长度 | 按模型目录的窗口约束（`any`/`exact:<N>`/`min:<N>`）校验：「模型 <id> 固定要求 <N> 点窗口，数据集是 <M> 点」等；页面同时在输入框上按 `exact` 约束对齐 |
+| 模型依赖与目录版本 | 训练环境缺依赖时「训练环境缺少 <id> 的依赖：…」；配置里的 `catalog_version` 与训练源码目录不一致时「模型目录版本不一致（界面 X / 训练源码 Y）：请在「训练配置」里重新点「刷新模型列表」再开始训练」 |
 | 快照为空 | 窗口生成全部失败时由 worker 报「没有可训练的 AMC 样本（需要已确认的类别，且频带内样本足够长）：<原因>（N 条）」 |
 | 模型名称 | 名称不合法时给出名称规则报错；模型库里已有同名模型时报「模型名称已存在：<名称>，请换一个名称或留空自动命名」 |
 
@@ -182,17 +187,17 @@
 
 | 字段 | 默认值 | 作用 | 影响与建议 |
 | --- | --- | --- | --- |
-| 模型 `arch` | `cnn` | 网络结构 | `cnn` = 步长卷积堆叠，`tcn` = 膨胀因果残差；同一份数据上实测 cnn 更好，窗口很长时可试 tcn |
+| 模型 `arch` | `cnn` | 网络结构 | 列表来自模型目录：`cnn` = 步长卷积堆叠，`tcn` = 膨胀因果残差；同一份数据上实测 cnn 更好，窗口很长时可试 tcn。「刷新模型列表」后训练目录里新增的模型会出现在这里，缺依赖的模型会标出原因 |
 | IQ 数据契约（只读） | — | 回显当前集合的窗口长度/通道排布/类别字典 | 只是回显；真正的契约校验在 worker 与 `train_iq.py` 里（契约不符直接报错，不训练） |
-| IQ 窗口长度 `samples` | 1024（只读） | 送进网络的采样点数 | 必须与清单 `input.samples` 一致；页面不给改——改窗口长度等于换契约，训练、验收、推理三处必须一起改 |
-| 覆盖默认训练参数（高级） | **关闭** | 打开后才把下面 5 个键写进配置 | 关闭时配置里**不出现**这些键，完全沿用 `train_iq.py` 默认值；结构超参没有搜索证据，改动即新的实验口径，需重新验收 |
+| IQ 窗口长度 `samples` | 1024 | 送进网络的采样点数：决定数据快照的切片长度与模型输入长度 | 必须与清单 `input.samples` 一致——改窗口长度等于换契约，训练、验收、推理三处必须一起改；模型有窗口约束时在这里拦截（`exact` 约束自动对齐到唯一合法值） |
+| 覆盖默认结构参数（高级） | **关闭** | 打开后才把结构参数写进配置 | 关闭时配置里**不出现** `model_params`，完全沿用模型目录声明的默认值；结构超参没有搜索证据，改动即新的实验口径，需重新验收 |
 
-**高级参数（勾选「覆盖默认训练参数」后才生效）**
+**可覆盖的参数（勾选「覆盖默认结构参数」后才生效）**
 
-| 字段 | 默认值 | 作用 | 约束（`services/training_jobs.iq_tuning_args` 校验） |
+| 字段 | 默认值 | 作用 | 约束（模型目录声明，`services/training_jobs.iq_tuning_args` 校验） |
 | --- | --- | --- | --- |
-| 卷积通道 `channels` | cnn `32,64,128`；tcn `64` | 各级特征宽度 | cnn 需 **3 个正整数**（如 `64,128,256`）；tcn 只取第 1 个；留空 = 用结构默认 |
-| 卷积核长 `kernel` | cnn 7；tcn 3 | 感受野 | cnn 需 **≥3 的奇数**；tcn 为正整数；0/留空 = 用结构默认 |
+| 卷积通道 `channels` | cnn `32,64,128`；tcn `64` | 各级特征宽度 | cnn 需 **3 个正整数**（如 `64,128,256`）；tcn 1～3 个正整数；留空 = 用目录默认 |
+| 卷积核长 `kernel` | cnn 7；tcn 3 | 感受野 | cnn 需 **≥3 的奇数**；tcn **≥2**；留空 = 用目录默认 |
 | Dropout `dropout` | 0.10 | 全连接前的丢弃率 | 取值 `[0, 0.9]`；小集合加大可抑过拟合，过大转为欠拟合 |
 | 权重衰减 `weight_decay` | 1e-4 | AdamW 的 L2 强度 | `≥ 0`；0 = 不加正则 |
 | 早停轮数 `patience` | 8 | 连续多少轮不提升就停 | `≥ 1`；调大只会多跑几轮，通常收益很小 |
@@ -213,7 +218,7 @@
 2. worker 首阶段「构建训练输入」：`inputs_plan` 复算预检（任务名 `iq` 映射到标注集任务 `amc`），取两个集合的 AMC 标注集，`build_rows` 装配候选行时**只保留 `class_state=known` 的目标**（`unknown`、`out_of_taxonomy`、未标注目标跳过）；训练集行标 `split=train`、验证集行标 `split=val`，**不按比例重划、不产生 `test` 划分**。
 3. `iq_snapshot` 把行实体化到 `runs/<id>/collection_data/`：每行按提取范围取 IQ，经推理端同一份 `iq_waveform` 前端口径生成 `(2, N)` float32 单位 RMS 窗口；窗口凑不满（样本不足等）时该行跳过并把异常文本计入 `skipped`；一个有效窗口都没有时直接报错。随后写 `iq_dataset.npz` 与 `iq_dataset.json`。
 4. `training_inputs.json` = `plan_summary(plan)`，记录两个集合的 ID／名称、标注集 ID 与启动时的样本统计；`experiment.json` 的 `config` 保存页面配置原样。**不写 `dataset_version_id`**。
-5. 之后的阶段由 `iq_plan` 生成：在所选 Python 环境里校验数据契约与 CUDA 可用性 → `train_iq.py` 训练并导出（页面勾选「覆盖默认训练参数」时附加 `--channels/--kernel/--dropout/--weight-decay/--patience`）→ `verify_iq.py` 验收。运行目录内的 `collection_data/` 只是本次输入快照，不作为用户可见的「导出的训练集」，也不在 `datasets/` 或数据版本表登记。
+5. 之后的阶段由 `iq_plan` 生成：在所选 Python 环境里校验数据契约与 CUDA 可用性 → `train_iq.py` 训练并导出（页面勾选「覆盖默认结构参数」时附加 `--model-params`，权重衰减/早停轮数走 `--weight-decay/--patience`）→ `verify_iq.py` 验收。运行目录内的 `collection_data/` 只是本次输入快照，不作为用户可见的「导出的训练集」，也不在 `datasets/` 或数据版本表登记。
 
 ### 5.2 运行目录布局（AMC 部分）
 
@@ -315,6 +320,7 @@
 | IQ 契约与清单 | `contracts/iq.py`（`iq_waveform_v1`/`iq_channels_first_v1`/`unit_rms`/A09）、`training/train_iq.py` | `test_iq_training_tools.py::test_iq_dataset_card_matches_inference_contract`、`::test_train_iq_load_dataset_validates_the_contract` |
 | 训练、导出与验收阶段 | `services/training_jobs.py::iq_plan`（含高级超参 `iq_tuning_args`）、`training/desktop_worker.py`、`training/train_iq.py`、`training/verify_iq.py` | `test_iq_training_tools.py::test_train_classifier_learns_and_exports_consistently`、`::test_iq_dataset_is_byte_reproducible`、`::test_iq_plan_passes_advanced_tuning_args` |
 | 高级训练参数（页面开关与校验） | `ui/pages/amc_training_page.py::add_task_fields`/`configuration`、`services/training_jobs.py::iq_tuning_args` | `test_training_page_split.py::test_amc_advanced_training_fields_are_opt_in`、`test_iq_training_tools.py::test_iq_plan_passes_advanced_tuning_args` |
+| 模型目录驱动展示（列表、架构、窗口、依赖） | `algorithms/amc/ai_model/`（`describe_model`/`spec_json`/`check_model_samples`）、`ui/pages/amc_training_page.py::_apply_catalog`/`_refresh_catalog`、`services/training_jobs.py::query_catalog`/`preflight_iq` | `test_amc_model_catalog.py`、`test_training_page_split.py::test_amc_model_catalog_drives_architecture_window_and_parameters`、`test_iq_training_tools.py::test_query_catalog_reads_the_catalog_from_a_training_environment`、`::test_preflight_iq_fills_window_and_rejects_unknown_model` |
 | 端到端（集合直读 → 训练 → 加载） | `training/desktop_worker.py` + 运行器 | `test_training_workbench.py::test_gui_external_iq_training_from_collections_verify_and_load`、`::test_iq_test_partition_does_not_enter_validation` |
 | 运行器进度/日志/收尾与运行槽 | `ui/training_runner.py`、`ui/training_coordinator.py`、`ui/training_process.py` | `test_training_page_split.py::test_progress_reports_epochs_and_resets_on_stage_change`、`::test_stop_and_close_terminate_worker_and_spawned_child`、`test_progress_channel.py` |
 | 指标展示（含 per_snr）与加载 | `ui/pages/training_common.py::metric_text`/`load_model`、`services/training_jobs.py`（`list_experiments`/`decode_worker_log`） | `test_training_page_split.py::test_metric_text_shows_per_snr_buckets`、`test_iq_training_tools.py::test_train_iq_per_snr_buckets_are_explicit_about_empty_bands` |
