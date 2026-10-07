@@ -564,7 +564,8 @@ def test_build_model_shapes_and_architecture_guard(cnn):
     for arch in cnn.ARCHITECTURES:
         model = cnn.build_model(arch, 3, samples=1024)
         with torch.no_grad():
-            output = model(torch.zeros(1, 2, 1024))
+            # 不能喂全零：AMC-Net 前向里有 L2 归一化（0/0 → NaN），这是原实现的性质
+            output = model(torch.randn(1, 2, 1024))
         assert output.shape == (1, 3)
         assert torch.isfinite(output).all()
     packed = cnn.SoftmaxClassifier(cnn.build_model("cnn", 3))
@@ -574,7 +575,74 @@ def test_build_model_shapes_and_architecture_guard(cnn):
     assert float(probabilities.sum()) == pytest.approx(1.0, abs=1e-5)
 
 
-# ------------------------------------------------------ 第三方模型（MCLDNN / PETCGDNN）
+# ------------------------------------------------- 第三方模型（MCLDNN / PETCGDNN）
+
+
+def test_amc_net_and_ascs_match_the_original_files(cnn):
+    """实现在训练目录维护副本：与原 ``custom/`` 文件同权重同输入时数值等价。"""
+    torch = pytest.importorskip("torch")
+    from amc_models import amc_net as amc_net_impl
+    from amc_models import ascs as ascs_impl
+    original_amc = _load("AMC_Net", REPO_ROOT / "custom" / "AMC_Net.py")
+    original_ascs = _load("ASCS", REPO_ROOT / "custom" / "ASCS.py")
+
+    torch.manual_seed(0)
+    reference = original_ascs.ASCS(num_classes=6).eval()
+    replica = ascs_impl.ASCS(num_classes=6, sig_len=128).eval()
+    replica.load_state_dict(reference.state_dict(), strict=False)
+    waveform = torch.randn(2, 2, 128)
+    with torch.no_grad():
+        want, got = reference(waveform), replica(waveform)
+    assert float((want - got).abs().max()) == 0.0        # 实数化 STFT 与 torch.stft 逐位一致
+
+    torch.manual_seed(0)
+    config = original_amc.get_amc_net_config_rml2016()
+    reference = original_amc.AMC_Net(**config).eval()
+    replica = amc_net_impl.AMC_Net(
+        num_classes=11, sig_len=128, extend_channel=36, latent_dim=512, num_heads=2,
+        conv_chan_list=[36, 64, 128, 256]).eval()
+    replica.load_state_dict(reference.state_dict(), strict=False)
+    waveform = torch.randn(2, 128, 2)
+    with torch.no_grad():
+        want, got = reference(waveform), replica(waveform)
+    deviation = float((want - got).abs().max())
+    assert deviation < 1e-6, deviation                    # DFT 矩阵 vs FFT：float32 级别差异
+
+
+def test_ascs_derives_its_fusion_width_from_the_window(cnn):
+    """ASCS 原实现把融合宽度写死 72（只对 128 点成立）；副本按窗口探测，因此长窗口可用。"""
+    torch = pytest.importorskip("torch")
+    import amc_models
+    original = _load("ASCS", REPO_ROOT / "custom" / "ASCS.py")
+    with pytest.raises(RuntimeError, match="72"):
+        with torch.no_grad():
+            original.ASCS(num_classes=6).eval()(torch.randn(1, 2, 1024))
+
+    for samples, width in ((128, 72), (256, 136), (1024, 520)):
+        model = amc_models.build_model("ascs", classes=6, samples=samples)
+        assert model.ffm_model.key_layer.in_features == width == samples // 2 + 8
+        with torch.no_grad():
+            assert model.eval()(torch.randn(1, 2, samples)).shape == (1, 6)
+
+
+def test_amc_net_build_checks_the_structure_it_depends_on(cnn):
+    """AMC-Net 的结构约束（主干首通道、多尺度 1/3、窗口可被头数整除）在构建期拒绝。"""
+    pytest.importorskip("torch")
+    import amc_models
+    with pytest.raises(ValueError, match="extend_channel"):
+        amc_models.build_model("amc_net", classes=6, samples=1024,
+                               params={"extend_channel": 32})
+    with pytest.raises(ValueError, match="能被 3 整除"):
+        amc_models.build_model("amc_net", classes=6, samples=1024,
+                               params={"extend_channel": 32, "conv_chan_list": [32, 64, 128, 256]})
+    with pytest.raises(ValueError, match="整除"):
+        amc_models.build_model("amc_net", classes=6, samples=1025, params={"num_heads": 2})
+    with pytest.raises(ValueError, match="窗口长度"):
+        amc_models.build_model("amc_net", classes=6)
+    with pytest.raises(ValueError, match="窗口长度"):
+        amc_models.build_model("ascs", classes=6)
+
+
 
 
 def test_wrapped_custom_models_train_export_and_keep_the_contract(cnn, tmp_path):
@@ -588,6 +656,8 @@ def test_wrapped_custom_models_train_export_and_keep_the_contract(cnn, tmp_path)
     import amc_models
     from signal_analysis.algorithms.amc.ai_model import SPECS
 
+    # ASCS 原文件里 ASSE 的 bn2 分支从不参与前向（原实现的死支），没有梯度属预期
+    idle_allowed = {"ascs": ("assm_module.bn2",)}
     for name in SPECS:
         model = amc_models.build_model(name, classes=6, samples=1024)
         model.train()
@@ -595,8 +665,9 @@ def test_wrapped_custom_models_train_export_and_keep_the_contract(cnn, tmp_path)
         assert logits.shape == (2, 6), name
         assert torch.isfinite(logits).all(), name
         torch.nn.functional.cross_entropy(logits, torch.tensor([0, 1])).backward()
+        allowed = idle_allowed.get(name, ())
         idle = [label for label, parameter in model.named_parameters()
-                if parameter.grad is None]
+                if parameter.grad is None and not any(part in label for part in allowed)]
         assert not idle, f"{name} 未参与前向的参数：{idle}"
         amc_models.export_onnx(model.eval(), tmp_path / f"{name}.onnx",
                                classes=list("abcdef"), samples=1024, opset=17)

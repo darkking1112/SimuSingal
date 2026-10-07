@@ -165,8 +165,10 @@ $$y[n]=\sum_{i=0}^{k-1} w_i\,u[n-i\cdot d],\qquad \text{pad}_\text{left}=(k-1)d$
 | `petcgdnn` | `custom/PETCGDNN.py` | PET 学一个旋转角 θ 用 sin/cos 混 I/Q → 两级 2D 卷积 → GRU → 全连接 | 73,018（`hidden_size` 128） | 把数据集窗口长度作为 `frame_length`（PET 的 `Linear 2N→1` 与长度绑定），不暴露成可调参数 |
 | `cv_trn` | `custom/CV_TRN.py` | I/Q 共享参数的**复值**多头自注意力（实/虚部两次注意力）+ 相对位置编码 + DB-GLU | 318,070（`d_model` 64、4 头、4 层） | 训练目录内维护副本：timm 的 `trunc_normal_` 换成本地等价实现、构造期不再按 CUDA 可用性写死设备；`seq_length` 取窗口长度 |
 | `poet` | `custom/POET.py` | 训练期物理增广 + 逐样本 AGC + 多尺度嵌入（跨尺度注意力）+ 复值 Transformer + 判别分类头 | 1,266,240（`d_model` 80、3 层、尺度 1/2/4/8） | 同上（`trunc_normal_`/`DropPath` 换成本地等价实现）；`seq_length` 取窗口长度，训练期增广只在 `train` 生效 |
+| `amc_net` | `custom/AMC_Net.py` | 频域自适应相关（AdaCorr）→ 多尺度卷积 → 4 级卷积主干 → 通道注意力融合 | 4,597,275（`extend_channel` 36、主干 36/64/128/256、2 头） | 维护副本：`torch.fft` 的复数算子换成 **DFT 矩阵**（cos/sin 表），`sig_len` 取窗口长度，`latent_dim` 由头数×主干末宽推出 |
+| `ascs` | `custom/ASCS.py` | STFT → 自适应频谱增强（ASSE）→ 卷积/残差堆叠 → 注意力融合 | 695,898（无结构参数；融合输入宽度随窗口 = N/2+8） | 维护副本：`torch.stft` 换成 **reflect 补零 + 定长分帧 + DFT 矩阵**（数值与 torch.stft 逐位一致），并把写死的 72 改成按窗口探测 |
 
-两者的共同代价是**速度**：LSTM/GRU/注意力在长窗口上开销大——1024 点、批 8 实测每训练步
+两者（`mcldnn`/`petcgdnn`）与上表四个模型的共同代价是**速度**：LSTM/GRU/注意力在长窗口上开销大——1024 点、批 8 实测每训练步
 约 `mcldnn` 0.87 s、`petcgdnn` 0.68 s、`cv_trn` 0.9 s、`poet` 3.2 s，
 比 CNN/TCN 慢一到三个数量级；`poet` 的注意力是 $O(L^2)$，窗口再长要按此预算估时间。
 `custom/` 下的原文件一律不改（`cv_trn`/`poet` 的训练副本差异只有 timm 导入与设备处理，
