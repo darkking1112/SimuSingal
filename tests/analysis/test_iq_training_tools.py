@@ -615,6 +615,75 @@ def test_petcgdnn_takes_its_window_from_the_dataset(cnn):
                                params={"frame_length": 512})
 
 
+@pytest.mark.parametrize("arch", ["cv_trn", "poet"])
+def test_transformer_models_are_deterministic_in_eval(cnn, arch):
+    """第三方 Transformer 的随机部分（RPO/物理增广/drop path）必须只在 train 生效。"""
+    torch = pytest.importorskip("torch")
+    import amc_models
+    model = amc_models.build_model(arch, classes=4, samples=512)
+    waveform = torch.randn(2, 2, 512)
+    model.train()
+    outputs = [model(waveform) for _ in range(3)]
+    assert any(not torch.allclose(outputs[0], other) for other in outputs[1:]), arch
+
+    model.eval()
+    with torch.no_grad():
+        first, second = model(waveform), model(waveform)
+    assert torch.equal(first, second), arch          # eval 无随机行为（导出/验收可复现）
+    assert first.shape == (2, 4)
+
+
+def test_third_party_transformer_copies_do_not_need_timm():
+    """CV_TRN/POET 的训练副本用本地工具替代 timm；custom/ 原文件保持原样（只读来源）。"""
+    import importlib.util
+    timm_import = re.compile(r"^(?:import|from)\s+timm(?:\.|\s|$)")
+    for name in ("cv_trn", "poet"):
+        text = (TRAINING / "amc_models" / f"{name}.py").read_text(encoding="utf-8")
+        assert not [line for line in text.splitlines() if timm_import.match(line)], name
+        assert "._nn_utils import" in text, name
+    # 原文件仍带 timm 导入：它是我们的来源，副本只改导入与设备处理
+    for name in ("CV_TRN.py", "POET.py"):
+        assert "from timm" in (REPO_ROOT / "custom" / name).read_text(encoding="utf-8"), name
+    if importlib.util.find_spec("torch") is None:
+        pytest.skip("没有 torch 时不检查依赖可用性")
+    import amc_models
+    for name in ("cv_trn", "poet"):
+        assert "timm" not in amc_models.missing_requirements(name), name
+
+
+def test_local_timm_replacements_keep_the_original_semantics():
+    """`_nn_utils` 的 `trunc_normal_` / `DropPath` 与 timm 同语义。
+
+    注意 timm 的 `trunc_normal_(t, std=0.02)` 语义是"标准正态截断在 ±2（绝对单位）后乘以 std"，
+    因此小 std 下几乎不产生截断——副本刻意保留这一行为，避免"更正确"的实现改变初始化口径。
+    """
+    torch = pytest.importorskip("torch")
+    from amc_models import _nn_utils
+    torch.manual_seed(0)
+    tensor = torch.empty(200_000)
+    _nn_utils.trunc_normal_(tensor, std=0.02)
+    assert abs(float(tensor.mean())) < 5e-4
+    assert abs(float(tensor.std()) - 0.02) < 5e-4
+    assert float(tensor.abs().max()) <= 2.0                    # 绝对值上限（timm 约定）
+
+    torch.manual_seed(0)
+    bounded = torch.empty(200_000)
+    _nn_utils.trunc_normal_(bounded, std=1.0)                  # std=1 时 ±2 截断真正生效
+    assert float(bounded.abs().max()) <= 2.0
+    assert 0.85 < float(bounded.std()) < 1.0
+
+    layer = _nn_utils.DropPath(0.5)
+    inputs = torch.ones(20_000, 4)
+    layer.eval()
+    assert torch.equal(layer(inputs), inputs)               # eval 恒等
+    layer.train()
+    dropped = layer(inputs)
+    zero_ratio = float((dropped == 0).float().mean())
+    assert 0.45 < zero_ratio < 0.55                         # 按 0.5 丢整条
+    assert float(dropped.mean()) == pytest.approx(1.0, abs=0.02)   # 除以 keep 保均值
+    assert torch.equal(_nn_utils.DropPath(0.0)(inputs), inputs)
+
+
 @pytest.mark.parametrize("arch", ["mcldnn", "petcgdnn"])
 def test_train_iq_records_the_resolved_params_of_wrapped_models(trainer, small_iq_dataset,
                                                                tmp_path, arch):

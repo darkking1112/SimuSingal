@@ -163,11 +163,14 @@ $$y[n]=\sum_{i=0}^{k-1} w_i\,u[n-i\cdot d],\qquad \text{pad}_\text{left}=(k-1)d$
 | --- | --- | --- | --- | --- |
 | `mcldnn` | `custom/MCLDNN.py` | I/Q 图像分支 + 双因果卷积分支 → 2D 卷积融合 → 双层 LSTM → 全连接 | 405,554（`dropout_rate` 0.5） | 直接按 `(B, 2, N)` 喂（原实现的 `(B, N, 2)` 兼容分支只认 N=128），类别数与 dropout 由目录给 |
 | `petcgdnn` | `custom/PETCGDNN.py` | PET 学一个旋转角 θ 用 sin/cos 混 I/Q → 两级 2D 卷积 → GRU → 全连接 | 73,018（`hidden_size` 128） | 把数据集窗口长度作为 `frame_length`（PET 的 `Linear 2N→1` 与长度绑定），不暴露成可调参数 |
+| `cv_trn` | `custom/CV_TRN.py` | I/Q 共享参数的**复值**多头自注意力（实/虚部两次注意力）+ 相对位置编码 + DB-GLU | 318,070（`d_model` 64、4 头、4 层） | 训练目录内维护副本：timm 的 `trunc_normal_` 换成本地等价实现、构造期不再按 CUDA 可用性写死设备；`seq_length` 取窗口长度 |
+| `poet` | `custom/POET.py` | 训练期物理增广 + 逐样本 AGC + 多尺度嵌入（跨尺度注意力）+ 复值 Transformer + 判别分类头 | 1,266,240（`d_model` 80、3 层、尺度 1/2/4/8） | 同上（`trunc_normal_`/`DropPath` 换成本地等价实现）；`seq_length` 取窗口长度，训练期增广只在 `train` 生效 |
 
-两者都遵守同一套契约（输入 `(B, 2, N)`、输出 logits、softmax 只在导出时进图），
-因此训练、验证评分、导出与验收不需要任何分支。代价是**速度**：LSTM/GRU 沿时间步展开，
-1024 点窗口上实测训练步约 0.87 s（`mcldnn`）与 0.68 s（`petcgdnn`）每批 8 条，
-比 CNN/TCN 慢一到两个数量级，长窗口批量训练前先按此预算估时间。
+两者的共同代价是**速度**：LSTM/GRU/注意力在长窗口上开销大——1024 点、批 8 实测每训练步
+约 `mcldnn` 0.87 s、`petcgdnn` 0.68 s、`cv_trn` 0.9 s、`poet` 3.2 s，
+比 CNN/TCN 慢一到三个数量级；`poet` 的注意力是 $O(L^2)$，窗口再长要按此预算估时间。
+`custom/` 下的原文件一律不改（`cv_trn`/`poet` 的训练副本差异只有 timm 导入与设备处理，
+文件头有明确记录）。
 
 ### 2.3 训练目标与超参（`train_classifier`）
 
