@@ -7,7 +7,7 @@
 * ``train_iq.py``：``load_dataset`` 的契约校验（形状/通道/类别/字段缺失一律报错）、
   分信噪比统计语义、**不导入 torch 也能 ``--help``**；
 * ``iq_cnn.py``：结构形状、训练可跑通、导出 ONNX 后与 PyTorch 数值一致且输入形状为
-  ``(1, 2, N)``（这一条只有真导出一次才能验证）。
+  ``(1, 2, N)``（这一条只有真导出一次才能验证）、TCN 残差块确实参与前向与反传。
 
 torch 相关用例统一 ``importorskip("torch")``：本仓库的常驻测试不依赖 torch，
 训练依赖放在 ``[train]`` extra 里。
@@ -491,6 +491,28 @@ def test_build_model_shapes_and_architecture_guard(cnn):
         probabilities = packed(torch.randn(1, 2, 256))
     assert probabilities.shape == (1, 3)
     assert float(probabilities.sum()) == pytest.approx(1.0, abs=1e-5)
+
+
+def test_tcn_forward_uses_the_residual_block_stack(cnn):
+    """TCN 的残差块必须真的参与前向与反传（防止"参数在 state_dict 里但前向不用"）。
+
+    模型默认训练态时 ``classifier`` 的 Dropout 会让两次前向天然不同，直接比较输出会误通过，
+    因此扰动参数前后都在 ``eval()`` + ``no_grad()`` 下取输出。
+    """
+    torch = pytest.importorskip("torch")
+    model = cnn.build_model("tcn", 3).eval()
+    waveform = torch.randn(2, 2, 256)
+    with torch.no_grad():
+        before = model(waveform)
+        next(model.blocks.parameters()).data.add_(1.0)
+        assert not torch.allclose(before, model(waveform))
+
+    model.train()
+    model(waveform).sum().backward()
+    gradients = [parameter.grad for parameter in model.blocks.parameters()]
+    assert gradients
+    assert all(gradient is not None and bool(gradient.abs().sum() > 0)
+               for gradient in gradients)
 
 
 def test_train_classifier_learns_and_exports_consistently(cnn, tmp_path):

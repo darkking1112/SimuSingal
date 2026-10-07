@@ -63,6 +63,9 @@ OUTPUT_NAME = "scores"
 TOLERANCE = 2e-4
 #: 架构名称（``train_iq.py --arch`` 的取值）
 ARCHITECTURES = ("cnn", "tcn")
+#: 架构版本：结构或前向语义变更时递增，随实验记录写入（历史实验按此区分口径）。
+#: tcn=2 对应 2026-10-07 修复 ``IQTCN.forward`` 未调用残差块堆叠的缺陷。
+ARCH_REVISIONS = {"cnn": 1, "tcn": 2}
 
 
 def _pooling(waveform):
@@ -124,7 +127,7 @@ class _CausalResidualBlock(nn.Module):
 
 
 class IQTCN(nn.Module):
-    """膨胀因果卷积（TCN）基线，层数与核长见模块级常量。"""
+    """膨胀因果卷积（TCN）基线：1×1 stem → 膨胀因果残差块堆叠 → 池化 → 分类头。"""
 
     def __init__(self, classes, channels=DEFAULT_TCN_CHANNELS, levels=DEFAULT_TCN_LEVELS,
                  kernel=DEFAULT_TCN_KERNEL, dropout=0.1):
@@ -144,7 +147,7 @@ class IQTCN(nn.Module):
         )
 
     def forward(self, waveform):
-        return self.classifier(_pooling(F.gelu(self.stem(waveform))))
+        return self.classifier(_pooling(self.blocks(F.gelu(self.stem(waveform)))))
 
 
 def build_model(arch, classes, *, channels=None, kernel=None, dropout=0.1):

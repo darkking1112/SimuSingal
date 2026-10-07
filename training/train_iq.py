@@ -204,7 +204,7 @@ def main(argv=None):
     _require_torch()
     import torch
 
-    from iq_cnn import export_onnx, train_classifier
+    from iq_cnn import ARCH_REVISIONS, export_onnx, train_classifier
 
     card, waveforms, labels, splits, snrs, sources = load_dataset(args.data)
     classes = list((card.get("contract") or {}).get("classes") or [])
@@ -258,6 +258,7 @@ def main(argv=None):
     training_info = {
         "script": "training/train_iq.py",
         "arch": args.arch,
+        "arch_revision": ARCH_REVISIONS.get(args.arch, 1),
         "dataset": str(Path(args.data)),
         "dataset_seed": card.get("seed"),
         "dataset_samples": card.get("sample_count"),
@@ -296,7 +297,8 @@ def main(argv=None):
         raise SystemExit("清单里的类别顺序与训练时不一致，请删除清单后重跑")
     print(f"  清单类别：{manifest['classes']}（标签集合 {manifest['class_set']}）")
     (onnx_dir / "metrics.json").write_text(json.dumps(
-        {"validation": validation, "history": outcome["history"],
+        {"arch": args.arch, "arch_revision": ARCH_REVISIONS.get(args.arch, 1),
+         "validation": validation, "history": outcome["history"],
          "note": "验证集标签评分；独立于资产 generation 真值评分"},
         ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
 
