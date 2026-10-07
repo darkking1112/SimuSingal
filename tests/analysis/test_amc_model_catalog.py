@@ -61,9 +61,10 @@ def test_specs_and_implementations_are_one_to_one():
     """模型 ID = 实现模块名 = 实现文件名；目录与实现目录互不缺失。"""
     assert CATALOG_VERSION >= 1
     assert set(SPECS) == {spec.id for spec in SPECS.values()}
-    # 实现目录里除私有模块与训练器（trainer.py）外，每个模块都应对应一个模型
+    # 实现目录里除私有模块、训练器（trainer.py）与 checkpoint 读写（checkpoint.py）外，
+    # 每个模块都应对应一个模型
     modules = {path.stem for path in (TRAINING / "amc_models").glob("*.py")
-               if not path.name.startswith("_") and path.stem != "trainer"}
+               if not path.name.startswith("_") and path.stem not in ("trainer", "checkpoint")}
     assert modules == set(SPECS)
     for name, spec in SPECS.items():
         assert spec.implementation == f"amc_models.{name}"

@@ -104,10 +104,30 @@ class AmcTrainingPage(TrainingPageBase):
         self.iq_patience = QtWidgets.QSpinBox()
         self.iq_patience.setRange(1, 1000)
         self.iq_patience.setValue(8)
-        self.iq_patience.setToolTip("验证准确率连续多少轮不提升就早停（默认 8）")
+        self.iq_patience.setToolTip("真值判据连续多少轮不改善就早停（默认 8；判据见下一行）")
         form.addRow("早停轮数", self.iq_patience)
 
-        self._advanced_fields = (self.params_box, self.iq_weight_decay, self.iq_patience)
+        self.iq_scheduler = QtWidgets.QComboBox()
+        self.iq_scheduler.addItem("余弦退火（默认，以轮数为周期）", "cosine")
+        self.iq_scheduler.addItem("ReduceLROnPlateau（按验证损失：factor 0.5 / patience 5 / min_lr 1e-7）",
+                                  "plateau")
+        self.iq_scheduler.setToolTip("训练策略切换（默认与历史实验口径一致）；改口径等于换实验，需重新验收")
+        form.addRow("学习率调度", self.iq_scheduler)
+
+        self.iq_monitor = QtWidgets.QComboBox()
+        self.iq_monitor.addItem("验证准确率最高（默认）", "accuracy")
+        self.iq_monitor.addItem("验证损失最低", "val_loss")
+        self.iq_monitor.setToolTip("早停与最佳权重（导出用）的判据；切换后指标里的"
+                                  "「最佳验证损失」始终记录在案")
+        form.addRow("存优判据", self.iq_monitor)
+
+        self.iq_checkpoint = QtWidgets.QCheckBox("另存最佳权重 checkpoint（运行目录 model/iq_checkpoint.pt）")
+        self.iq_checkpoint.setToolTip("checkpoint 里带模型 ID、结构版本、结构参数、类别顺序与窗口长度，"
+                                     "加载时逐项核对；ONNX 与清单不受影响")
+        form.addRow(self.iq_checkpoint)
+
+        self._advanced_fields = (self.params_box, self.iq_weight_decay, self.iq_patience,
+                                 self.iq_scheduler, self.iq_monitor, self.iq_checkpoint)
         self.model_hint = QtWidgets.QLabel()
         self.model_hint.setWordWrap(True)
         form.addRow(self.model_hint)
@@ -278,6 +298,9 @@ class AmcTrainingPage(TrainingPageBase):
             config["model_params"] = self._param_values()
             config["weight_decay"] = float(self.iq_weight_decay.value())
             config["patience"] = int(self.iq_patience.value())
+            config["scheduler"] = self.iq_scheduler.currentData()
+            config["monitor"] = self.iq_monitor.currentData()
+            config["save_checkpoint"] = bool(self.iq_checkpoint.isChecked())
         return config
 
     def validate_task_config(self, config):

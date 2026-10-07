@@ -107,6 +107,19 @@ def iq_tuning_args(config, arch):
         if isinstance(patience, bool) or not isinstance(patience, int) or patience < 1:
             raise ValueError("早停轮数应为不小于 1 的整数")
         args += ["--patience", str(patience)]
+    scheduler = config.get("scheduler")
+    if scheduler is not None:
+        if scheduler not in ("cosine", "plateau"):
+            raise ValueError("学习率调度器应为 cosine（余弦退火）或 plateau（按验证损失降半）")
+        args += ["--lr-scheduler", scheduler]
+    monitor = config.get("monitor")
+    if monitor is not None:
+        if monitor not in ("accuracy", "val_loss"):
+            raise ValueError("最佳权重判据应为 accuracy（验证准确率）或 val_loss（验证损失）")
+        args += ["--monitor", monitor]
+    save_checkpoint = config.get("save_checkpoint")
+    if save_checkpoint is not None and not isinstance(save_checkpoint, bool):
+        raise ValueError("save_checkpoint 应为布尔值（checkpoint 路径由运行时决定）")
     return args
 
 
@@ -229,7 +242,9 @@ def iq_plan(config, directory):
           "--epochs", config["epochs"], "--batch-size", config["batch"],
           "--learning-rate", config["lr"], "--seed", config["seed"],
           "--device", config["device"], "--events", "--onnx-dir", out / "model",
-          *tuning)
+          *tuning,
+          *(["--save-checkpoint", out / "model" / "iq_checkpoint.pt"]
+            if config.get("save_checkpoint") else []))
     stage("模型验收", "verify_iq.py", "--manifest", out / "model/iq_manifest.json",
           "--data", data, "--json", out / "verification.json", "--threads", 1)
     return stages

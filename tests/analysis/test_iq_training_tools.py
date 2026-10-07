@@ -425,7 +425,7 @@ def test_training_scripts_do_not_import_torch_or_torchsig_at_module_level(traine
         text = (TRAINING / name).read_text(encoding="utf-8")
         assert not [line for line in text.splitlines() if pattern.match(line)], name
     for name in ("amc_models/cnn.py", "amc_models/tcn.py", "amc_models/mcldnn.py",
-                 "amc_models/petcgdnn.py", "amc_models/trainer.py"):
+                 "amc_models/petcgdnn.py", "amc_models/trainer.py", "amc_models/checkpoint.py"):
         text = (TRAINING / name).read_text(encoding="utf-8")
         assert [line for line in text.splitlines() if pattern.match(line)], name
     assert "torchsig" not in sys.modules
@@ -489,7 +489,37 @@ def test_iq_plan_passes_advanced_tuning_args(tmp_path):
         iq_plan({**tuned, "model_params": {"kernel": 9}}, tmp_path / "run11")
 
 
-def test_preflight_iq_fills_window_and_rejects_unknown_model():
+def test_iq_plan_training_strategy_flags(tmp_path):
+    """训练策略（调度器/判据/checkpoint）走同一份校验，并落到 CLI 与运行目录路径。"""
+    from signal_analysis.services.training_jobs import iq_plan, iq_tuning_args
+    repo = Path(__file__).resolve().parents[2]
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "iq_dataset.json").write_text("{}", encoding="utf-8")
+    (data / "iq_dataset.npz").write_bytes(b"placeholder")
+    base = {"repository": str(repo), "python": sys.executable, "arch": "cnn",
+            "epochs": 5, "batch": 4, "lr": 1e-3, "seed": 7, "device": "cpu",
+            "data": str(data)}
+    strategy = {**base, "scheduler": "plateau", "monitor": "val_loss", "save_checkpoint": True}
+    args = iq_tuning_args(strategy, "cnn")
+    assert args[args.index("--lr-scheduler") + 1] == "plateau"
+    assert args[args.index("--monitor") + 1] == "val_loss"
+
+    run = tmp_path / "run"
+    argv = iq_plan(strategy, run)[1]["argv"]
+    path = argv[argv.index("--save-checkpoint") + 1]
+    assert path == str((run / "model" / "iq_checkpoint.pt").resolve())
+    assert iq_plan(base, tmp_path / "run2")[1]["argv"].count("--save-checkpoint") == 0
+
+    with pytest.raises(ValueError, match="cosine"):
+        iq_tuning_args({**base, "scheduler": "step"}, "cnn")
+    with pytest.raises(ValueError, match="accuracy"):
+        iq_tuning_args({**base, "monitor": "loss"}, "cnn")
+    with pytest.raises(ValueError, match="布尔值"):
+        iq_tuning_args({**base, "save_checkpoint": "model.pt"}, "cnn")
+
+
+
     """preflight_iq 在快照之前补齐窗口长度并拒绝未知模型（纯 Python，无 torch）。"""
     from signal_analysis.services.training_jobs import preflight_iq
     from signal_analysis.algorithms.amc.ai_model import CATALOG_VERSION
@@ -604,6 +634,38 @@ def test_train_iq_records_the_resolved_params_of_wrapped_models(trainer, small_i
     assert training["dataset_contract"]["samples"] == 512
 
 
+def test_train_iq_records_training_strategy_and_checkpoint(trainer, small_iq_dataset, tmp_path):
+    """`--lr-scheduler/--monitor/--save-checkpoint` opt-in：记录最佳验证损失与 checkpoint 元信息。"""
+    pytest.importorskip("torch")
+    checkpoint = tmp_path / "iq_checkpoint.pt"
+    assert trainer.main(["--data", str(small_iq_dataset.root), "--arch", "cnn", "--epochs", "3",
+                         "--batch-size", "4", "--lr-scheduler", "plateau", "--monitor", "val_loss",
+                         "--patience", "10", "--save-checkpoint", str(checkpoint),
+                         "--onnx-dir", str(tmp_path)]) == 0
+    training = json.loads((tmp_path / "iq_manifest.json").read_text(encoding="utf-8"))["training"]
+    assert training["monitor"] == "val_loss" and training["lr_scheduler"] == "plateau"
+    assert training["best_validation_loss"] is not None
+    assert training["best_validation_accuracy"] is not None   # 旧口径字段保留
+    assert training["checkpoint"] == str(checkpoint)
+
+    from amc_models.checkpoint import read_checkpoint
+    payload = read_checkpoint(checkpoint)
+    assert payload["model_id"] == "cnn" and payload["samples"] == 512
+    assert payload["extra"]["monitor"] == "val_loss"
+    assert payload["classes"] == training["dataset_contract"]["classes"]
+
+    card = json.loads((tmp_path / "metrics.json").read_text(encoding="utf-8"))
+    assert card["best_validation_loss"] == training["best_validation_loss"]
+    assert card["history"][0]["validation_loss"] is not None
+    # 默认路径不写 checkpoint，且仍是余弦退火 + 按验证准确率存优
+    assert trainer.main(["--data", str(small_iq_dataset.root), "--arch", "cnn", "--epochs", "1",
+                         "--batch-size", "4", "--onnx-dir", str(tmp_path / "plain")]) == 0
+    plain = json.loads((tmp_path / "plain" / "iq_manifest.json").read_text(encoding="utf-8"))
+    assert plain["training"]["monitor"] == "accuracy"
+    assert plain["training"]["lr_scheduler"] == "cosine"
+    assert plain["training"]["checkpoint"] is None
+
+
 def test_tcn_forward_uses_the_residual_block_stack(cnn):
     """TCN 的残差块必须真的参与前向与反传（防止"参数在 state_dict 里但前向不用"）。
 
@@ -660,3 +722,100 @@ def test_train_classifier_learns_and_exports_consistently(cnn, tmp_path):
     assert got.shape == (1, 2)
     assert float(np.max(np.abs(got - want))) < cnn.TOLERANCE
     assert float(got.sum()) == pytest.approx(1.0, abs=1e-5)
+
+
+# ------------------------------------------------- 训练策略（阶段 4：可选调度与判据）
+
+
+def _toy_split(seed=0, samples=256):
+    """tones（类别 0）/ noise（类别 1）各 24 条，按奇偶交替划分，两侧类别均衡。"""
+    rng = np.random.default_rng(seed)
+    tones = np.cos(2 * np.pi * 0.05 * np.arange(samples))[None, :].repeat(24, axis=0)
+    waveforms = np.concatenate([
+        np.stack([tones, tones], axis=1),                     # (24, 2, N) 类别 0
+        rng.standard_normal((24, 2, samples))]).astype(np.float32)  # 类别 1
+    labels = np.array([0] * 24 + [1] * 24, dtype=np.int64)
+    order = np.arange(len(labels))
+    return (waveforms[order[0::2]], labels[order[0::2]],
+            waveforms[order[1::2]], labels[order[1::2]])
+
+
+def test_train_classifier_default_strategy_is_unchanged(cnn):
+    """不传新参数时仍是"余弦退火 + 按验证准确率存优"，历史里只多出记录字段。"""
+    pytest.importorskip("torch")
+    train_x, train_y, val_x, val_y = _toy_split()
+    outcome = cnn.train_classifier(train_x, train_y, val_x, val_y, classes=["a", "b"],
+                                   arch="cnn", epochs=4, batch_size=8, seed=1, verbose=False)
+    assert outcome["monitor"] == "accuracy" and outcome["lr_scheduler"] == "cosine"
+    assert outcome["checkpoint"] is None
+    history = outcome["history"]
+    assert [entry["epoch"] for entry in history] == list(range(1, len(history) + 1))
+    assert all(set(entry) == {"epoch", "loss", "validation_accuracy", "validation_loss",
+                              "learning_rate"} for entry in history)
+    best = max(history, key=lambda entry: (entry["validation_accuracy"], -entry["epoch"]))
+    assert outcome["best_epoch"] == best["epoch"]
+    assert outcome["best_accuracy"] == pytest.approx(best["validation_accuracy"])
+    assert outcome["best_loss"] == pytest.approx(best["validation_loss"])
+    assert history[0]["learning_rate"] > history[-1]["learning_rate"]  # 余弦退火在衰减
+
+
+def test_train_classifier_can_monitor_validation_loss_and_plateau(cnn):
+    """``monitor="val_loss"`` 按最低验证损失存优；plateau 调度按验证损失、每 5 轮降半。"""
+    pytest.importorskip("torch")
+    train_x, train_y, val_x, val_y = _toy_split()
+    outcome = cnn.train_classifier(train_x, train_y, val_x, val_y, classes=["a", "b"],
+                                   arch="cnn", epochs=8, batch_size=8, seed=1, verbose=False,
+                                   lr_scheduler="plateau", monitor="val_loss", patience=100)
+    history = outcome["history"]
+    best = min(history, key=lambda entry: (entry["validation_loss"], entry["epoch"]))
+    assert outcome["best_epoch"] == best["epoch"]
+    assert outcome["best_loss"] == pytest.approx(best["validation_loss"])
+    assert outcome["best_accuracy"] == pytest.approx(best["validation_accuracy"])
+    assert outcome["monitor"] == "val_loss" and outcome["lr_scheduler"] == "plateau"
+    # ReduceLROnPlateau(val_loss, factor=0.5, patience=5)：前 5 轮不可能降，
+    # 之后只按 1e-3 × 0.5^k 的台阶下降，且停在 min_lr 之上
+    assert all(entry["learning_rate"] == pytest.approx(1e-3) for entry in history[:5])
+    assert {entry["learning_rate"] for entry in history} <= {1e-3, 5e-4, 2.5e-4, 1.25e-4}
+    with pytest.raises(ValueError, match="cosine 或 plateau"):
+        cnn.train_classifier(train_x, train_y, val_x, val_y, classes=["a", "b"], arch="cnn",
+                             epochs=1, verbose=False, lr_scheduler="step")
+    with pytest.raises(ValueError, match="accuracy 或 val_loss"):
+        cnn.train_classifier(train_x, train_y, val_x, val_y, classes=["a", "b"], arch="cnn",
+                             epochs=1, verbose=False, monitor="f1")
+
+
+def test_checkpoint_round_trip_and_compatibility_checks(cnn, tmp_path):
+    """checkpoint 带身份信息；模型 ID/结构版本/结构参数/类别/窗口任一不符即拒绝加载。"""
+    torch = pytest.importorskip("torch")
+    from amc_models import checkpoint as ckpt
+    train_x, train_y, val_x, val_y = _toy_split()
+    path = tmp_path / "iq_checkpoint.pt"
+    outcome = cnn.train_classifier(train_x, train_y, val_x, val_y, classes=["a", "b"],
+                                   arch="cnn", epochs=2, batch_size=8, seed=1, verbose=False,
+                                   checkpoint=path)
+    assert path.is_file()
+    payload = ckpt.read_checkpoint(path)
+    assert payload["model_id"] == "cnn" and payload["samples"] == 256
+    assert payload["classes"] == ["a", "b"]
+    assert payload["params"] == {"channels": [32, 64, 128], "kernel": 7, "dropout": 0.1}
+    assert payload["extra"]["monitor"] == "accuracy" and payload["extra"]["epochs_run"] >= 1
+    assert outcome["checkpoint"]["model_id"] == "cnn"
+
+    restored, _ = ckpt.restore(path, classes=["a", "b"])
+    trained = outcome["model"]
+    for key, value in trained.state_dict().items():
+        assert torch.equal(value, restored.state_dict()[key]), key
+
+    with pytest.raises(ValueError, match="模型 cnn"):
+        ckpt.load_state(path, arch="tcn", model=cnn.build_model("tcn", 2, samples=256))
+    with pytest.raises(ValueError, match="类别顺序"):
+        ckpt.restore(path, classes=["b", "a"])
+    with pytest.raises(ValueError, match="窗口长度"):
+        ckpt.load_state(path, arch="cnn", model=cnn.build_model("cnn", 2, samples=256),
+                        samples=512)
+    with pytest.raises(ValueError, match="结构参数"):
+        ckpt.load_state(path, arch="cnn", model=trained, params={"kernel": 9})
+    torch.save(dict(payload, model_revision=payload["model_revision"] + 1),
+               tmp_path / "older.pt")
+    with pytest.raises(ValueError, match="结构版本"):
+        ckpt.restore(tmp_path / "older.pt", classes=["a", "b"])

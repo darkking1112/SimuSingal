@@ -23,16 +23,29 @@ TOLERANCE = 2e-4
 def train_classifier(train_x, train_y, val_x, val_y, *, classes, arch="cnn", params=None,
                      channels=None, kernel=None, dropout=None,
                      epochs=30, batch_size=64, learning_rate=1e-3, weight_decay=1e-4,
-                     patience=8, seed=0, verbose=True, device="cpu", progress=None):
-    """确定性训练循环（AdamW + 交叉熵 + 按验证准确率早停）。
+                     patience=8, seed=0, verbose=True, device="cpu", progress=None,
+                     lr_scheduler="cosine", monitor="accuracy", checkpoint=None):
+    """确定性训练循环（AdamW + 交叉熵；默认余弦退火 + 按验证准确率早停）。
 
     ``arch`` 与 ``params`` 由模型目录解释（默认值来自目录声明）；``channels`` /
     ``kernel`` / ``dropout`` 是旧调用方式的兼容入口，与 ``params`` 冲突时报错。
-    返回 ``{model, arch, best_accuracy, best_epoch, epochs_run, history}``。
-    只依赖 torch 自身，不引入任何训练框架。
+
+    ``lr_scheduler`` / ``monitor`` 是 opt-in（默认值与历史口径一致）：
+    ``cosine`` 用 ``--epochs`` 为周期；``plateau`` 用 ``ReduceLROnPlateau(val_loss)``
+    （``factor=0.5``、``patience=5``、``min_lr=1e-7``，见 ``custom/训练参数.md``）；
+    ``monitor="val_loss"`` 时按**最低验证损失**选最佳轮（否则按最高验证准确率）。
+
+    ``checkpoint`` 给出路径时把最佳权重与身份信息（模型 ID/结构版本/参数/类别/窗口）
+    一并存盘，供 :func:`amc_models.checkpoint.restore` 复现加载。
+    返回 ``{model, arch, monitor, best_accuracy, best_loss, best_epoch, epochs_run,
+    history, checkpoint}``。
     """
     from . import build_model
 
+    if lr_scheduler not in ("cosine", "plateau"):
+        raise ValueError("学习率调度器只能是 cosine 或 plateau")
+    if monitor not in ("accuracy", "val_loss"):
+        raise ValueError("最佳权重判据只能是 accuracy 或 val_loss")
     train_x = np.asarray(train_x, dtype=np.float32)
     train_y = np.asarray(train_y, dtype=np.int64)
     val_x = np.asarray(val_x, dtype=np.float32)
@@ -54,7 +67,11 @@ def train_classifier(train_x, train_y, val_x, val_y, *, classes, arch="cnn", par
     model = build_model(arch, classes=len(classes), samples=int(train_x.shape[-1]),
                         params=resolved).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(int(epochs), 1))
+    if lr_scheduler == "plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-7)
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(int(epochs), 1))
     loss_function = nn.CrossEntropyLoss()
     inputs = torch.as_tensor(train_x, dtype=torch.float32)
     targets = torch.as_tensor(train_y, dtype=torch.long)
@@ -62,7 +79,7 @@ def train_classifier(train_x, train_y, val_x, val_y, *, classes, arch="cnn", par
     val_targets = torch.as_tensor(val_y, dtype=torch.long)
     generator = torch.Generator().manual_seed(seed)
     best_state = {key: value.clone() for key, value in model.state_dict().items()}
-    best_accuracy, best_epoch, stale, history = float("-inf"), 0, 0, []
+    best_accuracy, best_loss, best_epoch, stale, history = float("-inf"), float("inf"), 0, 0, []
     for epoch in range(1, max(int(epochs), 1) + 1):
         model.train()
         order = torch.randperm(inputs.shape[0], generator=generator)
@@ -74,21 +91,30 @@ def train_classifier(train_x, train_y, val_x, val_y, *, classes, arch="cnn", par
             loss.backward()
             optimizer.step()
             total_loss += float(loss.detach()) * int(index.numel())
-        scheduler.step()
         model.eval()
+        validation_loss, correct = 0.0, 0
         with torch.no_grad():
-            correct = 0
             for start in range(0, len(val_inputs), int(batch_size)):
-                stop = start + int(batch_size)
-                correct += int((model(val_inputs[start:stop].to(device)).argmax(dim=1)
-                                == val_targets[start:stop].to(device)).sum())
+                batch_inputs = val_inputs[start:start + int(batch_size)].to(device)
+                batch_targets = val_targets[start:start + int(batch_size)].to(device)
+                logits = model(batch_inputs)
+                validation_loss += float(loss_function(logits, batch_targets)) * batch_inputs.shape[0]
+                correct += int((logits.argmax(dim=1) == batch_targets).sum())
             accuracy = correct / len(val_inputs)
+        validation_loss /= len(val_inputs)
+        # 余弦调度按轮推进（与历史口径相同）；plateau 依赖验证损失，必须等评估完成
+        if lr_scheduler == "plateau":
+            scheduler.step(validation_loss)
+        else:
+            scheduler.step()
         history.append({"epoch": epoch, "loss": total_loss / order.numel(),
-                        "validation_accuracy": accuracy})
+                        "validation_accuracy": accuracy, "validation_loss": validation_loss,
+                        "learning_rate": float(optimizer.param_groups[0]["lr"])})
         if progress is not None:
             progress(dict(history[-1]))
-        if accuracy > best_accuracy:
-            best_accuracy, best_epoch, stale = accuracy, epoch, 0
+        improved = validation_loss < best_loss if monitor == "val_loss" else accuracy > best_accuracy
+        if improved:
+            best_accuracy, best_loss, best_epoch, stale = accuracy, validation_loss, epoch, 0
             best_state = {key: value.clone() for key, value in model.state_dict().items()}
         else:
             stale += 1
@@ -96,13 +122,25 @@ def train_classifier(train_x, train_y, val_x, val_y, *, classes, arch="cnn", par
                 break
         if verbose:
             print(f"  epoch {epoch:3d}  损失 {total_loss / order.numel():.4f}"
-                  f"  验证准确率 {accuracy:.4f}（最佳 {best_accuracy:.4f} @ {best_epoch}）",
-                  flush=True)
+                  f"  验证准确率 {accuracy:.4f}  验证损失 {validation_loss:.4f}"
+                  f"（最佳 {best_accuracy:.4f} @ {best_epoch}）", flush=True)
     model.load_state_dict(best_state)
     model.cpu()
     model.eval()
-    return {"model": model, "arch": arch, "best_accuracy": best_accuracy,
-            "best_epoch": best_epoch, "epochs_run": len(history), "history": history}
+    written = None
+    if checkpoint:
+        from .checkpoint import save_checkpoint
+
+        written = save_checkpoint(Path(checkpoint), model=model, arch=arch, classes=classes,
+                                  samples=int(train_x.shape[-1]), params=resolved,
+                                  extra={"epochs_run": len(history), "seed": seed,
+                                         "monitor": monitor, "lr_scheduler": lr_scheduler,
+                                         "best_epoch": best_epoch,
+                                         "best_accuracy": best_accuracy,
+                                         "best_validation_loss": best_loss})
+    return {"model": model, "arch": arch, "monitor": monitor, "lr_scheduler": lr_scheduler,
+            "best_accuracy": best_accuracy, "best_loss": best_loss, "best_epoch": best_epoch,
+            "epochs_run": len(history), "history": history, "checkpoint": written}
 
 
 def export_onnx(model, path, *, classes, samples, opset=17):

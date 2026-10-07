@@ -176,15 +176,25 @@ $$\mathcal{L}=-\frac{1}{B}\sum_{i=1}^{B}\ln p_{i,y_i}\quad(\text{CrossEntropyLos
 | 超参 | 默认值（模型目录 `algorithms/amc/ai_model/cnn.py` 声明，CLI 可覆盖） |
 | --- | --- |
 | 优化器 | AdamW（学习率 $10^{-3}$、权重衰减 $10^{-4}$） |
-| 学习率调度 | CosineAnnealingLR |
+| 学习率调度 | CosineAnnealingLR（`--lr-scheduler cosine`）；opt-in 的 `plateau` 用 `ReduceLROnPlateau(val_loss)`：`factor=0.5`、`patience=5`、`min_lr=1e-7` |
 | 轮数 / 批大小 | 30 / 64（页面轮数上限 60；§8 实例用 60） |
-| 早停 | 验证准确率 patience 8，恢复最优轮权重 |
+| 早停与存优 | 默认验证准确率 patience 8；`--monitor val_loss` 改为按**最低验证损失**存优并早停；两者都恢复最优轮权重（`--patience` 调耐心） |
+| checkpoint | `--save-checkpoint PATH` 额外存最佳权重 + 身份信息（模型 ID/结构版本/目录版本/结构参数/类别顺序/窗口长度） |
 | 随机种子 | 0（CLI `--seed`） |
 | 结构 | `cnn`：通道 32/64/128、核长 7 → 7/5/3；`tcn`：通道 64、5 级、核长 3 |
 
-训练循环是"最朴素的确定性循环"（种子固定后逐轮可复现），逐轮 loss / 验证准确率写进
-`metrics.json`；结构超参可在 AMC 训练页「覆盖默认结构参数（高级）」手工覆盖
-（与 CLI 共用模型目录的参数 schema，见 [AMC 识别训练](../08AMC识别训练.md) §4.3）。
+复现 `custom/训练参数.md` 的口径（AdamW + `ReduceLROnPlateau(val_loss)` + 最大 200 轮 +
+按最低验证损失存优）：
+`--epochs 200 --patience 10 --lr-scheduler plateau --monitor val_loss`（实测见
+[模型训练工作台验证记录](../模型训练验证记录.md)）。训练循环是"最朴素的确定性循环"
+（种子固定后逐轮可复现），逐轮 `loss / validation_accuracy / validation_loss /
+learning_rate` 写进 `metrics.json`；结构超参可在 AMC 训练页「覆盖默认结构参数（高级）」
+手工覆盖（与 CLI 共用模型目录的参数 schema，见 [AMC 识别训练](../08AMC识别训练.md) §4.3）。
+
+权重 checkpoint 由 `training/amc_models/checkpoint.py` 读写：
+`save_checkpoint()` 落盘（含身份信息），`load_state()` / `restore()` 加载时逐项核对
+**模型 ID、结构版本、目录版本、结构参数、类别顺序、窗口长度**，任一不符即拒绝——
+不允许"结构参数改了还去加载旧权重"。
 
 ### 2.4 导出与 ONNX 约定
 
@@ -345,7 +355,9 @@ A09 六类是交付口径，而 IQ 通路允许把数据里真实存在的类别
 
 | 对象 | 说明 |
 | --- | --- |
-| `train_iq.py` | `--data --arch {cnn,tcn,mcldnn,petcgdnn} --epochs 30 --batch-size 64 --learning-rate 1e-3 --weight-decay 1e-4 --patience 8 --dropout --channels --kernel --model-params --seed --min-snr --onnx-dir --identifier --version --opset --threads --default-offset-hz --default-bandwidth-hz --note`（另有 `--device`、`--events`）；`--arch` 的候选来自模型目录（登记几个就有几个），旧 `--channels/--kernel/--dropout` 与 `--model-params` 等价、同一参数写在两处会报错 |
+| `train_iq.py` | `--data --arch {cnn,tcn,mcldnn,petcgdnn} --epochs 30 --batch-size 64 --learning-rate 1e-3 --weight-decay 1e-4 --patience 8 --lr-scheduler {cosine,plateau} --monitor {accuracy,val_loss} --save-checkpoint --dropout --channels --kernel --model-params --seed --min-snr --onnx-dir --identifier --version --opset --threads --default-offset-hz --default-bandwidth-hz --note`（另有 `--device`、`--events`）；`--arch` 的候选来自模型目录（登记几个就有几个），旧 `--channels/--kernel/--dropout` 与 `--model-params` 等价、同一参数写在两处会报错 |
+| `train_classifier(…, lr_scheduler="cosine", monitor="accuracy", checkpoint=None)` | 返回 `{model, arch, monitor, lr_scheduler, best_accuracy, best_loss, best_epoch, epochs_run, history, checkpoint}`；`history` 每轮含 `loss / validation_accuracy / validation_loss / learning_rate` |
+| `amc_models.checkpoint` | `save_checkpoint` / `read_checkpoint` / `check_compatible` / `load_state` / `restore`：权重与身份信息一起存，加载时逐项核对 |
 | `train_classifier(train_x, train_y, val_x, val_y, *, classes, arch="cnn", params=None, …, device="cpu", progress=None)` | 返回 `{model, arch, best_accuracy, best_epoch, epochs_run, history}`；参数由模型目录校验（旧 `channels/kernel/dropout` 关键字保留为兼容入口）；只依赖 torch，不引入训练框架 |
 | `export_onnx(model, path, *, classes, samples, opset=17)` | 导出并自检（图内 softmax、batch=1 探测、容差 `2e-4`、概率和） |
 | `verify_iq.py` | `--manifest --data --rate --duration --seed --threads --json`；`--data` 给出后额外报验证集指标与 `per_snr` |

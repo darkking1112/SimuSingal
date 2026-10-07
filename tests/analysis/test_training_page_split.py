@@ -104,7 +104,8 @@ def test_amc_advanced_training_fields_are_opt_in(training_window):
     use_collection(window, app, name="高级参数集合", count=2)
     config = page.configuration()
     assert page.advanced_toggle.isChecked() is False
-    for key in ("model_params", "weight_decay", "patience"):
+    for key in ("model_params", "weight_decay", "patience", "scheduler", "monitor",
+                "save_checkpoint"):
         assert key not in config, key          # 默认沿用模型目录声明的默认值
     assert not page.iq_channels.isEnabled()
 
@@ -116,9 +117,14 @@ def test_amc_advanced_training_fields_are_opt_in(training_window):
     page.iq_dropout.setValue(0.20)
     page.iq_weight_decay.setValue(0.001)
     page.iq_patience.setValue(4)
+    page.iq_scheduler.setCurrentIndex(page.iq_scheduler.findData("plateau"))
+    page.iq_monitor.setCurrentIndex(page.iq_monitor.findData("val_loss"))
+    page.iq_checkpoint.setChecked(True)
     config = page.configuration()
     assert config["model_params"] == {"channels": [64, 128, 256], "kernel": 9, "dropout": 0.20}
     assert config["weight_decay"] == 0.001 and config["patience"] == 4
+    assert config["scheduler"] == "plateau" and config["monitor"] == "val_loss"
+    assert config["save_checkpoint"] is True
 
     # 校验与执行侧共用同一份逻辑：cnn 通道数不对 / 核长为偶数直接拒绝
     from signal_analysis.services.training_jobs import iq_tuning_args

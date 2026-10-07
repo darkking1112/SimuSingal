@@ -75,7 +75,16 @@ def _parse_args(argv=None):
     parser.add_argument("--batch-size", type=int, default=64, help="批大小")
     parser.add_argument("--learning-rate", type=float, default=1e-3, help="学习率")
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="权重衰减")
-    parser.add_argument("--patience", type=int, default=8, help="验证准确率不升即早停的轮数")
+    parser.add_argument("--patience", type=int, default=8,
+                        help="早停耐心：真值判据连续多少轮不改善即停（默认按验证准确率）")
+    parser.add_argument("--lr-scheduler", choices=("cosine", "plateau"), default="cosine",
+                        help="学习率调度：cosine（默认，以 --epochs 为周期）或 "
+                             "plateau（ReduceLROnPlateau(val_loss)，factor 0.5 / patience 5 / min_lr 1e-7）")
+    parser.add_argument("--monitor", choices=("accuracy", "val_loss"), default="accuracy",
+                        help="早停与最佳权重判据：accuracy（默认，最高验证准确率）或 "
+                             "val_loss（最低验证损失）")
+    parser.add_argument("--save-checkpoint", default="",
+                        help="另存最佳权重 checkpoint（含模型 ID/结构版本/参数/类别/窗口）到该路径")
     parser.add_argument("--dropout", type=float, default=None,
                         help="dropout 比例（默认取模型目录声明值）")
     parser.add_argument("--channels", default=None,
@@ -294,10 +303,16 @@ def main(argv=None):
         epochs=args.epochs,
         batch_size=args.batch_size, learning_rate=args.learning_rate,
         weight_decay=args.weight_decay, patience=args.patience, seed=args.seed,
-        device=args.device, progress=(lambda item: print(
+        device=args.device, lr_scheduler=args.lr_scheduler, monitor=args.monitor,
+        checkpoint=args.save_checkpoint or None,
+        progress=(lambda item: print(
             "TRAIN_EVENT " + json.dumps(item, allow_nan=False), flush=True)) if args.events else None)
     print(f"\n训练完成：最佳验证准确率 {outcome['best_accuracy']:.4f}"
-          f"（第 {outcome['best_epoch']} 轮，共跑 {outcome['epochs_run']} 轮）")
+          f"、最佳验证损失 {outcome['best_loss']:.4f}"
+          f"（第 {outcome['best_epoch']} 轮，共跑 {outcome['epochs_run']} 轮，"
+          f"判据 {outcome['monitor']}，调度 {outcome['lr_scheduler']}）")
+    if outcome["checkpoint"]:
+        print(f"checkpoint 已写入 {args.save_checkpoint}")
 
     model = outcome["model"]
 
@@ -348,6 +363,10 @@ def main(argv=None):
         "device": args.device,
         "best_epoch": outcome["best_epoch"],
         "best_validation_accuracy": outcome["best_accuracy"],
+        "best_validation_loss": outcome["best_loss"],
+        "monitor": outcome["monitor"],
+        "lr_scheduler": outcome["lr_scheduler"],
+        "checkpoint": str(args.save_checkpoint or "") or None,
         "validation": validation,
         "accuracy_in_sample": in_sample["accuracy"],
         "note": args.note or None,
@@ -369,6 +388,11 @@ def main(argv=None):
         {"arch": args.arch, "model_revision": spec.model_revision,
          "model_params": model_params,
          "num_params": int(sum(parameter.numel() for parameter in model.parameters())),
+         "best_epoch": outcome["best_epoch"],
+         "best_validation_accuracy": outcome["best_accuracy"],
+         "best_validation_loss": outcome["best_loss"],
+         "monitor": outcome["monitor"], "lr_scheduler": outcome["lr_scheduler"],
+         "checkpoint": str(args.save_checkpoint or "") or None,
          "validation": validation, "history": outcome["history"],
          "note": "验证集标签评分；独立于资产 generation 真值评分"},
         ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
