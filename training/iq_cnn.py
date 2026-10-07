@@ -27,11 +27,17 @@ ARCHITECTURES = available_models()
 ARCH_REVISIONS = {spec.id: spec.model_revision for spec in SPECS.values()}
 
 
-def build_model(arch, classes, *, channels=None, kernel=None, dropout=0.1):
-    """旧签名：按 ``arch`` 构建模型（未 softmax，输出 logits）。"""
-    params = {"dropout": dropout} if dropout is not None else {}
+def build_model(arch, classes, *, samples=None, channels=None, kernel=None, dropout=None):
+    """旧签名：按 ``arch`` 构建模型（未 softmax，输出 logits）。
+
+    ``samples`` 是数据集窗口长度：结构依赖窗口的模型（如 ``petcgdnn``）必须给，
+    其余模型可以不给；旧的结构参数（channels/kernel/dropout）只在显式给出时覆盖目录默认值。
+    """
+    params = {}
+    if dropout is not None:
+        params["dropout"] = float(dropout)
     if channels is not None:
         params["channels"] = tuple(channels)
     if kernel is not None:
         params["kernel"] = int(kernel)
-    return _build_model(arch, classes=classes, params=params)
+    return _build_model(arch, classes=classes, samples=samples, params=params)

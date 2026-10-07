@@ -424,7 +424,8 @@ def test_training_scripts_do_not_import_torch_or_torchsig_at_module_level(traine
                  "amc_models/__init__.py"):
         text = (TRAINING / name).read_text(encoding="utf-8")
         assert not [line for line in text.splitlines() if pattern.match(line)], name
-    for name in ("amc_models/cnn.py", "amc_models/tcn.py", "amc_models/trainer.py"):
+    for name in ("amc_models/cnn.py", "amc_models/tcn.py", "amc_models/mcldnn.py",
+                 "amc_models/petcgdnn.py", "amc_models/trainer.py"):
         text = (TRAINING / name).read_text(encoding="utf-8")
         assert [line for line in text.splitlines() if pattern.match(line)], name
     assert "torchsig" not in sys.modules
@@ -531,9 +532,9 @@ def test_build_model_shapes_and_architecture_guard(cnn):
     with pytest.raises(ValueError, match="架构"):
         cnn.build_model("rnn", 3)
     for arch in cnn.ARCHITECTURES:
-        model = cnn.build_model(arch, 3)
+        model = cnn.build_model(arch, 3, samples=1024)
         with torch.no_grad():
-            output = model(torch.zeros(1, 2, 256))
+            output = model(torch.zeros(1, 2, 1024))
         assert output.shape == (1, 3)
         assert torch.isfinite(output).all()
     packed = cnn.SoftmaxClassifier(cnn.build_model("cnn", 3))
@@ -541,6 +542,66 @@ def test_build_model_shapes_and_architecture_guard(cnn):
         probabilities = packed(torch.randn(1, 2, 256))
     assert probabilities.shape == (1, 3)
     assert float(probabilities.sum()) == pytest.approx(1.0, abs=1e-5)
+
+
+# ------------------------------------------------------ 第三方模型（MCLDNN / PETCGDNN）
+
+
+def test_wrapped_custom_models_train_export_and_keep_the_contract(cnn, tmp_path):
+    """``custom/`` 包装层：目录里的每个模型都能按 1024 点窗口前向/反传并导出。
+
+    契约与 cnn/tcn 一致：输入 ``(B, 2, N)``、输出 ``(B, C)`` logits；导出走
+    ``amc_models.export_onnx``（图内 softmax + batch=1 探针 + 2e-4 数值容差）。
+    """
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("onnxruntime")
+    import amc_models
+    from signal_analysis.algorithms.amc.ai_model import SPECS
+
+    for name in SPECS:
+        model = amc_models.build_model(name, classes=6, samples=1024)
+        model.train()
+        logits = model(torch.randn(2, 2, 1024))
+        assert logits.shape == (2, 6), name
+        assert torch.isfinite(logits).all(), name
+        torch.nn.functional.cross_entropy(logits, torch.tensor([0, 1])).backward()
+        idle = [label for label, parameter in model.named_parameters()
+                if parameter.grad is None]
+        assert not idle, f"{name} 未参与前向的参数：{idle}"
+        amc_models.export_onnx(model.eval(), tmp_path / f"{name}.onnx",
+                               classes=list("abcdef"), samples=1024, opset=17)
+
+
+def test_petcgdnn_takes_its_window_from_the_dataset(cnn):
+    """PETCGDNN 的旋转层把窗口长度写进权重形状：构建时必须给 samples，且不暴露该参数。"""
+    pytest.importorskip("torch")
+    import amc_models
+    with pytest.raises(ValueError, match="窗口长度"):
+        amc_models.build_model("petcgdnn", classes=6)
+    with pytest.raises(ValueError, match="不少于 16"):
+        amc_models.build_model("petcgdnn", classes=6, samples=8)
+    with pytest.raises(ValueError, match="不认识参数"):
+        amc_models.build_model("petcgdnn", classes=6, samples=1024,
+                               params={"frame_length": 512})
+
+
+@pytest.mark.parametrize("arch", ["mcldnn", "petcgdnn"])
+def test_train_iq_records_the_resolved_params_of_wrapped_models(trainer, small_iq_dataset,
+                                                               tmp_path, arch):
+    """训练记录只写目录参数（不再写死 cnn/tcn 的 channels/kernel/dropout）。"""
+    pytest.importorskip("torch")
+    assert trainer.main(["--data", str(small_iq_dataset.root), "--arch", arch, "--epochs", "1",
+                         "--batch-size", "4", "--onnx-dir", str(tmp_path)]) == 0
+    training = json.loads((tmp_path / "iq_manifest.json").read_text(encoding="utf-8"))["training"]
+    assert training["arch"] == arch
+    assert training["model_revision"] >= 1
+    assert training["num_params"] > 0
+    assert training["model_params"]  # 目录参数（默认值也记录）
+    for legacy in ("channels", "kernel", "dropout"):
+        assert legacy not in training, legacy
+    card = json.loads((tmp_path / "metrics.json").read_text(encoding="utf-8"))
+    assert card["arch"] == arch and card["model_params"] == training["model_params"]
+    assert training["dataset_contract"]["samples"] == 512
 
 
 def test_tcn_forward_uses_the_residual_block_stack(cnn):

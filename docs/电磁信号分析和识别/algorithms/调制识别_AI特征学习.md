@@ -156,6 +156,19 @@ $$y[n]=\sum_{i=0}^{k-1} w_i\,u[n-i\cdot d],\qquad \text{pad}_\text{left}=(k-1)d$
 两者都**不含任何归一化层**：窗口归一化由 `iq_waveform` 在推理前统一完成，
 训练数据也是同一个函数产出的，不给"训练-推理口径分叉"留口子。
 
+**第三方模型（`custom/` 包装）**：模型目录里另有 `mcldnn` 与 `petcgdnn` 两个条目，实现层
+（`training/amc_models/mcldnn.py`、`petcgdnn.py`）只做包装，**不改动 `custom/` 下的原文件**：
+
+| 模型 | 原文件 | 结构要点 | 参数（6 类、1024 点） | 包装层做的事 |
+| --- | --- | --- | --- | --- |
+| `mcldnn` | `custom/MCLDNN.py` | I/Q 图像分支 + 双因果卷积分支 → 2D 卷积融合 → 双层 LSTM → 全连接 | 405,554（`dropout_rate` 0.5） | 直接按 `(B, 2, N)` 喂（原实现的 `(B, N, 2)` 兼容分支只认 N=128），类别数与 dropout 由目录给 |
+| `petcgdnn` | `custom/PETCGDNN.py` | PET 学一个旋转角 θ 用 sin/cos 混 I/Q → 两级 2D 卷积 → GRU → 全连接 | 73,018（`hidden_size` 128） | 把数据集窗口长度作为 `frame_length`（PET 的 `Linear 2N→1` 与长度绑定），不暴露成可调参数 |
+
+两者都遵守同一套契约（输入 `(B, 2, N)`、输出 logits、softmax 只在导出时进图），
+因此训练、验证评分、导出与验收不需要任何分支。代价是**速度**：LSTM/GRU 沿时间步展开，
+1024 点窗口上实测训练步约 0.87 s（`mcldnn`）与 0.68 s（`petcgdnn`）每批 8 条，
+比 CNN/TCN 慢一到两个数量级，长窗口批量训练前先按此预算估时间。
+
 ### 2.3 训练目标与超参（`train_classifier`）
 
 $$\mathcal{L}=-\frac{1}{B}\sum_{i=1}^{B}\ln p_{i,y_i}\quad(\text{CrossEntropyLoss})$$
@@ -332,11 +345,12 @@ A09 六类是交付口径，而 IQ 通路允许把数据里真实存在的类别
 
 | 对象 | 说明 |
 | --- | --- |
-| `train_iq.py` | `--data --arch {cnn,tcn} --epochs 30 --batch-size 64 --learning-rate 1e-3 --weight-decay 1e-4 --patience 8 --dropout --channels --kernel --model-params --seed --min-snr --onnx-dir --identifier --version --opset --threads --default-offset-hz --default-bandwidth-hz --note`（另有 `--device`、`--events`）；`--arch` 的候选来自模型目录，旧 `--channels/--kernel/--dropout` 与 `--model-params` 等价、同一参数写在两处会报错 |
+| `train_iq.py` | `--data --arch {cnn,tcn,mcldnn,petcgdnn} --epochs 30 --batch-size 64 --learning-rate 1e-3 --weight-decay 1e-4 --patience 8 --dropout --channels --kernel --model-params --seed --min-snr --onnx-dir --identifier --version --opset --threads --default-offset-hz --default-bandwidth-hz --note`（另有 `--device`、`--events`）；`--arch` 的候选来自模型目录（登记几个就有几个），旧 `--channels/--kernel/--dropout` 与 `--model-params` 等价、同一参数写在两处会报错 |
 | `train_classifier(train_x, train_y, val_x, val_y, *, classes, arch="cnn", params=None, …, device="cpu", progress=None)` | 返回 `{model, arch, best_accuracy, best_epoch, epochs_run, history}`；参数由模型目录校验（旧 `channels/kernel/dropout` 关键字保留为兼容入口）；只依赖 torch，不引入训练框架 |
 | `export_onnx(model, path, *, classes, samples, opset=17)` | 导出并自检（图内 softmax、batch=1 探测、容差 `2e-4`、概率和） |
 | `verify_iq.py` | `--manifest --data --rate --duration --seed --threads --json`；`--data` 给出后额外报验证集指标与 `per_snr` |
 | GUI「覆盖默认结构参数（高级）」 | 目录声明的结构参数（通道/核长/dropout）走 `--model-params`；权重衰减/早停轮数是公共训练配置，走 `--weight-decay/--patience`；与 CLI 共用同一套校验（`services/training_jobs.py::iq_tuning_args`） |
+| `training/amc_models/_custom.py` | 按文件路径加载 `custom/` 下的第三方模型（原文件不改、不加 `sys.path`、不做 `sys.modules` 伪注入），缺文件直接报错 |
 | AMC 训练页模型列表 | 「刷新模型列表」按训练环境查询目录（`services/training_jobs.py::query_catalog`），页面显示架构、窗口约束与依赖状态；配置带 `catalog_version` 与训练源码握手 |
 
 ```bash
@@ -428,6 +442,29 @@ GUI、CLI、HTML 报表的每一个 IQ 分类结果都会带上这三条，**不
 `tcn` 的架构版本由模型目录（`algorithms/amc/ai_model/tcn.py` 的 `model_revision`）声明，
 并写入 `metrics.json` 与清单（`arch`/`model_revision`；`training/iq_cnn.py` 仍保留
 `ARCH_REVISIONS` 兼容别名）；**修正前的 TCN 数字一律作废**，与后续结果对比时按版本区分口径。
+
+### 5.2 第三方模型接入后的冒烟验证（2026-10-07）
+
+`mcldnn` / `petcgdnn` 接入后按同一条链路复验（`build_iq_dataset.py --samples 1024
+--per-class 30` 生成 180 条六类样本，126 训练 / 54 验证；`train_iq.py` 3 轮、批 8、种子 7；
+`verify_iq.py --data` 验收）：
+
+| 模型 | 参数 | `model_params` | 独立验证集准确率 | `verify_iq.py` | 产品侧推理入口 |
+| --- | --- | --- | --- | --- | --- |
+| `cnn`（同划分基线） | 103,270 | `{"channels": [32,64,128], "kernel": 7, "dropout": 0.1}` | 0.5741 | 未跑 | — |
+| `mcldnn` | 405,554 | `{"dropout_rate": 0.5}` | 0.2407 | 10 项全通过 | `amc_iq_classify` 返回 `amc_iq_classify_v1`、6 类、窗口 1024 点 |
+| `petcgdnn` | 73,018 | `{"hidden_size": 128}` | 0.2222 | 10 项全通过 | 同上 |
+
+**0.24 / 0.22 不是模型能力的结论**：这是 126 条样本、3 轮、未调参的连通性冒烟，
+与 §5 的 CNN 冒烟同性质（同划分的 CNN 3 轮也只到 0.5741）；有意义的结果需要每类数千条、
+更多轮次并与 `cnn`/`tcn` 同规模对比。本轮的结论只有三条：
+
+1. 目录 → 实现 → 训练 → 导出 → 验收 → 推理**闭环通**，`verify_iq.py` 的端到端检查调用的
+   就是 GUI AMC 页同一个入口（`amc_iq_classify`）；
+2. ONNX 数值一致性、`(1, 2, 1024)` 契约与图内 softmax 对**包装后的第三方模型**同样成立；
+3. 训练记录（`model_params` / `num_params` / `arch` / `model_revision`）对目录里的任意模型
+   都能写全——修复了训练记录写死 `channels/kernel/dropout` 字段导致的 `KeyError`
+   （见[模型训练工作台验证记录](../模型训练验证记录.md)）。
 
 ---
 

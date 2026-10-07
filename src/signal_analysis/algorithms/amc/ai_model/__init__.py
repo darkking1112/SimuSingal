@@ -16,10 +16,13 @@ from .base import (CATALOG_VERSION, KINDS, ModelSpec, ParamSpec, check_model_sam
                    validate_value)
 from .base import catalog_json as _catalog_json
 from .cnn import SPEC as _CNN_SPEC
+from .mcldnn import SPEC as _MCLDNN_SPEC
+from .petcgdnn import SPEC as _PETCGDNN_SPEC
 from .tcn import SPEC as _TCN_SPEC
 
 #: 模型目录（显式聚合，顺序稳定；ID 唯一性由测试保证）
-SPECS: dict[str, ModelSpec] = {spec.id: spec for spec in (_CNN_SPEC, _TCN_SPEC)}
+SPECS: dict[str, ModelSpec] = {spec.id: spec for spec in
+                               (_CNN_SPEC, _TCN_SPEC, _MCLDNN_SPEC, _PETCGDNN_SPEC)}
 
 __all__ = ["CATALOG_VERSION", "KINDS", "ModelSpec", "ParamSpec", "SPECS", "available_models",
            "catalog_json", "check_model_samples", "check_samples", "describe", "describe_model",

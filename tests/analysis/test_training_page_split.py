@@ -138,7 +138,7 @@ def test_amc_model_catalog_drives_architecture_window_and_parameters(training_wi
     page = window.amc_training_page
     from signal_analysis.algorithms.amc.ai_model import (CATALOG_VERSION, model_spec,
                                                          spec_json)
-    assert page.model_options() == ["cnn", "tcn"]
+    assert page.model_options() == ["cnn", "tcn", "mcldnn", "petcgdnn"]
     assert "IQCNN" in page.model_arch.toPlainText()
     assert page.iq_channels is not None and page.iq_kernel is not None
     assert page.model_hint.text() == ""                 # cnn 无窗口/依赖问题
@@ -159,7 +159,7 @@ def test_amc_model_catalog_drives_architecture_window_and_parameters(training_wi
     page._refresh_catalog()
     app.processEvents()
     assert "训练环境" in page.catalog_status.text()
-    assert page.model_options() == ["cnn", "tcn"]
+    assert page.model_options() == ["cnn", "tcn", "mcldnn", "petcgdnn"]
 
     # 伪目录：exact 窗口约束联动输入框；缺依赖的模型显示原因并拒绝起任务
     fake = dict(spec_json(model_spec("cnn")))

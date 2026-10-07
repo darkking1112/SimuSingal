@@ -326,6 +326,9 @@ def main(argv=None):
         "model_revision": spec.model_revision,
         "catalog_version": CATALOG_VERSION,
         "model_params": model_params,
+        # 兼容 cnn/tcn 的历史字段：仅当模型声明了同名结构参数时写入（目录是唯一事实源）
+        **{name: model_params[name] for name in ("channels", "kernel", "dropout")
+           if name in model_params},
         "num_params": int(sum(parameter.numel() for parameter in model.parameters())),
         "model_deps": _dependency_versions(spec.requires),
         "dataset": str(Path(args.data)),
@@ -341,9 +344,6 @@ def main(argv=None):
         "batch_size": args.batch_size,
         "learning_rate": args.learning_rate,
         "weight_decay": args.weight_decay,
-        "dropout": model_params["dropout"],
-        "channels": model_params["channels"],
-        "kernel": model_params["kernel"],
         "seed": args.seed,
         "device": args.device,
         "best_epoch": outcome["best_epoch"],

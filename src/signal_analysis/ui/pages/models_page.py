@@ -96,7 +96,8 @@ class ModelsPageMixin:
     def _params_text(entry):
         params = entry.get("params") or {}
         if entry.get("purpose") == "amc":
-            parts = [f"{params.get('window_samples')} 点" if params.get("window_samples") else "",
+            parts = [f"{params.get('model')}" if params.get("model") else "",
+                     f"{params.get('window_samples')} 点" if params.get("window_samples") else "",
                      f"{params.get('channels')} 通道" if params.get("channels") else "",
                      f"{len(params.get('classes') or [])} 类" if params.get("classes") else "",
                      f"{params.get('epochs')} 轮" if params.get("epochs") else "",

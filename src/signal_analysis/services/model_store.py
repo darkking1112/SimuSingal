@@ -323,13 +323,18 @@ def _manifest_params(task, payload):
         output = payload.get("output") if isinstance(payload.get("output"), dict) else {}
         params.update({"window_samples": source.get("samples"), "channels": source.get("channels"),
                        "classes": list(output.get("classes") or []),
+                       "model": training.get("arch"),
                        "model_revision": training.get("model_revision"),
                        "num_params": training.get("num_params"),
                        "epochs": training.get("epochs"), "batch_size": training.get("batch_size"),
                        "learning_rate": training.get("learning_rate"),
-                       "dropout": training.get("dropout"),
                        "best_validation_accuracy": training.get("best_validation_accuracy"),
                        "dataset_samples": training.get("dataset_samples")})
+        model_params = training.get("model_params")
+        if isinstance(model_params, dict) and model_params:
+            params["model_params"] = json.dumps(model_params, ensure_ascii=False)
+        else:  # 旧清单：目录参数没有记录成一份 JSON，退回 cnn/tcn 的 dropout 字段
+            params["dropout"] = training.get("dropout")
     else:
         dataset = training.get("dataset") if isinstance(training.get("dataset"), dict) else {}
         params.update({"image_size": source.get("image_size"),
