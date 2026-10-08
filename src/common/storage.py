@@ -63,6 +63,7 @@ class Workspace:
         for folder in ("runs", "jobs"):
             (self.root / folder).mkdir(exist_ok=True)
         self.database = self.root / self.db_filename
+        self._batch_connection = None   # 由 batch() 设置：批量事务期间的共享连接
         self.schema_version = self._apply_migrations()
         if marker.exists():
             payload = json.loads(marker.read_text(encoding="utf-8"))
@@ -126,6 +127,10 @@ class Workspace:
     # ------------------------------------------------------------------ 连接与运行记录
     @contextmanager
     def connect(self):
+        """打开连接；在 :meth:`batch` 作用域内改为复用同一个连接（不各自提交）。"""
+        if self._batch_connection is not None:
+            yield self._batch_connection
+            return
         conn = sqlite3.connect(self.database, timeout=10)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
@@ -133,6 +138,34 @@ class Workspace:
             with conn:
                 yield conn
         finally:
+            conn.close()
+
+    @contextmanager
+    def batch(self):
+        """把一段批量写入合并成一个事务（可重入）。
+
+        平时每个数据层调用都会自己开连接并提交；批量导入（例如集合包导入）会产生上千次
+        ``fsync``，实测占掉九成以上的时间。在 ``with workspace.batch():`` 里所有
+        ``connect()`` 共用一个连接、退出时统一提交，失败则整体回滚——写入因此变成
+        "要么全部成功、要么全都不落库"。文件类副作用（资产文件）不参与回滚，调用方需要
+        自己清理，见 ``services/transfer.import_collection``。
+        """
+        if self._batch_connection is not None:
+            yield self
+            return
+        conn = sqlite3.connect(self.database, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        self._batch_connection = conn
+        try:
+            yield self
+        except BaseException:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
+        finally:
+            self._batch_connection = None
             conn.close()
 
     def save_run(self, kind, result, arrays=None, source_id=None):

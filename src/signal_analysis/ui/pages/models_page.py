@@ -1,7 +1,9 @@
 """数据管理页的「模型管理」子页：查看、重命名、删除与跳转使用训练产出的模型。"""
+from pathlib import Path
+
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from ...services import model_store
+from ...services import model_store, transfer
 from ...storage.maintenance import format_bytes
 
 STATUS_TEXT = {"ok": "正常", "missing": "文件缺失", "changed": "文件已变动", "corrupt": "元数据损坏"}
@@ -26,6 +28,18 @@ class ModelsPageMixin:
             lambda: QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(
                 str(model_store.models_root(self.workspace.root)))))
         bar.addWidget(self.models_open_button)
+        self.models_export_button = QtWidgets.QPushButton("导出模型包…")
+        self.models_export_button.setToolTip(
+            "把选中的模型（未选中则全部）打包成一个 zip，可在另一台电脑用「导入模型包…」登记；"
+            "包内含 model.json、清单、ONNX 与指标，导入端会逐项校验 sha256 与契约")
+        self.models_export_button.clicked.connect(self.export_model_package)
+        bar.addWidget(self.models_export_button)
+        self.models_import_button = QtWidgets.QPushButton("导入模型包…")
+        self.models_import_button.setToolTip(
+            "从模型包 zip 导入模型：先体检（格式/摘要/契约/类别/窗口），通过后登记进模型库；"
+            "重名自动加序号，已有模型不会被覆盖")
+        self.models_import_button.clicked.connect(self.import_model_package)
+        bar.addWidget(self.models_import_button)
         bar.addStretch(1)
         layout.addLayout(bar)
 
@@ -189,6 +203,97 @@ class ModelsPageMixin:
         getattr(self, widget).setText(entry["path"])
         self.tabs.setCurrentIndex(self._page_index(model_store.PURPOSE_TITLES[purpose]))
         self.status.setText(f"已选择模型：{name}")
+
+    # ------------------------------------------------------------- 模型包迁移
+    def _selected_model_names(self):
+        """选中的模型名（去重、保持表格顺序）。
+
+        ``selectedItems()`` 对一行会返回"每列一个"的重复项，直接取会得到 8 个同名条目，
+        导出时就会把同一个模型打包 8 遍。
+        """
+        if not hasattr(self, "models_table"):
+            return []
+        names = []
+        for item in self.models_table.selectedItems():
+            name = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            if name not in names:
+                names.append(name)
+        return names
+
+    def export_model_package(self):
+        """把选中的模型（未选中则全部）导出成一个模型包（zip）。"""
+        names = self._selected_model_names()
+        target = Path(self.workspace.root) / "exports"
+        target.mkdir(parents=True, exist_ok=True)
+        default = str(target / transfer.default_package_name("模型包"))
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "导出模型包", default, "模型包 (*.zip)")
+        if not path:
+            return
+        try:
+            result = self._with_wait_cursor(
+                lambda: transfer.export_models(self.workspace.root, path,
+                                               names=names or None))
+        except (transfer.TransferError, OSError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(self, "导出失败", str(exc))
+            return
+        self.model_hint.setText(
+            f"已导出 {len(result['models'])} 个模型到 {result['path']}"
+            f"（{format_bytes(result['size_bytes'])}）：{'、'.join(result['models'])}。"
+            "在另一台电脑用「导入模型包…」登记；也可以只带这一个文件，无需拷贝工作区。")
+
+    def import_model_package(self):
+        """从模型包导入：先体检，再按校验结果登记进模型库。"""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "导入模型包", str(Path(self.workspace.root) / "exports"), "模型包 (*.zip)")
+        if not path:
+            return
+        try:
+            report = transfer.inspect_package(path)
+        except (transfer.TransferError, OSError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(self, "模型包不可用", str(exc))
+            return
+        problems = [item for item in report["models"] if not item["ok"]]
+        if problems:
+            detail = "；".join(f"{item['name']}：{'、'.join(item['problems'])}"
+                              for item in problems)
+            QtWidgets.QMessageBox.warning(self, "模型包校验不通过", detail)
+            return
+        summary = "\n".join(
+            f"· {item['name']}（{item['model_type'] or item['task']} · {item['purpose']} · "
+            f"{format_bytes(item['size_bytes'])}）" for item in report["models"])
+        if QtWidgets.QMessageBox.question(
+                self, "导入模型包", f"将导入 {len(report['models'])} 个模型：\n{summary}\n\n"
+                "重名会自动加序号，已有模型不会被覆盖。继续？") \
+                != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        try:
+            result = self._with_wait_cursor(
+                lambda: transfer.import_models(self.workspace.root, path))
+        except (transfer.TransferError, OSError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(self, "导入失败", str(exc))
+            return
+        self.refresh_models_panel()
+        self.refresh_model_choices()
+        names = "、".join(item["name"] for item in result["models"])
+        self.model_hint.setText(f"已导入 {len(result['models'])} 个模型：{names}"
+                                "（模型库在本机可用；模型文件与清单已按本机路径登记）")
+
+    def _with_wait_cursor(self, action):
+        """跑可能耗时的打包/解包：期间显示等待光标，并禁用两个迁移按钮。"""
+        buttons = [getattr(self, "models_export_button", None),
+                   getattr(self, "models_import_button", None)]
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        for button in buttons:
+            if button is not None:
+                button.setEnabled(False)
+        try:
+            return action()
+        finally:
+            for button in buttons:
+                if button is not None:
+                    button.setEnabled(True)
+            QtWidgets.QApplication.restoreOverrideCursor()
 
     def rename_selected_model(self):
         name = self._selected_model_name()

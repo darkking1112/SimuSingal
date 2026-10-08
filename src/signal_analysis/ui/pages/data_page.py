@@ -9,6 +9,7 @@ import pyqtgraph as pg
 from ...core_api import MAX_SAMPLES, plan_signal, spectrum_row
 from ...storage.maintenance import RUN_KIND_LABELS, format_bytes, read_settings, write_settings
 from ...data import Workspace
+from ...services import transfer
 from ..constants import (IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
                          IMPORT_COL_FILE, IMPORT_COL_FORMAT, IMPORT_COL_MOD,
                          IMPORT_COL_NAME, IMPORT_COL_POINTS, IMPORT_COL_RATE,
@@ -182,7 +183,12 @@ class DataPageMixin:
                 ("archive_collection_button", "归档集合", self.archive_selected_collection,
                  "归档后集合不再出现在选择器中，成员关系保留，可随时恢复"),
                 ("restore_collection_button", "恢复集合", self.restore_selected_collection,
-                 "把选中的已归档集合恢复为正常状态")):
+                 "把选中的已归档集合恢复为正常状态"),
+                ("export_collection_button", "导出集合包…", self.export_collection_package,
+                 "把选中集合的资产数据与标注（目标、参考参数、标签、覆盖度、类别字典）"
+                 "打包成 zip，可在另一台电脑用「导入集合包…」重建"),
+                ("import_collection_button", "导入集合包…", self.import_collection_package,
+                 "从集合包重建集合：先体检，通过后新建集合与资产（新 id，不覆盖已有数据）")):
             button = QtWidgets.QPushButton(text)
             button.setToolTip(tip)
             button.clicked.connect(callback)
@@ -263,6 +269,7 @@ class DataPageMixin:
                         and self.workspace.get_collection(collection_id).get("archived_at"))
         self.archive_collection_button.setEnabled(bool(collection_id) and not archived)
         self.restore_collection_button.setEnabled(archived)
+        self.export_collection_button.setEnabled(bool(collection_id))
 
     def _collection_selected(self, *_):
         collection_id = self._selected_collection_id()
@@ -307,6 +314,100 @@ class DataPageMixin:
                     f"{item['label']} {item['count']}" for item in stats))
         self.collection_detail.setPlainText("\n".join(lines))
         self._render_diversity()
+
+    # --------------------------------------------------------- 集合包迁移
+    def export_collection_package(self):
+        """把选中的集合（资产数据 + 标注）导出成一个集合包（zip）。"""
+        collection_id = self._selected_collection_id()
+        if not collection_id:
+            self.collection_detail.setPlainText("请先在列表里选择一个集合再导出。")
+            return
+        collection = self.workspace.get_collection(collection_id)
+        target = Path(self.workspace.root) / "exports"
+        target.mkdir(parents=True, exist_ok=True)
+        default = str(target / transfer.default_package_name(f"集合包-{collection['name']}"))
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "导出集合包", default, "集合包 (*.zip)")
+        if not path:
+            return
+        try:
+            result = self._with_wait_cursor(
+                lambda: transfer.export_collection(self.workspace, collection_id, path))
+        except (transfer.TransferError, OSError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(self, "导出失败", str(exc))
+            return
+        self.collection_detail.appendPlainText(
+            f"\n[导出] {result['path']}（{format_bytes(result['size_bytes'])}）"
+            f"：资产 {result['assets']} · 目标 {result['targets']} · 标签 {result['labels']}"
+            f" · 覆盖度 {result['coverage']}；在另一台电脑用「导入集合包…」重建。")
+
+    def import_collection_package(self):
+        """从集合包重建集合：先体检（格式与摘要），再新建集合与资产。"""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "导入集合包", str(Path(self.workspace.root) / "exports"), "集合包 (*.zip)")
+        if not path:
+            return
+        try:
+            report = transfer.inspect_package(path)
+        except (transfer.TransferError, OSError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(self, "集合包不可用", str(exc))
+            return
+        if "collection" not in report:
+            QtWidgets.QMessageBox.warning(self, "集合包不可用", "这不是一个集合包（zip）")
+            return
+        counts = report.get("counts") or {}
+        if not report.get("ok"):
+            QtWidgets.QMessageBox.warning(
+                self, "集合包校验不通过", "；".join(report.get("problems") or ["内容不完整"]))
+            return
+        info = report.get("collection") or {}
+        if QtWidgets.QMessageBox.question(
+                self, "导入集合包",
+                f"集合：{info.get('name')}\n"
+                f"资产 {counts.get('assets')} · 目标 {counts.get('targets')} · "
+                f"标签 {counts.get('labels')} · 覆盖度 {counts.get('coverage')}\n"
+                f"标注集：" + "、".join(f"{item['task']}/{item['name']}"
+                                       for item in report.get("task_sets") or []) +
+                "\n\n将新建一个集合（重名自动加序号），已有集合与资产不会被修改。继续？") \
+                != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        try:
+            result = self._with_wait_cursor(
+                lambda: transfer.import_collection(self.workspace, path))
+        except (transfer.TransferError, OSError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(self, "导入失败", str(exc))
+            return
+        self.refresh_collections_panel()
+        self.refresh_assets()
+        for index in range(self.collection_panel.count()):
+            item = self.collection_panel.item(index)
+            if item.data(QtCore.Qt.ItemDataRole.UserRole) == result["collection_id"]:
+                self.collection_panel.setCurrentRow(index)
+                break
+        self.status.setText(
+            f"已导入集合「{result['collection']}」：资产 {result['assets']} · "
+            f"目标 {result['targets']} · 标签 {result['labels']}"
+            + (f"（跳过 {len(result['skipped_labels'])} 条标签）"
+               if result.get("skipped_labels") else ""))
+
+    def _with_wait_cursor(self, action):
+        """跑可能耗时的打包/解包：显示等待光标并禁用集合操作按钮。"""
+        buttons = [getattr(self, name, None) for name in
+                   ("export_collection_button", "import_collection_button",
+                    "new_collection_button", "add_member_button", "remove_member_button",
+                    "archive_collection_button", "restore_collection_button")]
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        for button in buttons:
+            if button is not None:
+                button.setEnabled(False)
+        try:
+            return action()
+        finally:
+            for button in buttons:
+                if button is not None:
+                    button.setEnabled(True)
+            QtWidgets.QApplication.restoreOverrideCursor()
+            self._sync_collection_buttons()
 
     def _render_diversity(self):
         """把所选集合在“多样性分析”维度上的分布画成柱形图并给出指标。"""

@@ -144,6 +144,29 @@ def main(argv=None):
                              help="调用方未指定频带时的默认占用带宽（Hz）")
     iq_manifest.add_argument("--dataset", help="训练数据来源与许可证说明")
     iq_manifest.add_argument("--notes", default="")
+    model_export = commands.add_parser(
+        "model-export", help="把模型库条目导出成模型包（zip，可跨机器/跨平台导入）")
+    model_export.add_argument("--output", required=True, help="输出的 .zip 路径")
+    model_export.add_argument("--name", action="append", default=None,
+                              help="只导出指定模型（可重复）；缺省导出全部")
+    model_import = commands.add_parser(
+        "model-import", help="导入模型包：逐项校验 sha256/契约/类别/窗口后登记进模型库")
+    model_import.add_argument("archive")
+    model_import.add_argument("--name", default=None,
+                              help="改名导入（仅包内只有一个模型时可用；重名会自动加序号）")
+    collection_export = commands.add_parser(
+        "collection-export", help="导出信号集合（含资产数据与标注）成集合包（zip）")
+    collection_export.add_argument("--collection", required=True,
+                                   help="集合名称或 id（见 list / 数据管理页）")
+    collection_export.add_argument("--output", required=True, help="输出的 .zip 路径")
+    collection_import = commands.add_parser(
+        "collection-import", help="导入集合包：重建集合、资产、目标与参考参数、标签与覆盖度")
+    collection_import.add_argument("archive")
+    collection_import.add_argument("--name", default=None,
+                                   help="导入后的集合名称（缺省用包里的名称，重名自动加序号）")
+    package_inspect = commands.add_parser(
+        "package-inspect", help="只读体检模型包/集合包：格式、计数与完整性（不写任何文件）")
+    package_inspect.add_argument("archive")
     commands.add_parser("list", help="列出最近数据")
     export = commands.add_parser("export", help="导出 JSON/HTML 报告")
     export.add_argument("run_id")
@@ -214,6 +237,23 @@ def main(argv=None):
                       "sha256": manifest["sha256"], "input": manifest["input"],
                       "output": manifest["output"],
                       "class_set": manifest["class_set"], "samples": manifest["input"]["samples"]}
+        elif args.command == "model-export":
+            from .services import transfer
+            result = transfer.export_models(workspace.root, args.output, names=args.name)
+        elif args.command == "model-import":
+            from .services import transfer
+            result = transfer.import_models(workspace.root, args.archive, name=args.name)
+        elif args.command == "collection-export":
+            from .services import transfer
+            collection = transfer.find_collection(workspace, args.collection)
+            result = transfer.export_collection(workspace, collection["id"], args.output)
+            result["collection_id"] = collection["id"]
+        elif args.command == "collection-import":
+            from .services import transfer
+            result = transfer.import_collection(workspace, args.archive, name=args.name)
+        elif args.command == "package-inspect":
+            from .services import transfer
+            result = transfer.inspect_package(args.archive)
         else:
             if args.command == "import":
                 request["sample_rate"] = args.sample_rate

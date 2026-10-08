@@ -173,6 +173,26 @@ python -m signal_analysis amc-iq-manifest onnx/iq.onnx iq_manifest.json \
   `<模型类型>-<训练用途>-<时间>`，如 `cnn-amc-20261006T105213`），可查看训练时间、大小与参数，重命名或删除
   （只删模型库条目，不动实验目录）；“扫描既有模型”按来源实验**幂等**补登记历史训练产物。
 
+**换一台电脑**（含 Linux ↔ Windows）用两个自包含的 zip 迁移，不必拷贝整个工作区：
+
+```bash
+# 导出：模型包（模型库条目）/ 集合包（资产数据 + 标注，含标签、目标参数、覆盖度与类别字典）
+python -m signal_analysis --workspace workspace_data/analysis model-export --output models.zip
+python -m signal_analysis --workspace workspace_data/analysis collection-export \
+    --collection check-signals --output check-signals.zip
+
+# 另一台电脑：先体检（格式版本、逐文件 SHA-256、契约/类别/窗口），再导入（重名自动加序号）
+python -m signal_analysis --workspace <目标工作区> package-inspect models.zip
+python -m signal_analysis --workspace <目标工作区> model-import models.zip
+python -m signal_analysis --workspace <目标工作区> collection-import check-signals.zip --name 导入的集合
+```
+
+界面上的入口在“数据管理”页：「模型管理」子页的“导出模型包… / 导入模型包…”与「信号集合」子页的
+“导出集合包… / 导入集合包…”。导入永远新建条目（新 id），任何校验失败都中止且不留半个条目（集合包导入是
+整体事务，失败后工作区与导入前完全一致，可直接重试）；包内一律用相对路径，跨平台可直接使用。实测 4001 条
+资产（155 MB）导入约 8 秒。只做推理的机器不需要 torch（冻结版已带 ONNX Runtime）。细节与包格式见
+[`docs/电磁信号分析和识别/09数据管理.md`](docs/电磁信号分析和识别/09数据管理.md) §4.4。
+
 统计口径、报告字段、清理规则与已知局限见 [`docs/电磁信号分析和识别/09数据管理.md`](docs/电磁信号分析和识别/09数据管理.md)。
 
 ![独立分析界面](docs/images/analysis-workbench.png)
