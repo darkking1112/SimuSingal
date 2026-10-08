@@ -429,6 +429,21 @@ GUI：**调制识别 → 选择模型清单**。清单若是 `iq_waveform_v1`，
 带内信噪比粗估、概率柱状图与真值对照），不再显示 34 维特征表——因为这条通路没有特征向量，
 也不提供传统启发式对照行（传统判定只对确定性特征有意义）。
 
+### 7.5 新增模型（接入 `custom/` 第三方实现）
+
+一个模型 = **目录条目**（`src/signal_analysis/algorithms/amc/ai_model/<id>.py`，纯元数据、不许
+import torch）+ **训练侧实现**（`training/amc_models/<id>.py`，唯一入口
+`build(*, num_classes, samples, params)`，返回直接接收 `(B, 2, N)`、输出 `(B, C)` logits 的模型），
+再在 `ai_model/__init__.py` 的 `SPECS` 里登记一次（模型增删或参数 schema 变更时 `CATALOG_VERSION` +1）。
+登记后 `--arch`、界面模型列表与参数表单、任务启动前预检都自动生效，不需要改界面代码。
+
+`custom/` 下的第三方文件**只留模型定义**（`nn.Module` 类 + 它引用的子模块/辅助函数 + import）：
+包装层按文件路径加载（模块名 `amc_custom_*`，不注入 `sys.path`），`__main__` 演示块、论文配置字典
+（`get_config_rml2016` 等）、`numParams`、`device = torch.device(...)` 一律用不到；能直接包装就直接包装
+（原文件不改），需要改内部实现（timm 导入、复数算子、结构参数写死）才在训练目录维护一份副本。
+逐条契约、六个来源文件的"留/删"对照表、两份模板与排查表见
+[调制识别：custom 模型接入指南](../docs/电磁信号分析和识别/algorithms/调制识别_custom模型接入指南.md)。
+
 ---
 
 ## 8. 用 TorchSig 扩充数据（可选）
