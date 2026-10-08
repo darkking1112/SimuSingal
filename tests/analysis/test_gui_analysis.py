@@ -65,6 +65,10 @@ def test_analysis_gui_workflow(tmp_path, monkeypatch):
     window.show()
     try:
         assert window.tabs.count() == 11
+        # 跳频参数与信号检测训练两页不在标签栏显示；页面与下标仍保留
+        assert not window.tabs.isTabVisible(window._page_index("跳频参数"))
+        assert not window.tabs.isTabVisible(window._page_index("信号检测训练"))
+        assert window.tabs.isTabVisible(window._page_index("信号检测"))
         assert not hasattr(window, "sim_button")
         # 演示入口属于“IQ 信号生成”页，不在态势显示页（与侧栅同一父级）。
         generator = window._page_index("IQ 信号生成")

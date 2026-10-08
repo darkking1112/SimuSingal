@@ -610,16 +610,18 @@ class TrainingPageBase(QtWidgets.QWidget):
                 path = directory / "iq_manifest.json"
                 if not path.is_file():
                     raise ValueError("验收通过的 IQ 模型清单不存在")
-                self.window.amc_model.setText(str(path))
-                page_name = "调制识别"
+                field, page_name = self.window.amc_model, "调制识别"
             else:
                 path = directory / "detector.json"
                 if not path.is_file():
                     raise ValueError("验收通过的检测模型清单不存在")
                 manifest = json.loads(path.read_text(encoding="utf-8"))
                 hop = manifest.get("training", {}).get("label_semantics") == "per_hop_v1"
-                (self.window.hops_manifest if hop else self.window.ml_manifest).setText(str(path))
+                field = self.window.hops_manifest if hop else self.window.ml_manifest
                 page_name = "跳频参数" if hop else "信号检测"
+            if self.window.is_page_hidden(page_name):
+                raise ValueError(f"「{page_name}」页已在当前界面隐藏")
+            field.setText(str(path))
             self.window.tabs.setCurrentIndex(self.window._page_index(page_name))
         except (OSError, ValueError, KeyError, TypeError) as exc:
             self.report_error(f"无法加载模型：{exc}")

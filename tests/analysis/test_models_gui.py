@@ -195,3 +195,23 @@ def test_model_row_exposes_only_the_picker(tmp_path):
     finally:
         window.close()
         app.processEvents()
+
+
+def test_use_model_on_hidden_page_only_hints(tmp_path):
+    """目标页面已隐藏时「在页面中使用」只给提示：不写清单、不跳到隐藏页。"""
+    workspace = tmp_path / "ws"
+    _write_run(workspace, "20261006T110001-bbbbbbbb", task="detection", arch="rtdetr",
+               library="detector.onnx", label_semantics="per_hop_v1")
+    app, window = _window(tmp_path)
+    try:
+        assert window.models_table.rowCount() == 1
+        assert window.models_table.item(0, 2).text() == "跳频参数"
+        window.models_table.selectRow(0)
+        before = window.tabs.currentIndex()
+        window.use_selected_model()
+        assert window.tabs.currentIndex() == before
+        assert "已在当前界面隐藏" in window.model_hint.text()
+        assert window.hops_manifest.text() == ""
+    finally:
+        window.close()
+        app.processEvents()

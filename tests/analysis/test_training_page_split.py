@@ -394,6 +394,33 @@ def test_history_filters_by_task_and_never_loads_asset_runs(training_window):
 
 
 @pytest.mark.gui
+def test_load_model_on_hidden_page_only_hints(training_window):
+    """逐跳标签的验收模型指向已隐藏的页面：只提示，不写清单、不跳转。"""
+    app, window = training_window
+    use_collection(window, app)
+    page = window.detection_training_page
+    directory = window.workspace.root / "training" / "runs" / "hop-load"
+    model = directory / "model"
+    model.mkdir(parents=True)
+    (directory / "experiment.json").write_text(json.dumps({
+        "id": "hop-load", "status": "success",
+        "config": {"task": "detection", "arch": "rtdetr"}, "metrics": [],
+    }), encoding="utf-8")
+    (model / "detector.json").write_text(json.dumps({
+        "training": {"label_semantics": "per_hop_v1"}}), encoding="utf-8")
+    page.refresh_history()
+    index = next(i for i in range(page.history.count())
+                 if page.history.itemData(i)["id"] == "hop-load")
+    page.history.setCurrentIndex(index)
+    assert page.load_button.isEnabled()
+    before = window.tabs.currentIndex()
+    page.load_model()
+    assert window.tabs.currentIndex() == before
+    assert "已在当前界面隐藏" in page.status.text()
+    assert window.hops_manifest.text() == ""
+
+
+@pytest.mark.gui
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object process-tree validation")
 @pytest.mark.parametrize("close_window", [False, True])
 def test_stop_and_close_terminate_worker_and_spawned_child(

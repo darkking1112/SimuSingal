@@ -80,6 +80,10 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
         self.reconcile_models()
         for title, builder in pages.items():
             self.tabs.addTab(builder(), title)
+        # 隐藏页面：照常构建并保留下标，只是不显示在标签栏（见 HIDDEN_PAGE_TITLES）
+        for title in self.HIDDEN_PAGE_TITLES:
+            if title in self.page_index:
+                self.tabs.setTabVisible(self._page_index(title), False)
         self.training_pages = tuple(self.training_pages_by_owner.values())
         self.last_result = None
         self._play_data = None
@@ -130,6 +134,10 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
     def _page_index(self, title):
         """按页面名取标签下标；下标只由 __init__ 的页面注册表决定。"""
         return self.page_index[title]
+
+    def is_page_hidden(self, title):
+        """页面是否被配置为不在标签栏显示（见 ``HIDDEN_PAGE_TITLES``）。"""
+        return title in self.HIDDEN_PAGE_TITLES
 
     # ------------------------------------------------------------- 模型库同步
     def reconcile_models(self):
@@ -429,6 +437,10 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
 
     #: 训练页注册名；只在侧栏选中具体集合时可用（见第 10.2 节）。
     TRAINING_TAB_TITLES = ("信号检测训练", "AMC 识别训练")
+
+    #: 不在标签栏显示的页面名：页面照样构建、登记下标并保留全部内部功能，
+    #: 只是不能从标签栏进入；重新显示只需从元组里删掉对应页面名。
+    HIDDEN_PAGE_TITLES = ("信号检测训练", "跳频参数")
 
     def current_collection_id(self):
         """侧栏当前选中的集合 ID；「全部资产」「零散资产」或未初始化时返回 ``None``。"""

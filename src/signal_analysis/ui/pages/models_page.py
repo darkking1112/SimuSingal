@@ -200,8 +200,13 @@ class ModelsPageMixin:
         if widget is None:
             self.model_hint.setText(f"模型用途无法识别，不能跳转到页面：{name}")
             return
+        title = model_store.PURPOSE_TITLES[purpose]
+        if self.is_page_hidden(title):
+            self.model_hint.setText(
+                f"「{title}」页已在当前界面隐藏，不能在页面中使用该模型：{name}")
+            return
         getattr(self, widget).setText(entry["path"])
-        self.tabs.setCurrentIndex(self._page_index(model_store.PURPOSE_TITLES[purpose]))
+        self.tabs.setCurrentIndex(self._page_index(title))
         self.status.setText(f"已选择模型：{name}")
 
     # ------------------------------------------------------------- 模型包迁移
