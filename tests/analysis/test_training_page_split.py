@@ -76,7 +76,7 @@ def test_training_pages_have_fixed_tasks_and_independent_owners(training_window)
     _, window = training_window
     assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == [
         "信号导入", "IQ 信号生成", "态势显示", "信号检测", "调制识别", "跳频参数",
-        "信号检测训练", "AMC 识别训练", "数据管理", "算法对比", "运行记录"]
+        "信号检测训练", "AMC 识别训练", "数据管理", "算法对比", "运行记录", "信号判读训练"]
     detection = window.detection_training_page
     amc = window.amc_training_page
     assert detection.TITLE == "信号检测训练" and amc.TITLE == "AMC 识别训练"

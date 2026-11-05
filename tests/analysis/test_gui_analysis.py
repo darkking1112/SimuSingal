@@ -64,7 +64,7 @@ def test_analysis_gui_workflow(tmp_path, monkeypatch):
     window = MainWindow(tmp_path)
     window.show()
     try:
-        assert window.tabs.count() == 11
+        assert window.tabs.count() == 12
         assert not hasattr(window, "sim_button")
         # 演示入口属于“IQ 信号生成”页，不在态势显示页（与侧栅同一父级）。
         generator = window._page_index("IQ 信号生成")
@@ -231,7 +231,7 @@ def test_iq_generation_gui_workflow(tmp_path):
     window = MainWindow(tmp_path)
     window.show()
     try:
-        assert window.tabs.count() == 11
+        assert window.tabs.count() == 12
         window.tabs.setCurrentIndex(window._page_index("IQ 信号生成"))
         assert window.gen_signals.rowCount() == 0
         window.add_iq_signal({"mode": "qpsk", "offset": 100_000.0, "power_dbfs": -10.0,

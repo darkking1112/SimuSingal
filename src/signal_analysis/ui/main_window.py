@@ -73,6 +73,7 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             "数据管理": self.build_data_management,
             "算法对比": self.build_compare,
             "运行记录": self.build_history,
+            "信号判读训练": self.build_signal_drill,
         }
         self.page_index = {title: index for index, title in enumerate(pages)}
         # 页面构建前先登记既有训练模型，页面里的模型下拉首屏就能列出它们（幂等）
@@ -114,6 +115,11 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
         self.amc_training_page = AmcTrainingPage(self, self.training_coordinator)
         self.training_pages_by_owner[self.amc_training_page.OWNER] = self.amc_training_page
         return self.amc_training_page
+
+    def build_signal_drill(self):
+        from .pages.signal_drill_page import SignalDrillPage
+        self.signal_drill_page = SignalDrillPage(self)
+        return self.signal_drill_page
 
     def closeEvent(self, event):
         for page in getattr(self, "training_pages", ()):
