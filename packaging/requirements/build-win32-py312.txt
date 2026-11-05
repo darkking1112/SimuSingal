@@ -1,0 +1,14 @@
+# 构建机依赖：Windows x64 / CPython 3.12 64 位。
+# 必须在本机安装 MSVC 2022 Build Tools 与 Windows SDK 10；不支持交叉编译。
+# 请在 “x64 Native Tools Command Prompt for VS 2022” 中运行发布脚本（cl.exe 需在 PATH 中）。
+# 首次在 Windows 构建机验证后，可用
+#   python scripts/check_release_env.py --stage build --freeze packaging/requirements/build-win32-py312.txt
+# 重新生成本文件。
+setuptools==84.0.0
+wheel==0.48.0
+Cython==3.3.0
+build==1.6.0
+pyinstaller==6.22.2
+pyinstaller-hooks-contrib==2026.7
+pytest==9.1.1
+pytest-xdist==3.8.0

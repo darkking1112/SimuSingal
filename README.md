@@ -275,7 +275,39 @@ python scripts/build_wheels.py simulation
 
 分析 wheel 包含 `common + signal_analysis`，按 `packaging/numeric_core.json` 将八个算法模块（`algorithms.*`，语义命名）编译为扩展并排除核心明文；仿真 wheel 包含 `common + communication_sim`，不依赖 SimPy 以外的业务计算库。GUI 依赖单独声明。建议在独立虚拟环境安装和升级各项目的 wheel；共用源码随各自 wheel 分发。
 
-在 Linux CPython 3.12 上，使用生成的文件名分别构建目录式桌面程序：
+### 一键发布（signal_analysis）
+
+发布前先验证构建机环境；脚本会检查 CPython 3.12、C/C++ 编译器、依赖版本、磁盘空间与源码完整性：
+
+```bash
+python scripts/check_release_env.py --stage build --full
+```
+
+然后按需要选择产物模式：
+
+```bash
+# 自包含：bin/SignalAnalysis（Windows 为 SignalAnalysis.exe），目标机不需要 Python
+python scripts/release.py analysis --mode portable
+
+# 依赖目标机 Python：bin/SignalAnalysis 启动器 + lib/ 下的核心 .so/.pyd
+python scripts/release.py analysis --mode system
+
+# 同时产出两种
+python scripts/release.py analysis --mode both
+```
+
+Linux 产物为 `dist/release/SignalAnalysis-<版本>-cp312-linux-x86_64[-system]/` 与 `.tar.gz`；Windows 为 `...zip`。包内含 `bin/` 入口、`lib/` 核心 `.pyd/.so`、`share/manifest.json`（核心模块与 wheel 哈希）、`share/packaging/requirements/` 依赖清单、`share/scripts/check_release_env.py` 目标机自检脚本和 `SHA256SUMS`。
+
+目标机验证：
+
+```bash
+python share/scripts/check_release_env.py --stage runtime --output .
+bin/SignalAnalysis selftest --expect-binary
+```
+
+`selftest` 会加载八个核心二进制模块、内置 AMC 模型，并跑一次 IQ 生成/分析/检测闭环。Python 扩展不能交叉编译：Windows 版必须在 Windows + MSVC 的 “x64 Native Tools Command Prompt for VS 2022” 中构建，Linux 版必须在目标 glibc 基线或更低版本的系统上构建。`share/packaging/requirements/` 中的版本清单可直接用于目标机 `pip install -r`；`system` 模式可用 `SIMUSIGNAL_PYTHON` 指定解释器。Windows 首次验证后可用 `python scripts/check_release_env.py --stage build --freeze packaging/requirements/build-win32-py312.txt` 固化本机版本。
+
+旧的底层命令仍可单独使用：
 
 ```bash
 python scripts/check_binary.py dist/wheels/signal_analysis-0.2.0-cp312-cp312-linux_x86_64.whl

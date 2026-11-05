@@ -62,7 +62,8 @@ tests/
   analysis/
   simulation/
 benchmarks/           # 两项目独立基础流程基准
-packaging/            # projects.json：两个独立打包目标
+packaging/            # projects.json、numeric_core.json、release.json 与 require 清单
+scripts/              # 构建、一键发布与环境自检脚本
 docs/
 ```
 

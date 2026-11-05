@@ -1,0 +1,30 @@
+{
+  "analysis": {
+    "package": "signal_analysis",
+    "app_dir": "analysis_desktop",
+    "executable": "SignalAnalysis",
+    "python": "3.12",
+    "min_free_gb": 3,
+    "modes": ["portable", "system"],
+    "smoke": [
+      ["--version"],
+      ["selftest", "--expect-binary"]
+    ],
+    "platforms": {
+      "linux": {
+        "archive": "gztar",
+        "exe_suffix": "",
+        "core_suffix": ".so"
+      },
+      "win32": {
+        "archive": "zip",
+        "exe_suffix": ".exe",
+        "core_suffix": ".pyd"
+      }
+    },
+    "requirements": {
+      "build": "packaging/requirements/build-{platform}-py312.txt",
+      "runtime": "packaging/requirements/runtime-{platform}-py312.txt"
+    }
+  }
+}

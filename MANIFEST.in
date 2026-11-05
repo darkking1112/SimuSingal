@@ -1,1 +1,3 @@
 include packaging/numeric_core.json
+include packaging/release.json
+recursive-include packaging/requirements *.txt

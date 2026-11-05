@@ -1,0 +1,11 @@
+# 构建机依赖：Linux x86_64 / CPython 3.12 64 位。
+# 对应 packaging/release.json 的 analysis 项目；与 requirements-linux-py312.lock 同版本。
+# 系统组件：gcc、g++、make、binutils、Python 开发头文件。
+setuptools==84.0.0
+wheel==0.48.0
+Cython==3.3.0
+build==1.6.0
+pyinstaller==6.22.2
+pyinstaller-hooks-contrib==2026.7
+pytest==9.1.1
+pytest-xdist==3.8.0

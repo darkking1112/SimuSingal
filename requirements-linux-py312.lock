@@ -1,13 +1,13 @@
-# Validated snapshot: Linux x86_64 / CPython 3.12.3 / 2026-09-06.
+# Validated snapshot: Linux x86_64 / CPython 3.12.3 / 2026-11-05.
 # Other OS/Python targets must resolve and validate their own environment.
-# SigMF additions below: pinned for this feature; Linux revalidation pending.
+# 发布构建/校验所需 pytest-xdist 与本机 typing-extensions 已并入本快照。
 sigmf==1.11.1
 jsonschema==4.26.0
 defusedxml==0.7.1
 attrs==26.1.0
 jsonschema-specifications==2025.9.1
 referencing==0.37.0
-typing-extensions==4.15.0; python_version < "3.13"
+typing-extensions==4.16.0; python_version < "3.13"
 rpds-py==2026.6.3
 numpy==2.5.2
 simpy==4.1.2
@@ -30,3 +30,5 @@ wheel==0.48.0
 pyinstaller==6.22.2
 pyinstaller-hooks-contrib==2026.7
 altgraph==0.17.5
+pytest-xdist==3.8.0
+execnet==2.1.2

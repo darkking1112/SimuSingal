@@ -17,6 +17,8 @@ def main():
     parser.add_argument("project", choices=["analysis", "simulation"])
     parser.add_argument("wheel", type=Path)
     parser.add_argument("--output", type=Path, default=Path("dist"))
+    parser.add_argument("--contents-directory", default="_internal",
+                        help="PyInstaller 运行时目录名，默认 _internal")
     args = parser.parse_args()
     wheel = args.wheel.resolve(strict=True)
     root = Path(__file__).resolve().parents[1]
@@ -50,7 +52,12 @@ def main():
             "--collect-submodules", config["package"], "--collect-submodules", "common",
             "--exclude-module", "matplotlib", "--exclude-module", "scipy",
             "--exclude-module", "PyQt5", "--exclude-module", "PyQt6",
+            # 训练/构建期依赖不应进入桌面包：torchsig 的 numba/llvmlite/h5py 与
+            # Cython 都不是运行时依赖，收集后会让包体增加数百 MB。
+            "--exclude-module", "Cython", "--exclude-module", "numba",
+            "--exclude-module", "llvmlite", "--exclude-module", "h5py",
             "--workpath", str(folder / "work"), "--specpath", str(folder),
+            "--contents-directory", args.contents_directory,
             "--distpath", str(args.output.resolve()), *exclusions, *collections, *data_files,
             str(root / "apps" / config["app_dir"] / "main.py"),
         ], check=True, env=env)

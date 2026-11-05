@@ -1,0 +1,19 @@
+# 目标机运行时依赖（system 模式必需；portable 模式只用于审计）。
+# Linux x86_64 / CPython 3.12 64 位。
+# 系统组件：glibc（以构建机为下限）、libGL.so.1、libxcb-cursor.so.0（GUI）。
+numpy==2.5.2
+sigmf==1.11.1
+jsonschema==4.26.0
+defusedxml==0.7.1
+attrs==26.1.0
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+rpds-py==2026.6.3
+typing-extensions==4.16.0; python_version < "3.13"
+PySide6==6.11.2
+PySide6_Essentials==6.11.2
+PySide6_Addons==6.11.2
+shiboken6==6.11.2
+pyqtgraph==0.14.0
+# 可选：AI 检测（ml-detect / ml-detect-hops）需要
+# onnxruntime==1.30.0

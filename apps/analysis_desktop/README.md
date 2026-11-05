@@ -4,7 +4,7 @@
 
 在仓库根目录安装开发环境后运行 `python -m signal_analysis gui` 或 `python apps/analysis_desktop/main.py gui`。默认使用 `workspace_data/analysis`。
 
-独立发布使用 `python scripts/build_wheels.py analysis --compile-core`。构建脚本把本项目元数据、分析源码和 common 收集到临时构建目录，不收集仿真源码；不直接在本目录执行 `pip install .`。
+独立发布使用 `python scripts/release.py analysis --mode portable`（自包含 `bin`/`.exe`）或 `--mode system`（目标机 Python + `lib/` 核心 `.so/.pyd`）。发布前用 `python scripts/check_release_env.py --stage build --full` 验证构建机；目标机用随包分发的 `python share/scripts/check_release_env.py --stage runtime` 与 `bin/SignalAnalysis selftest --expect-binary` 验证。底层仍可分别执行 `python scripts/build_wheels.py analysis --compile-core` 和 `python scripts/build_desktop.py analysis WHEEL_PATH`。构建脚本把本项目元数据、分析源码和 common 收集到临时构建目录，不收集仿真源码；不直接在本目录执行 `pip install .`。
 
 使用生成的 wheel 执行 `python scripts/build_desktop.py analysis WHEEL_PATH`，输出 `dist/SignalAnalysis`。建议在独立虚拟环境安装正式 wheel：`python -m pip install 'WHEEL_PATH[gui]'`，把占位符换成真实文件路径。
 

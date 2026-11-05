@@ -14,6 +14,10 @@ def main(argv=None):
     parser.add_argument("--workspace", default="workspace_data/analysis", help="本地工作目录")
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("gui", help="启动桌面工作台")
+    selftest = commands.add_parser("selftest", help="验证核心模块、内置模型与一次数值闭环")
+    selftest.add_argument("--expect-binary", action="store_true",
+                          help="要求核心模块为 .so/.pyd（发布包冒烟使用）")
+    selftest.add_argument("--output", help="可选，把自检结果写入 JSON 文件")
     imp = commands.add_parser("import", help="导入 NPY、CSV、交织 IQ 或 SigMF 双文件")
     imp.add_argument("path")
     imp.add_argument("--sample-rate", type=float, help="非 SigMF 必填；SigMF 自动读取，显式指定时须一致")
@@ -179,6 +183,14 @@ def main(argv=None):
         if args.command == "worker":
             from .tasks import worker_main
             return worker_main(args.request, args.response)
+        if args.command == "selftest":
+            from .selftest import run_selftest
+            result = run_selftest(expect_binary=args.expect_binary)
+            payload = json.dumps(result, ensure_ascii=False, allow_nan=False, indent=2)
+            if args.output:
+                Path(args.output).write_text(payload + "\n", encoding="utf-8")
+            print(payload)
+            return 0 if result["ok"] else 1
         if args.command in (None, "gui"):
             try:
                 from .ui import launch
