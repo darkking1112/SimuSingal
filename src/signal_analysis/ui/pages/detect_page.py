@@ -33,12 +33,7 @@ class DetectPageMixin:
         box = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(box)
         intro = QtWidgets.QLabel(
-            "能量检测与参数估计（基线算法 energy_detect_v1）：对所选 IQ 记录做短时傅里叶变换，"
-            "以中位数 + MAD 估计噪声本底，高于检测门限的连续频段判为目标；带宽按较低的带宽门限在"
-            "同一连通区内测量，从而保留 AM 载波两侧较弱的边带。输出中心频率（功率重心所在频段的"
-            "中点）、占用带宽、起止时间、带内功率与带内信噪比（信号功率 / 同频段噪声功率）。"
-            "生成器产出的数据自带真值，可直接给出匹配、漏警、虚警与参数误差。"
-            "IQ 为复基带记录：中心频率指基带频率偏移，不是射频载频。")
+            "对所选 IQ 记录做能量检测与参数估计；有生成器真值时给出误差指标。")
         intro.setWordWrap(True)
         layout.addWidget(intro)
         from common.gui import TaskBanner
@@ -354,13 +349,10 @@ class DetectPageMixin:
         self.detect_spectrum.setYRange(max(noise_db - 5.0, high - 80.0), high + 3.0, padding=0.0)
         self.detect_tf.setXRange(low, high_edge, padding=0.0)
         self.detect_tf.setYRange(float(t[0]) - dt / 2, float(t[-1]) + dt / 2, padding=0.0)
-        self.detect_tf.setTitle(f"时频图与检测框 · {side} {_fmt_hz(low)}～{_fmt_hz(high_edge)}"
-                                f" · 动态范围 80 dB"
+        self.detect_tf.setTitle(f"时频图与检测框 · {side} · 动态范围 80 dB"
                                 + (" · 红框 AI 检出，灰虚线传统基线" if len(baseline_boxes) else ""))
         self.detect_spectrum.setTitle(
-            f"平均功率谱密度与检测门限 · {side} {_fmt_hz(low)}～{_fmt_hz(high_edge)}"
-            f" · 本底 {noise_db:.1f} dB/Hz · 门限 {threshold_db:.1f} dB/Hz"
-            f" · 带宽门限 {summary['config']['band_threshold_db']:.1f} dB")
+            f"平均功率谱密度 · 本底 {noise_db:.1f} dB/Hz · 门限 {threshold_db:.1f} dB/Hz")
         self.detect_table.setRowCount(len(detections))
         for row, item in enumerate(detections):
             if is_ml:
@@ -378,30 +370,20 @@ class DetectPageMixin:
             for column, text in enumerate(values):
                 self.detect_table.setItem(row, column, QtWidgets.QTableWidgetItem(text))
         lines = [
-            f"数据：{result.get('asset_name', result['asset_id'])}  |  "
-            f"采样数 {summary['sample_count']:,}  |  时长 {summary['duration_s']:.6f} s  |  "
-            f"采样率 {_fmt_hz(summary['sample_rate_hz'])}",
-            f"算法 {summary['algorithm']}（契约 {summary['contract']}）· "
-            f"带内信噪比定义 {summary['snr_definition']} · 频率参考 {summary['frequency_reference']}",
-            f"STFT {summary['nfft']} 点（频点 {summary['freq_resolution_hz']:g} Hz）· "
-            f"{summary['frame_count']} 帧 · 噪声本底 {summary['noise_floor_dbfs_per_hz']:.1f} dB/Hz · "
-            f"检测门限 {summary['threshold_dbfs_per_hz']:.1f} dB/Hz · "
-            f"最小带宽 {_fmt_hz(summary['config']['min_bandwidth_hz'])} · "
-            f"平滑半径 {summary['config']['merge_bins']} 频点",
-            f"检出目标 {len(detections)} 个（跳频会话 {sum(1 for item in detections if item['hopping'])} 个）",
+            f"数据：{result.get('asset_name', result['asset_id'])} · "
+            f"{summary['sample_count']:,} 点 · {summary['duration_s']:.6f} s · "
+            f"{_fmt_hz(summary['sample_rate_hz'])}",
+            f"参数：{summary['algorithm']} · STFT {summary['nfft']} 点 · "
+            f"噪声本底 {summary['noise_floor_dbfs_per_hz']:.1f} dB/Hz · "
+            f"检测门限 {summary['threshold_dbfs_per_hz']:.1f} dB/Hz",
+            f"检出目标 {len(detections)} 个（跳频会话 "
+            f"{sum(1 for item in detections if item['hopping'])} 个）",
         ]
         if is_ml:
             model = summary["model"]
-            lines.insert(1, f"模型 {model['id']}@{model['version']} · 摘要 {str(model['sha256'])[:12]}… · "
-                            f"输入 {summary['image']['size']}² 灰度时频图（动态范围 "
-                            f"{summary['image']['db_ceiling'] - summary['image']['db_floor']:.0f} dB）· "
-                            f"置信度阈值 {summary['config']['score_threshold']:.2f} · 去重 IoU "
+            lines.insert(1, f"模型：{model['id']}@{model['version']} · 置信度 "
+                            f"{summary['config']['score_threshold']:.2f} · IoU "
                             f"{summary['config']['iou_threshold']:.2f}")
-            lines.append(f"模型候选 {summary['raw_boxes']['candidates']} 个（输出 "
-                         f"{summary['raw_boxes']['rows']} 行）· 上下文 "
-                         f"{summary['timing']['context_ms']:.1f} ms · 推理 "
-                         f"{summary['timing']['inference_ms']:.1f} ms · 合计 "
-                         f"{summary['timing']['total_ms']:.1f} ms")
         metrics = result.get("metrics")
         if metrics:
             lines.append(
@@ -409,17 +391,12 @@ class DetectPageMixin:
                 f"虚警 {metrics['false_alarm']} · 精确率 {_fmt_metric(metrics['precision'], '4g')} · "
                 f"召回 {_fmt_metric(metrics['recall'], '4g')} · F1 {_fmt_metric(metrics['f1'], '4g')}")
             lines.append(
-                f"参数误差：中心频率 MAE {_fmt_metric(metrics['center_mae_hz'], '.1f')} Hz · "
+                f"误差：中心频率 MAE {_fmt_metric(metrics['center_mae_hz'], '.1f')} Hz · "
                 f"带宽相对误差 {_fmt_metric(metrics['bandwidth_mape'], '.1%')} · "
                 f"带内信噪比 MAE {_fmt_metric(metrics['snr_mae_db'], '.2f')} dB")
-            for entry in result["truth"]:
-                lines.append(
-                    f"  真值 #{entry['index']} {entry['mode']}{'（跳频会话）' if entry['hopping'] else ''}："
-                    f"中心 {_fmt_hz(entry['center_hz'])} · 带宽 {_fmt_hz(entry['bandwidth_hz'])} · "
-                    f"带内信噪比 {_fmt_metric(entry['snr_inband_db'], '.2f')} dB")
             if result.get("baseline_metrics"):
                 lines.append(_comparison_line("AI 检测", metrics,
                                               "传统基线", result["baseline_metrics"]))
         else:
-            lines.append("该数据没有生成器真值（导入或原生插件产出），只给出检测结果，不计算误差指标。")
+            lines.append("无生成器真值：只显示检测结果。")
         self.detect_summary.setPlainText("\n".join(lines))

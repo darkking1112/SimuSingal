@@ -50,8 +50,7 @@ class ModelsPageMixin:
         layout.addWidget(self.models_table, 1)
 
         self.model_hint = QtWidgets.QLabel(
-            "模型库位于工作区 training/models，训练成功自动入库，名称默认为"
-            "「模型类型-训练用途-时间」。删除只移除模型库条目，训练运行目录与实验记录保留。")
+            "训练成功的模型自动入库；删除只移除模型库条目，保留训练记录。")
         self.model_hint.setWordWrap(True)
         layout.addWidget(self.model_hint)
 

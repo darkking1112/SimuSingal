@@ -43,9 +43,7 @@ class DetectionTrainingPage(TrainingPageBase):
         form.addRow("时频图边长（检测）", self.size)
 
     def page_note(self):
-        return ("训练数据取自信号集合：选择训练集与验证集集合即可，页内不生成数据、不导出"
-                "训练集。“数据标注”编辑的是当前集合内左侧选中资产的检测标签，"
-                "时频图按上面的边长现算。")
+        return "训练数据取自信号集合；标注在当前集合内维护。"
 
     def curve_title(self):
         return "检测训练 loss"
@@ -87,9 +85,7 @@ class DetectionTrainingPage(TrainingPageBase):
         layout.addWidget(self.plot, 1)
 
         self.annotation_status = QtWidgets.QLabel(
-            "单类 emitter；拖动框移动、拖动角点缩放。修改后点“保存当前标注”：有框的目标记为"
-            "正样本，没有框的适用目标记为无信号，同时把该资产覆盖度置为完整（整幅时频图已确认）；"
-            "确认真没有信号时用“标记无信号”。")
+            "拖动框移动、拖角点缩放；无框的目标记为无信号。修改后点“保存当前标注”。")
         self.annotation_status.setWordWrap(True)
         layout.addWidget(self.annotation_status)
 

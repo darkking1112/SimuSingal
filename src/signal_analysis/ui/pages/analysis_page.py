@@ -37,8 +37,7 @@ class AnalysisPageMixin:
         box = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(box)
         bar = QtWidgets.QHBoxLayout()
-        bar.addWidget(QtWidgets.QLabel("通用统计与时频展示 · 星座图按目标参考参数绘制 · "
-                                       "调制识别见“调制识别”标签页"), 1)
+        bar.addWidget(QtWidgets.QLabel("通用统计与时频展示；星座图按参考参数绘制。"), 1)
         bar.addWidget(QtWidgets.QLabel("频率显示"))
         self.freq_view = QtWidgets.QComboBox()
         self.freq_view.addItems(["自动", "双边", "仅正频率"])
@@ -157,8 +156,7 @@ class AnalysisPageMixin:
         self.const_stack.setCurrentWidget(self.const_hint)
         self.const_hint.setText(self._hint_html(
             "星座图：等待分析",
-            "分析所选数据后，只有目标参考参数给出数字调制样式与符号率、中心频率等"
-            "特征参数时，才按这些参数绘制符号级星座图；参数不足时留白并说明原因。"))
+            "分析后按目标参考参数绘制；参数不足时在此说明原因。"))
         self.waterfall = pg.PlotWidget(title="瀑布图（离线历史）")
         self.waterfall.setLabel("bottom", "基带频率偏移", units="Hz")
         self.waterfall.setLabel("left", "时间", units="s")
@@ -241,37 +239,35 @@ class AnalysisPageMixin:
         """未绘制星座图时的原因提示：每个原因码对应一段可执行的说明。"""
         if "constellation" not in summary:
             return self._hint_html("本次运行没有记录星座图口径（旧记录）",
-                                   "重新点「分析所选数据」后按目标参考参数判定。")
+                                   "重新分析后按目标参考参数判定。")
         plan = summary.get("constellation") or {}
         reason = plan.get("reason")
         label = plan.get("label") or "调制已知"
         if reason == "analog":
             head = f"模拟信号（{label}）不绘制星座图"
-            detail = "模拟信号没有符号级星座；请结合平均功率谱密度与瀑布图判读。"
+            detail = "模拟信号没有符号级星座，请结合频谱与瀑布图判读。"
         elif reason == "multiple":
             head = "记录含多个信号：不绘制星座图"
-            detail = "多个信号的符号点会相互叠加，无法对应单一星座图。"
+            detail = "多个信号的符号点会相互叠加。"
         elif reason == "hopping":
             head = f"跳频样式（{label}）：不绘制单一星座图"
-            detail = "各跳频点不同，符号级星座点会随跳频旋转、无法对齐。"
+            detail = "各跳频点不同，符号点无法对齐。"
         elif reason == "symbol_rate":
             head = "缺少符号率参数：不绘制星座图"
-            detail = ("目标参考参数里没有符号率，无法抽取符号采样；本页不做参数估计——"
-                      "本项目生成的资产自带符号率。")
+            detail = "目标参考参数缺少符号率，无法抽取符号。"
         elif reason == "center":
             head = "缺少中心频率参数：不绘制星座图"
-            detail = "目标参考参数里没有中心频率或频率上下限，无法把信号搬回零频。"
+            detail = "目标参考参数缺少中心频率，无法搬回零频。"
         elif reason == "aliasing":
             head = "符号率高于采样率的一半：不绘制星座图"
-            detail = "按该符号率每个符号不足 2 个采样点，无法抽取符号。"
+            detail = "按该符号率每符号不足 2 个采样点。"
         elif reason == "insufficient":
             head = "记录太短：不绘制星座图"
             detail = plan.get("detail") or "记录长度不足以抽取足够的符号点。"
         else:
             head = "调制未知：不绘制星座图"
-            detail = ("资产没有可用的调制参数（生成元数据、识别采纳或人工标注）。可在"
-                      "「调制识别」页采纳识别结果，或在「信号导入」页补充调制样式；"
-                      "符号率与频偏仍以目标参考参数为准。")
+            detail = ("缺少可用调制参数；可在「调制识别」页采纳结果或在"
+                      "「信号导入」页补充。")
         return self._hint_html(head, detail)
 
     @staticmethod
@@ -342,8 +338,7 @@ class AnalysisPageMixin:
         self.spectrum.setXRange(low, half, padding=0.0)
         self.spectrum.setYRange(hi_db - span_db, hi_db, padding=0.0)
         side = "仅正频率" if positive_only else "双边"
-        self.spectrum.setTitle(f"平均功率谱密度 · {side} {_fmt_hz(low)}～{_fmt_hz(half)}"
-                               f" · 动态范围 {span_db:g} dB")
+        self.spectrum.setTitle(f"平均功率谱密度 · {side} · 动态范围 {span_db:g} dB")
         return low, half, span_db
 
     @staticmethod
@@ -385,7 +380,7 @@ class AnalysisPageMixin:
         self._apply_wave_range(wave_span, wave_span)
         self.spectrum.clear()
         self.spectrum.plot(fv, spectrum_db, pen="#2365b3")
-        low_f, high_f, span_db = self._apply_spectrum_range(rate, positive_only, high)
+        low_f, high_f, _ = self._apply_spectrum_range(rate, positive_only, high)
         df = f[1] - f[0]
         dt = summary["hop_samples"] / summary["sample_rate_hz"]
         plan = summary.get("constellation") or {}
@@ -404,17 +399,13 @@ class AnalysisPageMixin:
         self.waterfall.setXRange(low_f, high_f, padding=0.0)
         self.waterfall.setYRange(float(t[0] - dt / 2), float(t[-1] + dt / 2), padding=0.0)
         s = summary
-        data_kind = "实数（默认仅显示正频率）" if s.get("real_valued") else "复数 IQ（默认双边频率）"
+        data_kind = "实数（仅正频率）" if s.get("real_valued") else "复数 IQ（双边频率）"
         self.summary.setPlainText(
-            f"数据：{result.get('asset_name', result['asset_id'])}  |  采样数 {s['sample_count']:,}  |  时长 {s['duration_s']:.6f} s\n"
-            f"均值 I={s['mean_i']:.6g}, Q={s['mean_q']:.6g}  |  RMS={s['rms']:.6g}  |  峰值={s['peak']:.6g}\n"
-            f"星座图：{self._constellation_status(s)}"
-            f"  |  数据：{data_kind}\n"
-            f"显示范围（固定，可在工具栏调整）：波形 ±{self.amp_max.value():g}（时窗 {_fmt_span(wave_span)}）；"
-            f"频谱 {_fmt_hz(low_f)}～{_fmt_hz(high_f)}，动态范围 {span_db:g} dB"
-            f"（{levels[0]:.1f}～{levels[1]:.1f} dB，含瀑布色标）；"
-            f"波形抽点预览：{'是' if s['preview_decimated'] else '否'}；"
-            f"瀑布时间范围 = 记录时长（与 FFT 点数无关）")
+            f"数据：{result.get('asset_name', result['asset_id'])} · "
+            f"{s['sample_count']:,} 点 · {s['duration_s']:.6f} s · {_fmt_hz(rate)}\n"
+            f"统计：均值 I={s['mean_i']:.6g}, Q={s['mean_q']:.6g} · "
+            f"RMS={s['rms']:.6g} · 峰值={s['peak']:.6g}\n"
+            f"星座图：{self._constellation_status(s)} · {data_kind}")
 
     def _apply_display_mode(self):
         if self._play_data is not None:

@@ -33,19 +33,7 @@ class AmcPageMixin:
         box = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(box)
         intro = QtWidgets.QLabel(
-            "A09 六类调制识别（AMC）：FM、SSB、2ASK、QPSK、16QAM、64QAM。在指定分析频带内提取确定性"
-            "NumPy 特征（包络统计、谱平坦度、瞬时频率与相位统计、高阶累积量、峰值幅度直方图模板、"
-            "带内信噪比粗估），再由线性判别模型给出六类概率。默认使用随包分发的合成数据基线模型，"
-            "也可以选择自训练模型 JSON 或 ONNX 分类器清单。识别准确率的合格门限尚未确认；低信噪比"
-            "（<5 dB）或最高类概率偏低时会标注“仅供参考”，无法映射到六类的样式（如 AM、跳频会话）"
-            "按“不适用”计数，不丢弃样本。"
-            "若所选清单声明 contract = iq_waveform_v1，本页自动改走原始 IQ 通路：在同一分析频带内取"
-            "定长复基带窗口（单位 RMS 归一化）直接交给 1D CNN／TCN，由网络自行学习调制特征；标签集合"
-            "由清单决定（A09 六类或更宽的独立字典），结果契约 amc_iq_classify_v1，与特征通路互不影响。"
-            "分析中心与分析带宽对**两条通路含义相同**：带宽填 0 表示按整段采样带宽分析（中心强制归零），"
-            "只有信号占满整段时才用得上；窄带信号落在记录某个频点上时必须填频带（可用“取用检测结果频带”），"
-            "模型栏右侧实时显示当前会用哪条通路。"
-        )
+            "识别六类调制（FM、SSB、2ASK、QPSK、16QAM、64QAM）；按模型契约自动选择识别通路。")
         intro.setWordWrap(True)
         layout.addWidget(intro)
         from common.gui import TaskBanner
@@ -286,41 +274,34 @@ class AmcPageMixin:
         band = summary["band"]
         model = summary["model"] or {}
         source = _AMC_SOURCE_TEXT.get(str(model.get("source")), str(model.get("source")))
-        model_line = (f"模型 {model.get('id')}@{model.get('version')} · 来源 {source}"
-                      + (f" · 摘要 {str(model['sha256'])[:12]}…" if model.get("sha256") else "")
+        model_line = (f"模型：{model.get('id')}@{model.get('version')} · 来源 {source}"
                       + (f" · 训练集内准确率 {_fmt_metric(model.get('accuracy_in_sample'), '.4f')}"
                          if model.get("accuracy_in_sample") is not None else ""))
         lines = [
-            f"数据：{result.get('asset_name', result['asset_id'])}  |  采样率 "
-            f"{_fmt_hz(band['sample_rate_hz'])}  |  分析频带 中心 {_fmt_hz(band['center_hz'])}"
-            f" · 带宽 {_fmt_hz(band['bandwidth_hz'])}  |  分析样本 {band['analysis_samples']:,}"
-            f"（抽样比 {band['decimation']}）· 带内功率 {band['power_dbfs']:.2f} dBFS",
-            f"算法 {summary['algorithm']}（契约 {summary['contract']}）· 特征契约 "
-            f"{summary['feature_contract']}（{len(features)} 维）· 峰值样本 {band['peak_samples']} 个",
+            f"数据：{result.get('asset_name', result['asset_id'])} · 分析频带 "
+            f"{_fmt_hz(band['center_hz'])} / {_fmt_hz(band['bandwidth_hz'])} · "
+            f"带内功率 {band['power_dbfs']:.2f} dBFS",
             model_line,
             f"预测：{prediction['label_text']}（概率 {prediction['confidence']:.4f} · 与次高类差值 "
             f"{_fmt_metric(prediction.get('margin'), '.4f')}）· 带内信噪比粗估 "
             f"{_fmt_metric(summary['snr_estimate_db'], '.1f')} dB",
         ]
         if prediction["reliable"]:
-            lines.append("可信度：未发现低信噪比或区分度不足的提示；" + prediction["snr_note"])
+            lines.append("可信度：正常")
         else:
-            lines.append(f"可信度：仅供参考 —— {prediction['reason']}；{prediction['snr_note']}")
+            lines.append(f"可信度：仅供参考 —— {prediction['reason']}")
         baseline = summary["baseline"]
         if baseline["classification"]:
-            lines.append(f"传统对照（{baseline['algorithm']}）：判定 {baseline['classification']}"
-                         f" · 估计簇数 {baseline['cluster_estimate']}"
-                         "（该启发式只区分数字/模拟，不对应六类）")
+            lines.append(f"传统对照：{baseline['classification']}（仅区分数字/模拟）")
         else:
-            lines.append(f"传统对照（{baseline['algorithm']}）：不可用 —— {baseline['note']}")
+            lines.append(f"传统对照：不可用 —— {baseline['note']}")
         truth = result.get("truth") or {}
         if truth.get("available"):
             lines.append(
-                f"生成器真值：{truth['class']}（样式 {truth['mode']}）· 带内信噪比 "
-                f"{_fmt_metric(truth['snr_inband_db'], '.2f')} dB · 识别"
+                f"生成器真值：{truth['class']}（样式 {truth['mode']}）· 识别"
                 f"{'命中' if result.get('truth_hit') else '未命中'}")
         else:
-            lines.append(f"生成器真值：不适用 —— {truth.get('reason', '没有真值')}；样本仍计入统计，不丢弃")
+            lines.append(f"生成器真值：不适用 —— {truth.get('reason', '没有真值')}")
         for item in summary["pending"]:
             lines.append(f"待确认：{item}")
         self.amc_summary.setPlainText("\n".join(lines))
@@ -359,36 +340,28 @@ class AmcPageMixin:
             self.amc_table.setItem(index, 1, QtWidgets.QTableWidgetItem(str(value)))
         timing = summary["timing"]
         lines = [
-            f"数据：{result.get('asset_name', result['asset_id'])}  |  采样率 "
-            f"{_fmt_hz(waveform['sample_rate_hz'])}  |  分析频带 中心 {_fmt_hz(waveform['offset_hz'])}"
-            f" · 带宽 {_fmt_hz(waveform['bandwidth_hz'])}  |  输入窗口 {waveform['samples']:,} 点"
-            f"（I/Q 两通道 · 单位 RMS）",
-            f"算法 {summary['algorithm']}（契约 {summary['contract']}）· 标签集合 "
-            f"{summary['class_set']}（{len(classes)} 类）· 预处理 {timing['preprocess_ms']} ms + "
-            f"推理 {timing['inference_ms']} ms = {timing['total_ms']} ms",
-            f"模型 {model.get('id')}@{model.get('version')}"
-            + (f" · 摘要 {str(model['sha256'])[:12]}…" if model.get("sha256") else "")
-            + (f" · 运行时 onnxruntime {model['runtime_version']}"
-               if model.get("runtime_version") else "")
-            + (f" · 训练 {model['training']}" if model.get("training") else ""),
+            f"数据：{result.get('asset_name', result['asset_id'])} · 分析频带 "
+            f"{_fmt_hz(waveform['offset_hz'])} / {_fmt_hz(waveform['bandwidth_hz'])} · "
+            f"输入窗口 {waveform['samples']:,} 点",
+            f"模型：{model.get('id')}@{model.get('version')} · 契约 {summary['contract']} · "
+            f"标签集合 {summary['class_set']}（{len(classes)} 类）· 推理 "
+            f"{timing['total_ms']} ms",
             f"预测：{prediction['label_text']}（概率 {prediction['confidence']:.4f} · 与次高类差值 "
             f"{_fmt_metric(prediction.get('margin'), '.4f')}）· 带内信噪比粗估 "
             f"{_fmt_metric(summary['snr_estimate_db'], '.1f')} dB",
         ]
         if prediction["reliable"]:
-            lines.append("可信度：未发现低信噪比或区分度不足的提示；" + prediction["snr_note"])
+            lines.append("可信度：正常")
         else:
-            lines.append(f"可信度：仅供参考 —— {prediction['reason']}；{prediction['snr_note']}")
-        lines.append("对照说明：原始 IQ 通路没有传统启发式基线（传统判定只对确定性特征有意义），"
-                     "因此这里不列对照行，也不拿它与特征通路的结果互相顶替。")
+            lines.append(f"可信度：仅供参考 —— {prediction['reason']}")
+        lines.append("对照：原始 IQ 通路没有传统启发式基线。")
         truth = result.get("truth") or {}
         if truth.get("available"):
             lines.append(
-                f"生成器真值：{truth['class']}（样式 {truth['mode']}）· 带内信噪比 "
-                f"{_fmt_metric(truth['snr_inband_db'], '.2f')} dB · 识别"
+                f"生成器真值：{truth['class']}（样式 {truth['mode']}）· 识别"
                 f"{'命中' if result.get('truth_hit') else '未命中'}")
         else:
-            lines.append(f"生成器真值：不适用 —— {truth.get('reason', '没有真值')}；样本仍计入统计，不丢弃")
+            lines.append(f"生成器真值：不适用 —— {truth.get('reason', '没有真值')}")
         for item in summary["pending"]:
             lines.append(f"待确认：{item}")
         self.amc_summary.setPlainText("\n".join(lines))

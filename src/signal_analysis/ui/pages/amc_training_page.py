@@ -35,8 +35,7 @@ class AmcTrainingPage(TrainingPageBase):
     ANNOTATION_TITLE = "信号标注"
 
     def page_note(self):
-        return ("训练数据取自信号集合：选择训练集与验证集集合即可，页内不生成数据、"
-                "不导出训练集。“信号标注”查看并修改当前集合内左侧选中资产的参数与调制类别。")
+        return "训练数据取自信号集合；标注在当前集合内维护。"
 
     def curve_title(self):
         return "AMC 训练 loss / IQ 验证准确率（0–1）"
@@ -408,7 +407,7 @@ class AmcTrainingPage(TrainingPageBase):
         layout.addLayout(form)
 
         self.annotation_status = QtWidgets.QLabel(
-            "选择目标后修改类别与参数；“保存当前标注”以追加新版本的方式写入，历史版本保留。")
+            "选择目标后修改类别与参数；保存时追加新版本，历史版本保留。")
         self.annotation_status.setWordWrap(True)
         layout.addWidget(self.annotation_status)
         layout.addStretch(1)

@@ -30,12 +30,7 @@ class ComparePageMixin:
         box = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(box)
         intro = QtWidgets.QLabel(
-            "把同一个数据资产上的两条路径排在一起：信号检测侧的“检测结果 / 传统基线”取自 AI 检测运行时"
-            "同步跑的能量检测，两者使用同一套真值、同一套会话合并口径；逐跳参数侧把“AI 逐跳 /"
-            "传统逐跳 / 会话口径”三列排在一起，三者的驻留、带宽、功率与 SNR 都在原始 PSD 上重测；"
-            "调制识别侧列出模型输出、生成器真值与命中情况。没有生成器真值（导入或原生插件产出）时"
-            "只列结果、不计算指标，按“不适用”计数而不是静默丢弃。"
-        )
+            "并排查看同一数据上的 AI、传统基线与真值指标。")
         intro.setWordWrap(True)
         layout.addWidget(intro)
         bar = QtWidgets.QHBoxLayout()
@@ -52,9 +47,7 @@ class ComparePageMixin:
         layout.addWidget(self.compare_table, 3)
         self.compare_summary = QtWidgets.QPlainTextEdit()
         self.compare_summary.setReadOnly(True)
-        self.compare_summary.setPlaceholderText(
-            "运行“信号检测”（或 AI 检测）、“跳频参数”（或 AI 逐跳）与“调制识别”后，"
-            "这里显示并排对比与未确认项。")
+        self.compare_summary.setPlaceholderText("运行检测、逐跳或识别后显示对比结果。")
         layout.addWidget(self.compare_summary, 2)
         return box
 
@@ -85,10 +78,8 @@ class ComparePageMixin:
             main_label = self._object_label(
                 "AI 检测" if summary.get("model") else "能量检测", summary)
             lines = [
-                f"检测数据：{detect.get('asset_name', detect.get('asset_id'))}  |  "
-                f"算法 {detect.get('algorithm')}（契约 {detect.get('contract')}）",
-                f"检出目标 {len(summary.get('detections') or [])} 个 · "
-                f"门限 {_fmt_metric(summary.get('threshold_dbfs_per_hz'), '.1f')} dB/Hz",
+                f"检测：{detect.get('asset_name', detect.get('asset_id'))} · "
+                f"{detect.get('algorithm')} · 检出目标 {len(summary.get('detections') or [])} 个",
             ]
             if metrics:
                 for name, value in detection_metrics(metrics):
@@ -99,10 +90,9 @@ class ComparePageMixin:
                     lines.append(_comparison_line(main_label, metrics,
                                                   "传统基线", baseline))
                 else:
-                    lines.append("本次检测没有同步运行传统基线，无法并排展示；"
-                                 "AI 检测页勾选“同时跑能量检测”即可对照。")
+                    lines.append("没有同步运行传统基线；勾选 AI 检测页的“同时跑能量检测”即可并排对比。")
             else:
-                lines.append("该数据没有生成器真值，只列检测结果，不计算指标（不适用）。")
+                lines.append("没有生成器真值：只列检测结果。")
         if hops:
             summary = hops.get("summary") or {}
             metrics = hops.get("metrics")
@@ -117,8 +107,7 @@ class ComparePageMixin:
                         rows.append(("跳频参数", "传统逐跳（hop_track_v1）", name, value))
                     lines.append(_comparison_line(main_label, metrics, "传统逐跳", traditional))
                 else:
-                    lines.append("本次逐跳估计没有同步运行传统基线：跳频参数页勾选"
-                                 "“并排对比传统逐跳”即可对照。")
+                    lines.append("没有同步运行传统逐跳基线；在跳频参数页勾选“并排对比传统逐跳”即可对照。")
                 baseline = hops.get("baseline_metrics")
                 if baseline:
                     for name, value in detection_metrics(baseline):
@@ -129,14 +118,15 @@ class ComparePageMixin:
                              f"可分辨 {summary.get('hop_rate_limit_hz', '--')} Hz 以内")
             else:
                 truth = hops.get("truth") or {}
-                lines.append("该数据没有逐跳真值，只列逐跳结果，不计算指标（不适用）："
-                             + str(truth.get("reason") or "不适用"))
+                lines.append("没有逐跳真值：只列结果。" + str(truth.get("reason") or ""))
         if amc:
-            prediction = amc.get("prediction") or {}
             model = amc.get("model") or {}
             truth = amc.get("truth") or {}
             label = self._object_label("调制识别", {"model": model})
-            for name, value in amc_metrics(prediction):
+            branch = ("原始 IQ" if (amc.get("summary") or {}).get("waveform") else "特征")
+            contract = ((amc.get("summary") or {}).get("contract")
+                        or amc.get("contract") or "--")
+            for name, value in amc_metrics(amc.get("prediction") or {}):
                 rows.append(("调制识别", label, name, value))
             if truth.get("available"):
                 hit = amc.get("truth_hit")
@@ -146,11 +136,7 @@ class ComparePageMixin:
                              "命中" if hit else "未命中"))
             else:
                 rows.append(("调制识别", "生成器真值", "对照", truth.get("reason") or "不适用"))
-            lines.append(f"识别模型 {model.get('id')}@{model.get('version', '--')} · "
-                         + (f"来源 {_AMC_SOURCE_TEXT.get(str(model.get('source')), model.get('source'))} · "
-                            if model.get("source") else
-                            f"契约 {amc.get('contract', '--')}（标签集合 {amc.get('class_set', '--')}）· ")
-                         + f"带内信噪比粗估 {_fmt_metric(amc.get('snr_estimate_db'), '.2f')} dB")
+            lines.append(f"识别：{label} · {branch}通路 · 契约 {contract}")
             for item in amc.get("pending") or []:
                 lines.append(f"待确认项：{item}")
         self.compare_table.setRowCount(len(rows))

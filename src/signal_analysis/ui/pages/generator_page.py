@@ -33,10 +33,7 @@ class GeneratorPageMixin:
         layout.addWidget(tabs)
         single = QtWidgets.QWidget()
         single_layout = QtWidgets.QVBoxLayout(single)
-        intro = QtWidgets.QLabel("生成用于测试检测、参数估计与调制识别算法的 IQ 基带信号。"
-                                 "IQ 为复基带记录，不设置载频：\"频点\"指基带频率偏移；"
-                                 "频率值以 Hz / kHz / MHz 显示（单位在输入框外）。"
-                                 "可一次包含多种信号并独立设置参数，自动按目标带宽推导调制参数。")
+        intro = QtWidgets.QLabel("生成用于算法测试的 IQ 基带信号；频点为基带频率偏移。")
         intro.setWordWrap(True)
         single_layout.addWidget(intro)
         from common.gui import TaskBanner
@@ -342,31 +339,22 @@ class GeneratorPageMixin:
     def show_generation_result(self, result):
         summary = result["summary"]
         lines = [f"已生成资产：{result['name']}",
-                 f"采样率 {_fmt_hz(summary['sample_rate_hz'])} · {summary['sample_count']:,} 个复采样 · "
-                 f"时长 {summary['duration_s']:g} s · 峰值 {summary['peak_dbfs']:.1f} dBFS"]
+                 f"{_fmt_hz(summary['sample_rate_hz'])} · {summary['sample_count']:,} 点 · "
+                 f"{summary['duration_s']:g} s · 峰值 {summary['peak_dbfs']:.1f} dBFS"]
         for entry in summary["signals"]:
             style = MODE_SHORT.get(entry["mode"], entry["mode"])
             if entry["mode"] == "noise":
-                lines.append(f"  {style}：全带白噪声（带宽 = 采样率）· "
-                             f"功率 {entry['power_dbfs']:g} dBFS（实测 {entry['power_dbfs_actual']:.2f} dBFS）")
+                lines.append(f"  {style}：功率 {entry['power_dbfs_actual']:.2f} dBFS")
                 continue
-            line = (f"  {style}：频点 {_fmt_hz(entry['offset'])} · 目标功率 {entry['power_dbfs']:g} dBFS"
-                    f"（实测 {entry['power_dbfs_actual']:.2f} dBFS）· 目标带宽 {_fmt_hz(entry['bandwidth'])}")
+            line = (f"  {style}：频点 {_fmt_hz(entry['offset'])} · "
+                    f"功率 {entry['power_dbfs_actual']:.2f} dBFS · "
+                    f"带宽 {_fmt_hz(entry['bandwidth'])}")
             if entry.get("snr_inband_db") is not None:
                 line += f" · 带内 SNR {entry['snr_inband_db']:.2f} dB"
             lines.append(line)
         noise = summary["noise"]
-        psd = noise.get("power_dbfs_per_hz")
-        psd_text = "" if psd is None else f" · 功率谱密度 {psd:.1f} dB/Hz"
-        if noise["enabled"]:
-            if noise["snr_db"] is not None:
-                reference = noise.get("snr_reference_index")
-                ref_text = "" if reference is None else f"（参考信号 #{reference + 1}，实测功率最大）"
-                lines.append(f"  背景噪声：带宽 {_fmt_hz(noise['bandwidth'])} · 带内 SNR {noise['snr_db']:g} dB"
-                             f"{ref_text} · 总功率 {noise['power_dbfs']:.1f} dBFS{psd_text}")
-            elif noise["power_dbfs"] is not None:
-                lines.append(f"  背景噪声：带宽 {_fmt_hz(noise['bandwidth'])} · "
-                             f"总功率 {noise['power_dbfs']:.1f} dBFS{psd_text}")
+        if noise["enabled"] and noise["snr_db"] is not None:
+            lines.append(f"  背景噪声：带内 SNR {noise['snr_db']:g} dB")
         lines.append(f"资产文件：{result['asset_path']}"
                      f"（格式 {ASSET_FORMAT_TEXT.get(result.get('storage_format'), result.get('storage_format'))}）")
         targets = result.get("targets") or {}

@@ -53,8 +53,7 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
         self._applied_collection_scope = None
         self._restoring_scope = False
         super().__init__(Workspace(workspace), "电磁信号分析 · SignalAnalysis",
-                         "离线数据 · 通用统计与时频展示 · IQ 信号生成 · 信号检测与调制识别 · "
-                         "算法对比与离线报告 · 原生插件")
+                         "统计与时频 · IQ 生成 · 检测与识别 · 对比与报告")
         #: 模型下拉：页面创建时登记，「数据管理 → 模型管理」增删后统一刷新。
         self._model_pickers = []
         self.training_coordinator = TrainingCoordinator(self)
@@ -528,8 +527,7 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             f" · 已过滤「{self.label_filter.currentText()}」"
             if missing_labels is not None else ""))
         if not total and missing_labels is not None:
-            self.asset_info.setText("当前过滤下没有资产：这些资产的目标都已有该任务标签，"
-                                    "或资产没有目标（负样本/无信号）")
+            self.asset_info.setText("当前过滤下没有资产")
         self.prev_page.setEnabled(self.asset_page > 0)
         self.next_page.setEnabled(self.asset_page + 1 < pages)
         if self.assets.currentItem() is None and self.assets.count():
@@ -671,7 +669,7 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             self.const_scatter.clear()
             self.const_hint.setText(self._hint_html(
                 "原生复制完成",
-                "请选择输出资产后再点「分析所选数据」，届时按目标参考参数决定是否绘制星座图。"))
+                "选择输出资产后再分析。"))
             self.const_stack.setCurrentWidget(self.const_hint)
             self.summary.setPlainText(f"原生复制完成：{result['plugin']['id']}\n"
                                       f"输出资产：{result['derived_asset_id']}\n请选择输出资产进行分析。")

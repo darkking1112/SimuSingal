@@ -74,13 +74,7 @@ class DataPageMixin:
         box = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(box)
         intro = QtWidgets.QLabel(
-            "把 IQ 生成、检测、分析、调制识别与训练相关的结果统一盘点：统计当前工作目录"
-            "（workspace_data）的占用，核对索引与磁盘是否一致（未入库文件、缺失文件、孤儿运行目录、"
-            "源资产已删除的运行记录），并列出可安全清理的条目；同时在“信号集合”子页维护集合成员、"
-            "查看标注进度与多样性，在“模型管理”子页查看训练产出的模型（训练时间、大小与参数）"
-            "并重命名或删除。清理只覆盖“已结束且超过保留天数”的任务工件与无主文件；"
-            "已入库的信号资产与运行目录永远不在可删范围内。扫描本身是只读的，不会写入运行记录。"
-        )
+            "盘点工作区占用与索引一致性，管理信号集合与训练模型。")
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
@@ -200,8 +194,7 @@ class DataPageMixin:
         self.collection_show_archived.toggled.connect(
             lambda _: self.refresh_collections_panel())
         left.addWidget(self.collection_show_archived)
-        hint = QtWidgets.QLabel("集合成员来自左侧“数据资产”的当前选择；同一资产可属于多个集合，"
-                                "标注挂在目标上、全集合共享同一份当前标签。归档集合可随时恢复。")
+        hint = QtWidgets.QLabel("集合成员取自左侧数据资产；归档集合可随时恢复。")
         hint.setWordWrap(True)
         left.addWidget(hint)
         layout.addLayout(left, 2)
@@ -435,12 +428,9 @@ class DataPageMixin:
                 [[(index, label) for index, (label, _) in enumerate(items)]])
             self.diversity_chart.setYRange(0, max(max(values) * 1.15, 1), padding=0)
         self.diversity_summary.setText(
-            f"取值数 {info['distinct']} · 归一化多样性 {info['diversity']:.2f} · "
+            f"取值数 {info['distinct']} · 多样性 {info['diversity']:.2f} · "
             f"最高占比 {info['top_share']:.0%} · 未知 {info['unknown_share']:.0%}"
-            f"　|　综合多样性 {overall['diversity']:.2f}"
-            f"（有效维度 {overall['effective_axes']}/{len(self._DIVERSITY_AXES)}）"
-            f" · 组合变体 {overall['combination_variants']}/{overall['targets']}"
-            f"（覆盖 {overall['combination_share']:.0%}）")
+            f"　|　综合多样性 {overall['diversity']:.2f}")
 
     def _collections_changed(self):
         self.refresh_collections()

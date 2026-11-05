@@ -63,11 +63,7 @@ class ImportPageMixin:
         box = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(box)
         intro = QtWidgets.QLabel(
-            "批量导入离线 IQ：先添加文件或文件夹，自动识别格式与已知参数；"
-            "缺采样率/类型/字节序的行标红、不参与导入。SigMF 自动读采样率，"
-            "IQ 二进制需显式给出类型与字节序。在清单中选择文件后，用“信号参数编辑”"
-            "统一填写信号名称与参数（AMC：调制 + 可选 SNR）；多目标请用"
-            "“导入标注清单 CSV…”集中申报。")
+            "批量导入离线 IQ：缺采样率、类型或字节序的条目会标红并跳过。")
         intro.setWordWrap(True)
         layout.addWidget(intro)
 

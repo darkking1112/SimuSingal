@@ -235,8 +235,7 @@ class TrainingPageBase(QtWidgets.QWidget):
         return list(self.MODEL_OPTIONS)
 
     def page_note(self):
-        return ("训练数据直接取自信号集合：选择训练集与验证集集合即可，页内不生成数据、"
-                "不导出训练集。训练依赖安装在所选 Python 环境。")
+        return "训练数据取自信号集合；依赖安装在所选 Python 环境。"
 
     def build_annotations(self):
         raise NotImplementedError

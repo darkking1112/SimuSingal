@@ -32,16 +32,7 @@ class HopsPageMixin:
         box = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(box)
         intro = QtWidgets.QLabel(
-            "逐跳参数估计（契约 fh_hops_v1，算法 hop_track_v1）：在短时傅里叶变换的时频图上把相邻帧里"
-            "同频段的能量连成轨迹，再对每条轨迹用较低门限在原框架上收敛一次频带、用时域带内功率"
-            "收敛一次起止时间，得到每一跳的中心频率、单跳带宽、驻留时间与带内信噪比；一跳内的功率"
-            "重心（质心）与中点一并给出，便于判断跳变帧是否被包进来。逐跳结果再按时间连续性聚成会话，"
-            "给出跳速（跳起点间隔中位数的倒数）、跳频点数、跳频跨度与占空比。"
-            "与会话级“信号检测”是两个粒度：那里只给整条跳频链路的频带，这里给每一跳的参数。"
-            "同一页也可以渲染 AI 逐跳结果（算法 ml_detect_hops）：逐跳模型只在时频图上定位跳的"
-            "频段与粗糙时间，驻留、带宽、功率与逐跳 SNR 仍在原始 PSD 上用同一套门限重测，"
-            "所以两种算法的物理量口径一致、可以并排比较。"
-            "IQ 为复基带记录：中心频率指基带频率偏移，不是射频载频。")
+            "估计逐跳中心频率、带宽、驻留时间与跳速，并按时间聚成会话。")
         intro.setWordWrap(True)
         layout.addWidget(intro)
         from common.gui import TaskBanner
@@ -314,12 +305,9 @@ class HopsPageMixin:
         self.hops_tf.setXRange(low, high_edge, padding=0.0)
         self.hops_tf.setYRange(float(t[0]) - dt / 2, float(t[-1]) + dt / 2, padding=0.0)
         self.hops_spectrum.setTitle(
-            f"平均功率谱密度与逐跳频带 · {side} {_fmt_hz(low)}～{_fmt_hz(high_edge)}"
-            f" · 本底 {noise_db:.1f} dB/Hz · 逐帧门限 {threshold_db:.1f} dB/Hz"
-            f" · 频点 {df:g} Hz")
-        self.hops_tf.setTitle(f"时频图与逐跳框 · {side} {_fmt_hz(low)}～{_fmt_hz(high_edge)}"
-                              f" · 动态范围 80 dB · 帧间隔 {dt * 1e3:.3f} ms"
-                              f" · 同色为同一会话")
+            f"平均功率谱密度与逐跳频带 · 本底 {noise_db:.1f} dB/Hz · "
+            f"门限 {threshold_db:.1f} dB/Hz")
+        self.hops_tf.setTitle(f"时频图与逐跳框 · {side} · 同色为同一会话")
         self.hops_table.setRowCount(len(hops))
         for row, item in enumerate(hops):
             note = (f"频点 {item['bin_count']} 个 · 细化 FFT {item['band_nfft']} 点 · "
@@ -345,21 +333,16 @@ class HopsPageMixin:
                       _fmt_hz(item["bandwidth_hz"])]
             for column, text in enumerate(values):
                 self.hops_session_table.setItem(row, column, QtWidgets.QTableWidgetItem(text))
-        config = summary["config"]
         lines = [
-            f"数据：{result.get('asset_name', result['asset_id'])}  |  "
-            f"采样数 {summary['sample_count']:,}  |  时长 {summary['duration_s']:.6f} s  |  "
-            f"采样率 {_fmt_hz(summary['sample_rate_hz'])}",
-            f"算法 {summary['algorithm']}（契约 {summary['contract']}）· "
-            f"带内信噪比定义 {summary['snr_definition']} · 频率参考 {summary['frequency_reference']}",
-            f"STFT {summary['nfft']} 点（频点 {df:g} Hz，帧 {summary['frame_count']} 个，"
-            f"跳变帧 {summary['transition_frames']} 个）· 噪声本底 "
+            f"数据：{result.get('asset_name', result['asset_id'])} · "
+            f"{summary['sample_count']:,} 点 · {summary['duration_s']:.6f} s · "
+            f"{_fmt_hz(summary['sample_rate_hz'])}",
+            f"参数：{summary['algorithm']} · 契约 {summary['contract']} · "
+            f"STFT {summary['nfft']} 点 · 噪声本底 "
             f"{summary['noise_floor_dbfs_per_hz']:.1f} dB/Hz · 逐帧门限 "
-            f"{summary['threshold_dbfs_per_hz']:.1f} dB/Hz · 时间平滑 {config['smooth_frames']} 帧",
-            f"可分辨性：最短驻留过滤 {config['min_dwell_s'] * 1e3:.3f} ms · "
-            f"可分辨门限 {summary['dwell_limit_s'] * 1e3:.3f} ms（帧间距 × 4）· "
-            f"理论最快跳速 {summary['hop_rate_limit_hz']:.1f} Hz · "
-            f"{'可分辨' if summary['resolvable'] else '不可分辨'}",
+            f"{summary['threshold_dbfs_per_hz']:.1f} dB/Hz · 可分辨门限 "
+            f"{summary['dwell_limit_s'] * 1e3:.3f} ms"
+            f"（{'可分辨' if summary['resolvable'] else '不可分辨'}）",
             f"逐跳结果：{len(hops)} 跳 · {len(sessions)} 个会话",
         ]
         if summary.get("reason"):
@@ -367,10 +350,8 @@ class HopsPageMixin:
         model = summary.get("model")
         if isinstance(model, dict) and model.get("id"):
             lines.append(
-                f"逐跳模型：{model['id']}@{model.get('version') or '--'} · "
-                f"运行时 {model.get('runtime_version') or '--'} · "
-                f"图像 {summary.get('image_size', '--')} 像素 · "
-                f"原始候选框 {summary.get('raw_boxes', '--')} 个（模型只定位跳，物理量重测）")
+                f"模型：{model['id']}@{model.get('version') or '--'} · "
+                f"原始候选框 {summary.get('raw_boxes', '--')} 个")
         metrics = result.get("metrics")
         if metrics:
             lines.append(
@@ -378,26 +359,20 @@ class HopsPageMixin:
                 f"虚警 {metrics['false_alarm']} · 精确率 {_fmt_metric(metrics['precision'], '4g')} · "
                 f"召回 {_fmt_metric(metrics['recall'], '4g')} · F1 {_fmt_metric(metrics['f1'], '4g')}")
             lines.append(
-                f"参数误差：中心频率 MAE {_fmt_metric(metrics['center_mae_hz'], '.1f')} Hz · "
-                f"单跳带宽相对误差 {_fmt_metric(metrics['bandwidth_mape'], '.1%')} · "
+                f"误差：中心频率 MAE {_fmt_metric(metrics['center_mae_hz'], '.1f')} Hz · "
+                f"带宽相对误差 {_fmt_metric(metrics['bandwidth_mape'], '.1%')} · "
                 f"逐跳信噪比 MAE {_fmt_metric(metrics['snr_mae_db'], '.2f')} dB")
         else:
             truth = result.get("truth")
             reason = truth.get("reason") if isinstance(truth, dict) else "没有生成器真值"
-            lines.append(f"逐跳真值：不适用 —— {reason}；结果仍然给出，不丢弃。")
+            lines.append(f"逐跳真值：不适用 —— {reason}。")
         for item in sessions:
             lines.append(
-                f"  会话 {item['session_id']}：{item['hop_count']} 跳 · 跳速 "
-                f"{_fmt_metric(item['hop_rate_hz'], '.2f')} Hz"
-                f"（周期 {_fmt_metric(item['hop_period_s'], '.6f')} s · 驻留中位 "
-                f"{_fmt_metric(item['dwell_median_s'], '.6f')} s · 占空比 "
-                f"{_fmt_metric(item['duty_cycle'], '.3f')}）· "
-                f"跳频点 {len(item['hop_frequencies_hz'])} 个"
-                f"（{', '.join(_fmt_hz(value) for value in item['hop_frequencies_hz'][:8])}"
-                f"{'…' if len(item['hop_frequencies_hz']) > 8 else ''}）· "
-                f"跨度 {_fmt_hz(item['hop_span_hz'])} · 会话带宽 {_fmt_hz(item['bandwidth_hz'])} · "
-                f"带内信噪比 {_fmt_metric(item['snr_db'], '.2f')} dB · "
-                f"会话级检出 {item['session_detection_id'] or '未关联'}")
+                f"会话 {item['session_id']}：{item['hop_count']} 跳 · 跳速 "
+                f"{_fmt_metric(item['hop_rate_hz'], '.2f')} Hz · 驻留中位 "
+                f"{_fmt_metric(item['dwell_median_s'], '.6f')} s · "
+                f"跳频点 {len(item['hop_frequencies_hz'])} 个 · "
+                f"跨度 {_fmt_hz(item['hop_span_hz'])}")
         if result.get("traditional_metrics"):
             lines.append(_comparison_line(
                 "AI 逐跳" if summary.get("model") else "逐跳口径", metrics, "传统逐跳",

@@ -143,8 +143,7 @@ class ProjectParamsDialog(_ParamsDialog):
             "跳速（hop/s）", settings["hop"], 0.1, 1e6, 2)
         self.form.addRow(QtWidgets.QLabel("跳速只作用于跳频样式（FH-2FSK / FH-OFDM）。"))
         self.form.addRow(self._build_impairment_group())
-        self._add_note("数字样式的符号率由带宽与滚降系数推导；独立符号率与损伤项"
-                       "（频偏 / 相位噪声 / IQ 不平衡 / 多径）尚未实现，置灰，用到即报错。")
+        self._add_note("符号率由带宽与滚降系数推导；损伤项尚未实现，选中会报错。")
         self._add_buttons()
 
     def _build_impairment_group(self):
@@ -164,8 +163,7 @@ class ProjectParamsDialog(_ParamsDialog):
                              else f"{item.summary}；施加顺序：{item.stage}")
             self.impairment_checks[item.name] = check
             grid.addWidget(check, 0, column)
-        grid.addWidget(QtWidgets.QLabel("全部未实现时置灰；配方里用到会直接报错，不静默忽略"),
-                       1, 0, 1, len(IMPAIRMENTS))
+        grid.addWidget(QtWidgets.QLabel("未实现项置灰，配方用到会直接报错"), 1, 0, 1, len(IMPAIRMENTS))
         return group
 
     def values(self):
@@ -301,8 +299,8 @@ class TorchSigEnvDialog(QtWidgets.QDialog):
 
     def test(self):
         if not is_linux():
-            self.status.setText("当前系统不是 Linux：TorchSig 只能在 Linux 下生成数据。"
-                               "可在 Linux/WSL/远程机生成 bundle 后回来导入。")
+            self.status.setText("当前系统不是 Linux：TorchSig 只能在 Linux 下生成；"
+                               "可用 WSL 或导入 bundle。")
             return
         self.status.setText("正在测试…")
         self.test_button.setEnabled(False)
@@ -342,9 +340,7 @@ class CollectionGenPanel(QtWidgets.QWidget):
         }
         layout = QtWidgets.QVBoxLayout(self)
         intro = QtWidgets.QLabel(
-            "按生成参数批量合成 IQ 基带信号：每次生成写入一个集合，配方自动存到集合上保证可复现；"
-            "标注按生成的信号参数自动写入（AMC = 调制方式；检测 = 起止时间 / 中心频率 / 带宽 / SNR，"
-            "检测框在构建数据版本时才算）。")
+            "按配方批量生成 IQ 信号并写入集合，参数与初始标注自动保存。")
         intro.setWordWrap(True)
         layout.addWidget(intro)
         from common.gui import TaskBanner
@@ -358,7 +354,7 @@ class CollectionGenPanel(QtWidgets.QWidget):
         self.preview = QtWidgets.QPlainTextEdit()
         self.preview.setReadOnly(True)
         self.preview.setMaximumHeight(150)
-        self.preview.setPlaceholderText("参数预览（只抽参数、不合成 IQ）：样本数、各参数分布与分层格子。")
+        self.preview.setPlaceholderText("参数预览：样本数、分布与分层计数。")
         layout.addWidget(self.preview)
         self.result_label = QtWidgets.QLabel("尚未生成")
         self.result_label.setWordWrap(True)

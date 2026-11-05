@@ -65,8 +65,7 @@ class SignalParamsDialog(QtWidgets.QDialog):
             self.alpha = _plain_spin(0.05, 1.0, spec.get("alpha", 0.35), 2)
             form.addRow("滚降系数 α", self.alpha)
         elif mode == "noise":
-            note = QtWidgets.QLabel("自定义噪声为全带白噪声：频点固定 0、带宽固定为采样率，只填功率；"
-                                    "不参与「背景噪声」的带内 SNR 折算。")
+            note = QtWidgets.QLabel("全带白噪声：频点与带宽固定，只填功率。")
             note.setWordWrap(True)
             form.addRow(note)
         elif mode in ("fh_rc", "fh_video"):
