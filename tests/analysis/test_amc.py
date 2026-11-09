@@ -355,6 +355,7 @@ def test_gui_amc_tab_renders_result(tmp_path):
         assert labels == ["信号导入", "IQ 信号生成", "态势显示", "信号检测", "调制识别", "跳频参数",
                           "信号检测训练", "AMC 识别训练", "数据管理", "算法对比", "运行记录"]
         assert window.amc_button.text() and window.amc_from_detect.text()
+        assert window.amc_ml_button.text() == "AI 识别所选数据"
         # 内置模型随包分发时应给出可用的提示，并写明当前走特征通路（AI/IQ 清单会改这一行）
         assert "内置" in window.amc_model_status.text()
         assert "特征通路" in window.amc_model_status.text()
@@ -399,6 +400,51 @@ def test_gui_amc_tab_renders_result(tmp_path):
         compare = window.compare_summary.toPlainText()
         assert "amc-linear-default" in compare and "待确认项" in compare
         assert "识别准确率的合格门限尚未确认" in compare
+    finally:
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.gui
+def test_gui_amc_separates_traditional_and_ai_entries(tmp_path):
+    """两个入口分开：传统入口不读模型，AI 入口必须选模型并按契约分流。"""
+    pytest.importorskip("PySide6")
+    pytest.importorskip("pyqtgraph")
+    from PySide6 import QtWidgets
+
+    from signal_analysis.ui import MainWindow
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    workspace = tmp_path / "ws"
+    window = MainWindow(workspace)
+    window.show()
+    try:
+        assert window.amc_button.text() == "识别所选数据"
+        assert window.amc_ml_button.text() == "AI 识别所选数据"
+        run_job({"workspace": str(workspace), "action": "generate",
+                 "sample_rate": RATE, "duration": 0.04, "seed": 5,
+                 "signals": [{"mode": "qpsk", "offset": 0.0, "bandwidth": 150_000.0,
+                              "power_dbfs": -6.0}]})
+        window.refresh_assets()
+        window.assets.setCurrentRow(0)
+        assert window.selected_asset() is not None
+        calls = []
+        window.start_job = lambda action, **kwargs: calls.append((action, kwargs))
+        # AI 入口：未选模型时拦下，不启动任务
+        window.amc_ml_button.click()
+        assert not calls
+        assert "请先选择 AI" in window.status.text()
+        # 传统入口：不依赖模型下拉，固定走内置线性基线
+        window.amc_button.click()
+        assert calls[-1][0] == "amc_classify"
+        assert "model" not in calls[-1][1]
+        # AI 入口：IQ 清单分流到原始 IQ 动作
+        manifest = tmp_path / "iq-manifest.json"
+        manifest.write_text(json.dumps({"contract": "iq_waveform_v1"}), encoding="utf-8")
+        window.amc_model.setText(str(manifest))
+        window.amc_ml_button.click()
+        assert calls[-1][0] == "amc_iq_classify"
+        assert calls[-1][1]["model"] == str(manifest)
     finally:
         window.close()
         app.processEvents()

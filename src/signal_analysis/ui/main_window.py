@@ -153,7 +153,8 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
     def job_buttons(self):
         return (self.analyze_button, self.native_button,
                 self.generate_button, self.detect_button, self.hops_button, self.ml_button,
-                self.hops_ml_button, self.amc_button, self.storage_scan_button,
+                self.hops_ml_button, self.amc_button, self.amc_ml_button,
+                self.storage_scan_button,
                 self.storage_preview_button, self.storage_cleanup_button,
                 self.import_start_button,
                 *self.gen_panel.action_buttons())
@@ -175,7 +176,7 @@ class MainWindow(ImportPageMixin, GeneratorPageMixin, AnalysisPageMixin, Compare
             "态势显示": (self.analyze_button, self.native_button),
             "信号检测": (self.detect_button, self.ml_button, adopt["信号检测"]),
             "跳频参数": (self.hops_button, self.hops_ml_button, adopt["跳频参数"]),
-            "调制识别": (self.amc_button, adopt["调制识别"]),
+            "调制识别": (self.amc_button, self.amc_ml_button, adopt["调制识别"]),
             "数据管理": (self.storage_scan_button, self.storage_preview_button,
                         self.storage_cleanup_button),
         }

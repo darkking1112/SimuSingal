@@ -33,7 +33,8 @@ class AmcPageMixin:
         box = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(box)
         intro = QtWidgets.QLabel(
-            "识别六类调制（FM、SSB、2ASK、QPSK、16QAM、64QAM）；按模型契约自动选择识别通路。")
+            "识别六类调制（FM、SSB、2ASK、QPSK、16QAM、64QAM）；「识别所选数据」走内置传统特征基线，"
+            "「AI 识别所选数据」使用所选模型清单并按契约自动选择通路。")
         intro.setWordWrap(True)
         layout.addWidget(intro)
         from common.gui import TaskBanner
@@ -54,14 +55,16 @@ class AmcPageMixin:
         self.amc_button = QtWidgets.QPushButton("识别所选数据")
         self.amc_button.setObjectName("primary")
         self.amc_button.setToolTip(
-            "对左侧选中的数据资产按当前分析频带开始调制识别；模型清单若声明"
-            " iq_waveform_v1 则自动走原始 IQ 通路")
+            "传统特征通路：对左侧选中的数据资产按当前分析频带运行内置线性基线"
+            "（34 维确定性特征 + 线性判别，amc-linear-default）。"
+            "需要特征 ONNX 分类器或原始 IQ 模型请用「AI 识别所选数据」")
         self.amc_button.clicked.connect(self.amc_classify_selected)
         self.amc_from_detect = QtWidgets.QPushButton("取用检测结果频带")
         self.amc_from_detect.setToolTip(
             "把最近一次检测结果中功率最大的目标中心频率与带宽填进左侧输入框")
         self.amc_from_detect.clicked.connect(self.use_detected_band)
         bar.addWidget(self.amc_from_detect)
+        bar.addWidget(self.amc_button)
         self.adopt_amc_button = QtWidgets.QPushButton("采纳为参数标注")
         self.adopt_amc_button.setEnabled(False)
         self.adopt_amc_button.setToolTip(
@@ -72,8 +75,8 @@ class AmcPageMixin:
         bar.addWidget(self.adopt_amc_button)
         bar.addStretch(1)
         layout.addLayout(bar)
-        model_bar = QtWidgets.QHBoxLayout()
-        model_bar.addWidget(QtWidgets.QLabel("识别模型"))
+        ai_bar = QtWidgets.QHBoxLayout()
+        ai_bar.addWidget(QtWidgets.QLabel("AI 识别模型"))
         # 路径由模型下拉写入，界面不再重复放输入框与“选择…”按钮（见 detect_page 同款说明）
         self.amc_model = QtWidgets.QLineEdit(self)
         self.amc_model.hide()
@@ -81,14 +84,21 @@ class AmcPageMixin:
             self.amc_model, "amc", self, browse=self.choose_amc_model,
             hint="模型 JSON 为 amc_model_v1；ONNX 清单为 amc-manifest（特征通路）或"
                  "amc-iq-manifest（原始 IQ 通路）生成的 JSON，本页按清单契约自动分流。"
-                 "不指定模型时使用随包分发的内置线性基线（amc-linear-default）。")
+                 "「AI 识别所选数据」必须选模型；不指定模型时用「识别所选数据」"
+                 "运行随包分发的内置线性基线（amc-linear-default）。")
         self.register_model_picker(self.amc_picker)
-        model_bar.addWidget(self.amc_picker, 1)
-        model_bar.addWidget(self.amc_button)  # 紧邻模型选择：选完模型即可点它开始识别
+        ai_bar.addWidget(self.amc_picker, 1)
+        self.amc_ml_button = QtWidgets.QPushButton("AI 识别所选数据")
+        self.amc_ml_button.setObjectName("primary")
+        self.amc_ml_button.setToolTip(
+            "用所选模型清单开始调制识别：清单声明 iq_waveform_v1 时走原始 IQ 通路，"
+            "否则走特征通路（自训练线性模型或 ONNX 分类器）。未选择模型时会被拦下并提示")
+        self.amc_ml_button.clicked.connect(self.amc_ml_classify_selected)
+        ai_bar.addWidget(self.amc_ml_button)
         self.amc_model_status = QtWidgets.QLabel()
-        model_bar.addWidget(self.amc_model_status)
-        model_bar.addStretch(1)
-        layout.addLayout(model_bar)
+        ai_bar.addWidget(self.amc_model_status)
+        ai_bar.addStretch(1)
+        layout.addLayout(ai_bar)
         # 模型栏改变即刷新"当前通路/模型"提示：本条通路判断不能只靠识别结果里的字
         self.amc_model.textChanged.connect(self._update_amc_model_status)
         grid = QtWidgets.QGridLayout()
@@ -149,8 +159,8 @@ class AmcPageMixin:
         if not path:
             self.amc_model_status.setStyleSheet("")
             self.amc_model_status.setText(
-                "当前：内置线性基线 · 特征通路（A09 六类）" if available
-                else "未找到内置模型，请先运行 training/train_amc.py 或手动选择模型文件")
+                "未选择 AI 模型 · 「识别所选数据」使用内置线性基线（特征通路）" if available
+                else "未选择 AI 模型；内置传统模型缺失，请先运行 training/train_amc.py")
             return
         payload, label = self._model_label(path)
         contract = str((payload or {}).get("contract") or "") if payload else None
@@ -221,11 +231,8 @@ class AmcPageMixin:
             f"带宽 {_fmt_hz(target['bandwidth_hz'])}）")
 
 
-    def amc_classify_selected(self):
-        asset = self.selected_asset()
-        if not asset:
-            self.status.setText("请先导入并选择数据")
-            return
+    def _amc_band_config(self):
+        """两条入口共用的分析频带配置：默认值不写进配置。"""
         config = {}
         offset = float(self.amc_offset.value())
         if offset:
@@ -233,11 +240,34 @@ class AmcPageMixin:
         bandwidth = float(self.amc_bandwidth.value())
         if bandwidth > 0:
             config["bandwidth_hz"] = bandwidth
-        model = self.amc_model.text().strip() or None
+        return config
+
+
+    def amc_classify_selected(self):
+        """传统特征通路：内置线性基线，不读取 AI 模型下拉。"""
+        asset = self.selected_asset()
+        if not asset:
+            self.status.setText("请先导入并选择数据")
+            return
+        self.start_job("amc_classify", owner="调制识别",
+                       label=f"传统调制识别 · {asset['name']}", cancel_text="取消本次识别",
+                       asset_id=asset["id"], config=self._amc_band_config())
+
+
+    def amc_ml_classify_selected(self):
+        """AI 通路：必须选中模型清单，按契约分流特征 ONNX / 原始 IQ。"""
+        asset = self.selected_asset()
+        if not asset:
+            self.status.setText("请先导入并选择数据")
+            return
+        model = self.amc_model.text().strip()
+        if not model:
+            self.status.setText("请先选择 AI 识别模型清单（特征 ONNX 或原始 IQ 模型）")
+            return
         action = "amc_iq_classify" if self._use_iq_branch() else "amc_classify"
-        self.start_job(action, owner="调制识别", label=f"调制识别 · {asset['name']}",
-                       cancel_text="取消本次识别",
-                       asset_id=asset["id"], config=config, model=model)
+        self.start_job(action, owner="调制识别",
+                       label=f"AI 调制识别 · {asset['name']}", cancel_text="取消本次识别",
+                       asset_id=asset["id"], config=self._amc_band_config(), model=model)
 
 
     def _plot_amc_scores(self, classes, labels, scores, title):
