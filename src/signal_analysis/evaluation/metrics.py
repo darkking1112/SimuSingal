@@ -61,13 +61,16 @@ def evaluate_detections(truth, detections, gate_ratio=0.75, contract=CONTRACT_VE
 
     Reported values: ``true/detected/matched/missed/false_alarm``, precision,
     recall, F1, ``center_mae_hz``, ``center_rmse_hz``, ``bandwidth_mape``
-    (fraction, not percent) and ``snr_mae_db``. Every field is a finite float
-    or ``None``; no ``inf``/``nan`` ever leaves this function.
+    (fraction, not percent), ``snr_mae_db`` and ``symbol_rate_mape`` (only
+    matched pairs with a positive truth symbol rate and an applicable
+    detection estimate). Every field is a finite float or ``None``; no
+    ``inf``/``nan`` ever leaves this function.
     """
     truth = list(truth or [])
     detections = list(detections or [])
     matched = match_detections(truth, detections, gate_ratio)
     center_errors, bandwidth_errors, snr_errors, pairs = [], [], [], []
+    symbol_rate_errors = []
     for t_index, d_index in matched:
         t, d = truth[t_index], detections[d_index]
         center_error = float(d["center_hz"]) - float(t["center_hz"])
@@ -79,23 +82,35 @@ def evaluate_detections(truth, detections, gate_ratio=0.75, contract=CONTRACT_VE
         detection_snr = _finite_or_none(d.get("snr_db"))
         snr_error = (detection_snr - truth_snr
                      if truth_snr is not None and detection_snr is not None else None)
+        truth_rate = _finite_or_none(t.get("symbol_rate_baud"))
+        detection_rate = _finite_or_none(d.get("symbol_rate_baud"))
+        rate_error = None
+        if (truth_rate is not None and truth_rate > 0.0
+                and detection_rate is not None and detection_rate > 0.0
+                and bool(d.get("symbol_rate_applicable", True))):
+            rate_error = abs(detection_rate - truth_rate) / truth_rate
         center_errors.append(center_error)
         if band_relative is not None:
             bandwidth_errors.append(band_relative)
         if snr_error is not None:
             snr_errors.append(snr_error)
+        if rate_error is not None:
+            symbol_rate_errors.append(rate_error)
         pairs.append({
             "truth_index": t_index,
             "detection_id": d.get("id"),
             "truth_center_hz": _finite_or_none(t.get("center_hz")),
             "truth_bandwidth_hz": _finite_or_none(t.get("bandwidth_hz")),
             "truth_snr_inband_db": truth_snr,
+            "truth_symbol_rate_baud": truth_rate,
             "detection_center_hz": _finite_or_none(d.get("center_hz")),
             "detection_bandwidth_hz": _finite_or_none(d.get("bandwidth_hz")),
             "detection_snr_db": detection_snr,
+            "detection_symbol_rate_baud": detection_rate,
             "center_error_hz": _rounded(center_error),
             "bandwidth_relative_error": _rounded(band_relative),
             "snr_error_db": _rounded(snr_error),
+            "symbol_rate_relative_error": _rounded(rate_error),
         })
     true_count, detection_count = len(truth), len(detections)
     matched_count = len(matched)
@@ -125,6 +140,9 @@ def evaluate_detections(truth, detections, gate_ratio=0.75, contract=CONTRACT_VE
         "center_rmse_hz": _rounded(np.sqrt(np.mean(np.square(center_errors)))) if center_errors else None,
         "bandwidth_mape": _rounded(np.mean(bandwidth_errors)) if bandwidth_errors else None,
         "snr_mae_db": _rounded(np.mean(np.abs(snr_errors))) if snr_errors else None,
+        "symbol_rate_mape": (_rounded(np.mean(symbol_rate_errors))
+                             if symbol_rate_errors else None),
+        "symbol_rate_scored": len(symbol_rate_errors),
         "pairs": pairs,
     }
 

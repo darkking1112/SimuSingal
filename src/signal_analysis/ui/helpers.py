@@ -83,7 +83,8 @@ def _comparison_line(left_label, left, right_label, right):
     """One-line side-by-side detection metrics (AI vs traditional baseline)."""
     fields = (("匹配", "matched", "g"), ("漏警", "missed", "g"), ("虚警", "false_alarm", "g"),
               ("中心 MAE", "center_mae_hz", ".1f"), ("带宽相对误差", "bandwidth_mape", ".3f"),
-              ("信噪比 MAE", "snr_mae_db", ".2f"))
+              ("信噪比 MAE", "snr_mae_db", ".2f"),
+              ("符号率相对误差", "symbol_rate_mape", ".3f"))
     parts = [f"{name} {_fmt_metric(left.get(key), spec)} / {_fmt_metric(right.get(key), spec)}"
              for name, key, spec in fields]
     return (f"并排对比（{left_label} / {right_label}）：" + " · ".join(parts))

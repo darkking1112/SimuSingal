@@ -22,7 +22,8 @@ from ..constants import (IMPORT_COL_DTYPE, IMPORT_COL_ENDIAN,
                          _SOURCE_KIND_LABELS, _VERSION_SOURCE_LABELS)
 from ..dialogs import SignalParamsDialog
 from ..helpers import (_AMC_SOURCE_TEXT, _asset_format, _comparison_line,
-                       _fmt_hz, _fmt_metric, _fmt_span, _mirrored_spectrum)
+                       _fmt_baud, _fmt_hz, _fmt_metric, _fmt_span,
+                       _mirrored_spectrum)
 from ..runner import _run_task
 from ..model_picker import ModelPicker
 from ..widgets import UnitSpinBox, _freq_spin, _plain_spin, _unit_row
@@ -33,7 +34,8 @@ class DetectPageMixin:
         box = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(box)
         intro = QtWidgets.QLabel(
-            "对所选 IQ 记录做能量检测与参数估计；有生成器真值时给出误差指标。")
+            "对所选 IQ 记录做能量检测与参数估计（中心频率、带宽、符号率）；"
+            "有生成器真值时给出误差指标。")
         intro.setWordWrap(True)
         layout.addWidget(intro)
         from common.gui import TaskBanner
@@ -165,10 +167,10 @@ class DetectPageMixin:
         layout.addLayout(grid, 1)
         self._detect_items = []
         lower = QtWidgets.QHBoxLayout()
-        self.detect_table = QtWidgets.QTableWidget(0, 9)
+        self.detect_table = QtWidgets.QTableWidget(0, 10)
         self.detect_table.setHorizontalHeaderLabels(
             ["编号", "中心频率", "占用带宽", "频段范围", "时间范围", "功率 dBFS",
-             "带内 SNR", "会话", "备注"])
+             "带内 SNR", "符号率", "会话", "备注"])
         self.detect_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.detect_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.detect_table.horizontalHeader().setStretchLastSection(True)
@@ -362,13 +364,34 @@ class DetectPageMixin:
             else:
                 note = (f"跳频会话 · 子带 {item['sub_bands']} 个" if item["hopping"]
                         else f"频点 {item['bin_count']} 个")
+            valid_rate = item.get("symbol_rate_applicable")
+            symbol_rate = item.get("symbol_rate_baud")
+            if symbol_rate is None:
+                symbol_text = "不适用" if valid_rate is False else "--"
+            elif valid_rate is False:
+                symbol_text = f"{_fmt_baud(symbol_rate)}（低置信）"
+            else:
+                symbol_text = _fmt_baud(symbol_rate)
             values = [str(item["id"]), _fmt_hz(item["center_hz"]), _fmt_hz(item["bandwidth_hz"]),
                       f"{_fmt_hz(item['f_low_hz'])} ～ {_fmt_hz(item['f_high_hz'])}",
                       f"{item['t_start_s']:.4f} ～ {item['t_end_s']:.4f} s",
                       f"{item['power_dbfs']:.2f}", f"{item['snr_db']:.2f} dB",
+                      symbol_text,
                       "-" if item["session_id"] is None else str(item["session_id"]), note]
             for column, text in enumerate(values):
                 self.detect_table.setItem(row, column, QtWidgets.QTableWidgetItem(text))
+            rate_cell = self.detect_table.item(row, 7)
+            if rate_cell is not None:
+                confidence = item.get("symbol_rate_confidence")
+                reason = item.get("symbol_rate_reason")
+                if confidence is None:
+                    tooltip = "未提供符号率估计"
+                else:
+                    tooltip = (f"{item.get('symbol_rate_method') or '未提供方法'}"
+                               f" · 置信度 {confidence:.2f}")
+                if reason:
+                    tooltip += f" · {reason}"
+                rate_cell.setToolTip(tooltip)
         lines = [
             f"数据：{result.get('asset_name', result['asset_id'])} · "
             f"{summary['sample_count']:,} 点 · {summary['duration_s']:.6f} s · "
@@ -379,6 +402,14 @@ class DetectPageMixin:
             f"检出目标 {len(detections)} 个（跳频会话 "
             f"{sum(1 for item in detections if item['hopping'])} 个）",
         ]
+        if any("symbol_rate_method" in item for item in detections):
+            estimated = sum(1 for item in detections if item.get("symbol_rate_applicable"))
+            method = next((item.get("symbol_rate_method") for item in detections
+                           if item.get("symbol_rate_method")), None)
+            lines.append(
+                f"符号率：{estimated}/{len(detections)} 个目标给出可用估计"
+                + (f"（{method}）" if method else "")
+                + "；跳频会话、低置信与带宽不匹配项不适用")
         if is_ml:
             model = summary["model"]
             lines.insert(1, f"模型：{model['id']}@{model['version']} · 置信度 "
@@ -394,6 +425,10 @@ class DetectPageMixin:
                 f"误差：中心频率 MAE {_fmt_metric(metrics['center_mae_hz'], '.1f')} Hz · "
                 f"带宽相对误差 {_fmt_metric(metrics['bandwidth_mape'], '.1%')} · "
                 f"带内信噪比 MAE {_fmt_metric(metrics['snr_mae_db'], '.2f')} dB")
+            if metrics.get("symbol_rate_mape") is not None:
+                lines.append(
+                    f"符号率相对误差 {metrics['symbol_rate_mape']:.1%}"
+                    f"（{metrics.get('symbol_rate_scored', 0)} 个可用估计参与评分）")
             if result.get("baseline_metrics"):
                 lines.append(_comparison_line("AI 检测", metrics,
                                               "传统基线", result["baseline_metrics"]))

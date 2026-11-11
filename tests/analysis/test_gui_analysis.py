@@ -132,7 +132,7 @@ def test_compare_page_pairs_ai_with_baseline(tmp_path):
         window.compare_from_detect()
         assert window.tabs.currentIndex() == window._page_index("算法对比")
         table = window.compare_table
-        assert table.rowCount() == 20  # 10 项指标 × 两条路径
+        assert table.rowCount() == 22  # 11 项指标 × 两条路径
         assert [table.horizontalHeaderItem(i).text() for i in range(4)] == ["环节", "对象", "指标", "取值"]
         objects = {table.item(row, 1).text() for row in range(table.rowCount())}
         assert any(text.startswith("AI 检测 · dut@1.0.0") for text in objects)
@@ -425,7 +425,7 @@ def test_detection_tab_workflow(tmp_path):
         text = window.detect_summary.toPlainText()
         assert "噪声本底" in text and "真值" in text and "中心频率" in text
         # “算法对比”页随检测结果同步填充；传统检测路径没有对照基线，会明确说明
-        assert window.compare_table.rowCount() == 10
+        assert window.compare_table.rowCount() == 11
         assert "没有同步运行传统基线" in window.compare_summary.toPlainText()
         # 参数控件确实透传到后端配置
         window.detect_nfft.setCurrentText("1024")

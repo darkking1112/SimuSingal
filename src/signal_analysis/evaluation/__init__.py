@@ -18,7 +18,12 @@ Contract (``detect_result_v1``), written into every ``detect`` run::
                      "f_low_hz": 5000.0, "f_high_hz": 195000.0,
                      "t_start_s": 0.0, "t_end_s": 0.2,
                      "power_dbfs": -10.1, "snr_db": 18.4,
-                     "session_id": 0, "confidence": 0.92}],
+                     "session_id": 0, "confidence": 0.92,
+                     "symbol_rate_baud": 142857.1,
+                     "symbol_rate_confidence": 0.93,
+                     "symbol_rate_method": "envelope_spectrum_v1",
+                     "symbol_rate_applicable": True,
+                     "symbol_rate_reason": None}],
      "truth": [...], "metrics": {...}}
 
 Naming convention (unchanged from the rest of the repository): IQ data is

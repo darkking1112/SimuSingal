@@ -27,6 +27,7 @@ _DETECTION_FIELDS = (
     ("中心频率 MAE / Hz", "center_mae_hz", lambda v: f"{v:.1f}"),
     ("带宽相对误差", "bandwidth_mape", lambda v: f"{v:.3f}"),
     ("带内信噪比 MAE / dB", "snr_mae_db", lambda v: f"{v:.2f}"),
+    ("符号率相对误差", "symbol_rate_mape", lambda v: f"{v:.3f}"),
 )
 
 _AMC_FIELDS = (

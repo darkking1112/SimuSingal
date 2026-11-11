@@ -11,8 +11,8 @@
   的一半；时间重叠不低于 30%）；
 * 匹配不到则新建目标：会话结果建 ``scope='session'``，逐跳结果挂到会话下
   ``scope='hop'``（``target_key`` 形如 ``s1.h3``）；
-* 采纳只写测量得到的物理量（时间、频带、SNR、功率），名义值与调制样式从旧版本
-  继承，避免覆盖用户已确认的信息。
+* 采纳只写测量得到的物理量（时间、频带、SNR、功率、可用时的符号率），名义值与
+  调制样式从旧版本继承，避免覆盖用户已确认的信息。
 
 分类结果（AMC / IQ）更新目标的 ``modulation``；类别名按任务字典记为 ``known``
 或 ``out_of_taxonomy``（字典外的原始类名保留，不猜测）。
@@ -141,13 +141,18 @@ def adopt_detections(workspace, asset_id, detections, run_id, *, note_label="检
             updated += 1
             sessions = [target for target in sessions if target["id"] != match["id"]]
         previous = match.get("current") or workspace.current_target_version(match["id"])
+        measured = {}
+        symbol_rate = detection.get("symbol_rate_baud")
+        if (detection.get("symbol_rate_applicable")
+                and symbol_rate is not None and float(symbol_rate) > 0.0):
+            measured["symbol_rate_baud"] = float(symbol_rate)
         workspace.append_target_version(
             match["id"], source="algorithm",
             note=f"采纳{note_label}结果 · 来源运行 {run_id}",
             sample_start=start, sample_end=end, f_low_hz=f_low, f_high_hz=f_high,
             snr_db=detection.get("snr_db"), snr_definition="inband_snr_v1",
             power_dbfs=detection.get("power_dbfs"),
-            **_carry_fields(previous))
+            **_carry_fields(previous, measured))
         match = workspace.get_target(match["id"])
         match["current"] = workspace.current_target_version(match["id"])
         sessions.append(match)

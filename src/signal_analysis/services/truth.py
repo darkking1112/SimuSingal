@@ -62,6 +62,7 @@ def _target_signal_truth(workspace, asset_id):
             "t_end_s": (end / rate) if end is not None else None,
             "power_dbfs": version.get("power_dbfs"),
             "snr_inband_db": version.get("snr_db"),
+            "symbol_rate_baud": version.get("symbol_rate_baud"),
             "session_id": len(truth), "visited_channels": None,
         })
     return truth

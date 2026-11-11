@@ -74,6 +74,7 @@ def signal_truth(summary):
             "t_end_s": duration,
             "power_dbfs": _finite_or_none(entry.get("power_dbfs_actual")),
             "snr_inband_db": _finite_or_none(entry.get("snr_inband_db")),
+            "symbol_rate_baud": _finite_or_none(entry.get("symbol_rate")),
             "session_id": index,
             "visited_channels": visited_channels,
         })
