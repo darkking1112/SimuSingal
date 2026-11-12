@@ -5,7 +5,8 @@
 `signal_analysis.services.training_inputs` / `training_snapshot` 从训练集/验证集集合装配
 本次运行的输入快照（`collection_data/`），随后调用本目录的训练与验收脚本；
 `rtdetr_desktop.py` 调用 lyuwenyu v2，`desktop_evaluate.py` 做独立数值对账和标注框评估。
-这些入口不随 wheel 分发。工作台原生 ONNX 使用 RGB `[0,1]` 输入，适配时显式指定
+发布构建会把这些训练支持代码和编译后的 `signal_analysis.training.worker` 一起装入训练
+wheel；GUI 冻结包排除 `signal_analysis.training`，本目录的 `.py` 脚本不直接分发。工作台原生 ONNX 使用 RGB `[0,1]` 输入，适配时显式指定
 `input_scale=1`；不要套用下面通用适配器表中的历史缩放默认值。
 
 `pip install -e '.[train]'` 现在包含 TorchSig **2.2.0** 和 ONNX Runtime；TorchSig 生成只能在
@@ -14,9 +15,9 @@ Linux 下由 GUI“信号集合生成”页启动（或直接运行 `build_torch
 真实小样本生成、同种子重现、检测数据转换、显式映射到 IQ 分类数据集均有集成测试：
 `pytest tests/analysis/test_torchsig_real.py -q`。资源需求随生成规模变化，不设 TB 级磁盘门槛。
 
-本目录是 **AI 信号检测（P3）与调制识别（P4：A09 六类特征通路 + 原始 IQ 通路）的训练侧**，
-只包含脚本与文档，**不打包进 wheel**
-（`pyproject.toml` 里 `[tool.setuptools.packages.find] where = ["src"]`），因此：
+本目录是 **AI 信号检测（P3）与调制识别（P4：A09 六类特征通路 + 原始 IQ 通路）的训练侧**；
+发布包不包含这里的可编辑源码，只包含由 `packaging/training_core.json` 登记后编译的
+训练入口与随训练组件安装的模型/适配器支持代码，因此：
 
 * 运行期依赖保持轻量：产品只需要 `.[ml]`（onnxruntime），训练才需要 `.[train]`（torch / onnx）；
 * 训练数据、第三方权重与其许可证与产品发行隔离，便于做合规审查。

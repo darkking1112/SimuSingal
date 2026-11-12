@@ -70,10 +70,12 @@ class AmcTrainingPage(TrainingPageBase):
         form.addRow("模型架构（只读）", self.model_arch)
 
         self.samples = QtWidgets.QSpinBox()
-        self.samples.setRange(1, 1 << 20)
-        self.samples.setValue(DEFAULT_IQ_SAMPLES)
+        max_samples = self.build_info.get("max_iq_samples")
+        self.samples.setRange(1, min(1 << 20, int(max_samples or (1 << 20))))
+        self.samples.setValue(min(DEFAULT_IQ_SAMPLES, int(max_samples or DEFAULT_IQ_SAMPLES)))
         self.samples.setToolTip("IQ 窗口长度（samples）：训练与验证数据都按该长度切片，"
-                                "模型必须支持该长度（约束见下方模型提示）")
+                                "模型必须支持该长度（约束见下方模型提示）"
+                                + (f"；试用版最多 {max_samples} 点" if max_samples else ""))
         self.samples.valueChanged.connect(self._sync_model_hint)
         form.addRow("窗口长度（samples）", self.samples)
 
@@ -130,6 +132,12 @@ class AmcTrainingPage(TrainingPageBase):
         self.model_hint = QtWidgets.QLabel()
         self.model_hint.setWordWrap(True)
         form.addRow(self.model_hint)
+        if self.build_info.get("max_model_parameters") is not None:
+            parameter_hint = QtWidgets.QLabel(
+                f"模型参数量将在训练开始前按实际构建的模型检查"
+                f"（试用版上限 {self.build_info['max_model_parameters']:,}）。")
+            parameter_hint.setWordWrap(True)
+            form.addRow(parameter_hint)
         self._specs = {}
         self.arch.currentIndexChanged.connect(self._sync_model_hint)
         self._apply_catalog(self._catalog)
@@ -277,6 +285,9 @@ class AmcTrainingPage(TrainingPageBase):
             self.samples.blockSignals(False)
             samples = value
         notes = []
+        max_samples = self.build_info.get("max_iq_samples")
+        if max_samples is not None and samples > int(max_samples):
+            notes.append(f"试用版 IQ 窗口最多 {max_samples} 点，当前 {samples} 点：不可训练")
         try:
             check_model_samples(model["id"], model["samples"], samples)
         except ValueError as exc:
@@ -316,8 +327,12 @@ class AmcTrainingPage(TrainingPageBase):
                              "请在训练环境安装后重新刷新模型列表")
         # 结构参数与窗口长度在这里先校验一遍（worker 起任务前复核同一份逻辑）
         iq_tuning_args(config, arch)
-        check_model_samples(arch, entry.get("samples") or "any",
-                            int(config.get("samples") or DEFAULT_IQ_SAMPLES))
+        samples = int(config.get("samples") or DEFAULT_IQ_SAMPLES)
+        limit = self.build_info.get("max_iq_samples")
+        if limit is not None and samples > int(limit):
+            raise ValueError(f"TRIAL_IQ_LENGTH_LIMIT: 试用版 IQ 窗口最多 {limit} 点，"
+                             f"当前 {samples} 点")
+        check_model_samples(arch, entry.get("samples") or "any", samples)
 
     # ------------------------------------------------------------------ 摘要
     def update_data_summary(self):
@@ -335,9 +350,12 @@ class AmcTrainingPage(TrainingPageBase):
                 classes = json.loads(self.window.workspace.get_taxonomy(
                     task_set["taxonomy_id"])["classes_json"])
                 source = f"类别字典来自集合『{task_set['name']}』的 AMC 标注集"
+        limit = self.build_info.get("max_iq_samples")
+        limit_text = f"（试用版上限 {limit}）" if limit is not None else ""
         self.iq_summary.setText(
-            f"窗口长度：{int(self.samples.value())} samples · 通道：{IQ_INPUT_CHANNELS}"
-            f" · 归一化：{IQ_NORMALIZATION}\n类别顺序：{' / '.join(map(str, classes))}\n{source}")
+            f"窗口长度：{int(self.samples.value())} samples{limit_text} · "
+            f"通道：{IQ_INPUT_CHANNELS} · 归一化：{IQ_NORMALIZATION}\n"
+            f"类别顺序：{' / '.join(map(str, classes))}\n{source}")
         if hasattr(self, "target_table"):
             self._reload_annotation()
 

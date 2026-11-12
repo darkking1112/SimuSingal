@@ -5,7 +5,8 @@
     "executable": "SignalAnalysis",
     "exclude": ["communication_sim", "simpy", "torch", "torchvision", "ultralytics", "torchsig"],
     "collect_all": ["sigmf", "jsonschema_specifications"],
-    "collect_data": ["signal_analysis"]
+    "collect_data": ["signal_analysis"],
+    "desktop_exclude": ["signal_analysis.training"]
   },
   "simulation": {
     "package": "communication_sim",

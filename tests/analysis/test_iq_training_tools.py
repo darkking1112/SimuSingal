@@ -491,6 +491,26 @@ def test_iq_plan_passes_advanced_tuning_args(tmp_path):
         iq_plan({**tuned, "model_params": {"kernel": 9}}, tmp_path / "run11")
 
 
+def test_release_iq_plan_propagates_module_exit_codes(tmp_path, monkeypatch):
+    """发布模式的 -c 入口必须用 SystemExit 传播 main() 返回值，验收失败不能记成功。"""
+    from signal_analysis.services import training_jobs as jobs
+    monkeypatch.setattr(jobs, "build_info", lambda: {
+        "edition": "trial", "policy_version": 1,
+        "max_epochs": 20, "max_iq_samples": 1024,
+        "max_train_samples": 2000, "max_model_parameters": 1000000})
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "iq_dataset.json").write_text("{}", encoding="utf-8")
+    (data / "iq_dataset.npz").write_bytes(b"placeholder")
+    config = {"repository": "", "python": sys.executable, "arch": "cnn",
+              "epochs": 5, "batch": 4, "lr": 1e-3, "seed": 7, "device": "cpu",
+              "data": str(data)}
+    stages = jobs.iq_plan(config, tmp_path / "run")
+    assert any("raise SystemExit(preflight_main())" in str(part) for part in stages[0]["argv"])
+    assert any("raise SystemExit(main())" in str(part) for part in stages[1]["argv"])
+    assert any("raise SystemExit(main())" in str(part) for part in stages[2]["argv"])
+
+
 def test_iq_plan_training_strategy_flags(tmp_path):
     """训练策略（调度器/判据/checkpoint）走同一份校验，并落到 CLI 与运行目录路径。"""
     from signal_analysis.services.training_jobs import iq_plan, iq_tuning_args

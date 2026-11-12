@@ -1,0 +1,17 @@
+#ifndef SIGNAL_ANALYSIS_TRIAL_LIMITS_H
+#define SIGNAL_ANALYSIS_TRIAL_LIMITS_H
+
+#ifndef SA_BUILD_TRIAL
+#error "SA_BUILD_TRIAL must be defined by the build system"
+#endif
+
+#if SA_BUILD_TRIAL != 0 && SA_BUILD_TRIAL != 1
+#error "SA_BUILD_TRIAL must be 0 or 1"
+#endif
+
+#define SA_TRIAL_MAX_TRAIN_SAMPLES 2000
+#define SA_TRIAL_MAX_IQ_SAMPLES 1024
+#define SA_TRIAL_MAX_MODEL_PARAMETERS 1000000
+#define SA_TRIAL_MAX_EPOCHS 20
+
+#endif

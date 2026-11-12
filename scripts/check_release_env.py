@@ -324,6 +324,28 @@ def check_source(records, config):
         record(records, "fail", "源码", "核心模块源码缺失", ", ".join(missing))
     else:
         record(records, "ok", "源码", f"{len(names)} 个核心模块源码齐全")
+    training = ROOT / "packaging/training_core.json"
+    try:
+        training_config = json.loads(training.read_text(encoding="utf-8"))
+        modules = training_config.get("modules", [])
+        missing = [item["source"] for item in modules
+                   if not (ROOT / item["source"]).is_file()]
+        package_count = 0
+        for package in training_config.get("packages", []):
+            source_root = ROOT / package["source_root"]
+            if not source_root.is_dir():
+                missing.append(package["source_root"])
+                continue
+            exclude = set(package.get("exclude", []))
+            package_count += sum(1 for path in source_root.glob("*.py")
+                                 if path.name not in exclude)
+        if missing:
+            record(records, "fail", "源码", "训练模块源码缺失", ", ".join(missing))
+        else:
+            record(records, "ok", "源码",
+                   f"{len(modules) + package_count} 个训练模块源文件齐全")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        record(records, "fail", "源码", "无法读取 packaging/training_core.json", str(exc))
     model = ROOT / "src/signal_analysis/algorithms/amc/amc_default.json"
     if model.is_file():
         record(records, "ok", "源码", "内置 AMC 模型存在")

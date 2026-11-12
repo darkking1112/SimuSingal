@@ -98,6 +98,7 @@ def run_selftest(expect_binary=False):
         "binary": False,
         "core_modules": [],
         "model": None,
+        "training": None,
         "numeric": None,
         "errors": [],
     }
@@ -118,6 +119,12 @@ def run_selftest(expect_binary=False):
                            "file": str(path), "sha256": _sha256(path)}
     except Exception as exc:  # noqa: BLE001
         result["errors"].append(f"内置模型: {type(exc).__name__}: {exc}")
+
+    try:
+        from ._training_policy import get_build_info
+        result["training"] = get_build_info()
+    except Exception as exc:  # noqa: BLE001
+        result["errors"].append(f"训练策略: {type(exc).__name__}: {exc}")
 
     try:
         numeric = _numeric_records()

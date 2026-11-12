@@ -43,6 +43,9 @@ class DetectionTrainingPage(TrainingPageBase):
         form.addRow("时频图边长（检测）", self.size)
 
     def page_note(self):
+        if self.build_info.get("edition") == "trial":
+            return ("训练数据取自信号集合；试用版暂不开放 RT-DETR，YOLO 初始模型"
+                    "会在训练开始前检查参数量（上限 100 万）。")
         return "训练数据取自信号集合；标注在当前集合内维护。"
 
     def curve_title(self):
@@ -138,6 +141,8 @@ class DetectionTrainingPage(TrainingPageBase):
         return config
 
     def validate_task_config(self, config):
+        if self.build_info.get("edition") == "trial" and config["arch"] == "rtdetr":
+            raise ValueError("TRIAL_UNSUPPORTED: 试用版暂不开放 RT-DETR 训练")
         if config["arch"] == "yolo26s" and not self.internal_models:
             raise ValueError("发行配置不提供 YOLO26s 训练")
         if config["arch"] == "rtdetr" and (

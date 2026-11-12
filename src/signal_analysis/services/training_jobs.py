@@ -10,6 +10,25 @@ from ..algorithms.amc.ai_model import (CATALOG_VERSION, check_samples, merge_par
 from ..contracts.iq import DEFAULT_IQ_SAMPLES
 
 
+def build_info():
+    """读取编译构建身份；源码开发时为 development（无商业限额）。"""
+    from .._training_policy import get_build_info
+
+    return get_build_info()
+
+
+def check_epoch_limit(epochs, info=None):
+    """在 GUI/预检侧复述轮数上限；真正的强制检查仍在编译训练内核。"""
+    info = info or build_info()
+    if type(epochs) is not int or epochs < 1:
+        raise ValueError("训练轮数必须为正整数")
+    limit = info.get("max_epochs")
+    if limit is not None and epochs > int(limit):
+        raise ValueError(f"TRIAL_EPOCH_LIMIT: 试用版最多训练 {limit} 轮，当前请求 {epochs} 轮")
+    if epochs > 10000:
+        raise ValueError("训练轮数不能超过 10000")
+
+
 def decode_worker_log(data):
     """解码 worker.log 字节：新实验为 UTF-8；历史实验由管道默认编码（GBK）写出，逐级回退。"""
     for encoding in ("utf-8", "gbk"):
@@ -127,7 +146,7 @@ def preflight_iq(config):
     """快照之前的最小预检：模型存在且可导出、参数与窗口约束合法。
 
     返回补齐窗口长度（``samples``）的配置副本。依赖检查在训练环境内做
-    （见 ``training/desktop_worker.py``）：GUI 进程可能没有 torch，不能在这里查。
+    （见 ``signal_analysis.training.worker``）：GUI 进程可能没有 torch，不能在这里查。
     """
     arch = config.get("arch", "cnn")
     spec = model_spec(arch)
@@ -137,18 +156,36 @@ def preflight_iq(config):
     if declared is not None and int(declared) != CATALOG_VERSION:
         raise ValueError(f"模型目录版本不一致（界面 {declared} / 训练源码 {CATALOG_VERSION}）："
                          "请在「训练配置」里重新点「刷新模型列表」再开始训练")
+    epochs = config.get("epochs")
+    if epochs is not None:
+        check_epoch_limit(epochs)
     iq_tuning_args(config, spec.id)
     samples = config.get("samples")
     samples = DEFAULT_IQ_SAMPLES if samples is None else int(samples)
+    limit = build_info().get("max_iq_samples")
+    if limit is not None and samples > int(limit):
+        raise ValueError(f"TRIAL_IQ_LENGTH_LIMIT: 试用版 IQ 窗口最多 {limit} 点，"
+                         f"当前 {samples} 点")
     check_samples(spec, samples)
     return dict(config, samples=samples)
 
 
-#: 模型目录查询脚本：在训练环境里读目录并补上每个模型的依赖可用性（界面刷新模型列表用）
-_CATALOG_QUERY = (
+#: 模型目录查询脚本（开发模式）：把训练源码目录插入路径。
+_CATALOG_QUERY_SOURCE = (
     "import json, sys; "
     "sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[2]); "
     "from signal_analysis.algorithms.amc.ai_model import catalog_json; "
+    "import amc_models; "
+    "payload = json.loads(catalog_json()); "
+    "[model.update(missing=list(amc_models.missing_requirements(model['id']))) "
+    "for model in payload['models']]; "
+    "print(json.dumps(payload, ensure_ascii=False))")
+
+#: 模型目录查询脚本（发布模式）：只使用训练环境已安装的包。
+_CATALOG_QUERY_COMPILED = (
+    "import json; "
+    "from signal_analysis.algorithms.amc.ai_model import catalog_json; "
+    "from signal_analysis.training import _install_aliases; _install_aliases(); "
     "import amc_models; "
     "payload = json.loads(catalog_json()); "
     "[model.update(missing=list(amc_models.missing_requirements(model['id']))) "
@@ -162,15 +199,19 @@ def query_catalog(python, repository, *, timeout=30):
     查询失败（Python/仓库路径不对、导入失败、输出无法解析）一律抛 ``ValueError``，
     由界面回退到应用内置目录并标注"未验证"。
     """
-    repo = Path(repository).expanduser().resolve()
-    for name in ("src", "training"):
-        if not (repo / name).is_dir():
-            raise ValueError(f"训练源码目录缺少 {name}/：{repo}")
+    release = build_info().get("edition") in ("trial", "full")
     interpreter = shutil.which(python) or python
+    if release:
+        command = [interpreter, "-c", _CATALOG_QUERY_COMPILED]
+    else:
+        repo = Path(repository).expanduser().resolve()
+        for name in ("src", "training"):
+            if not (repo / name).is_dir():
+                raise ValueError(f"训练源码目录缺少 {name}/：{repo}")
+        command = [interpreter, "-c", _CATALOG_QUERY_SOURCE,
+                   str(repo / "src"), str(repo / "training")]
     try:
-        result = subprocess.run(
-            [interpreter, "-c", _CATALOG_QUERY, str(repo / "src"), str(repo / "training")],
-            capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError(f"无法在训练环境执行模型目录查询：{exc}") from exc
     if result.returncode != 0:
@@ -193,22 +234,20 @@ def iq_plan(config, directory):
     数据来源只有一个：已存在的 IQ 数据集目录（来自所选集合的导出也先落成这样的目录）；
     训练阶段不生成任何数据。
     """
-    repo = Path(config["repository"]).expanduser().resolve()
     python = shutil.which(config["python"])
     if not python:
         raise ValueError("训练 Python 不存在，请选择训练环境的解释器")
-    scripts = repo / "training"
-    for name in ("train_iq.py", "verify_iq.py"):
-        if not (scripts / name).is_file():
-            raise ValueError(f"训练源码目录缺少 training/{name}")
+    info = build_info()
+    release = info.get("edition") in ("trial", "full")
     arch = config["arch"]
     spec = model_spec(arch)
     if not spec.exportable:
         raise ValueError(f"模型 {spec.id} 尚未通过 ONNX 导出验证，不能作为训练任务运行")
-    for key, minimum, maximum in (("epochs", 1, 10000), ("batch", 1, 65536)):
+    for key, minimum, maximum in (("batch", 1, 65536),):
         value = config[key]
-        if not isinstance(value, int) or not minimum <= value <= maximum:
+        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
             raise ValueError(f"{key} 应为 {minimum}～{maximum} 的整数")
+    check_epoch_limit(config["epochs"], info)
     if not math.isfinite(config["lr"]) or config["lr"] <= 0:
         raise ValueError("学习率必须为有限正数")
     if config["device"] not in ("cpu", "cuda"):
@@ -217,14 +256,46 @@ def iq_plan(config, directory):
     out = Path(directory).resolve()
     stages = []
 
-    def stage(name, script, *args):
-        stages.append({"name": name, "argv": [python, "-u", str(scripts / script),
-                                               *map(str, args)]})
-
     data = Path(config["data"]).expanduser().resolve()
     for name in ("iq_dataset.json", "iq_dataset.npz"):
         if not (data / name).is_file():
             raise ValueError(f"已有数据集缺少 {name}")
+
+    if release:
+        preflight = [python, "-u", "-c",
+                     "from signal_analysis.training.iq_runtime import preflight_main; "
+                     "raise SystemExit(preflight_main())",
+                     "--data", str(data), "--arch", arch, "--epochs", str(config["epochs"]),
+                     "--batch-size", str(config["batch"]), "--learning-rate", repr(config["lr"]),
+                     "--seed", str(config["seed"]), "--device", config["device"], *tuning]
+        stages.append({"name": "校验环境与数据", "argv": preflight})
+        stages.append({"name": "训练与导出", "argv": [
+            python, "-u", "-c",
+            "from signal_analysis.training.iq_runtime import main; raise SystemExit(main())",
+            "--data", str(data), "--arch", arch,
+            "--epochs", str(config["epochs"]), "--batch-size", str(config["batch"]),
+            "--learning-rate", repr(config["lr"]), "--seed", str(config["seed"]),
+            "--device", config["device"], "--events", "--onnx-dir", str(out / "model"),
+            *tuning,
+            *(["--save-checkpoint", str(out / "model" / "iq_checkpoint.pt")]
+              if config.get("save_checkpoint") else [])]})
+        stages.append({"name": "模型验收", "argv": [
+            python, "-u", "-c",
+            "from signal_analysis.training.verify import main; raise SystemExit(main())",
+            "--manifest", str(out / "model/iq_manifest.json"),
+            "--data", str(data), "--json", str(out / "verification.json"),
+            "--threads", "1"]})
+        return stages
+
+    scripts = Path(config["repository"]).expanduser().resolve() / "training"
+    for name in ("train_iq.py", "verify_iq.py"):
+        if not (scripts / name).is_file():
+            raise ValueError(f"训练源码目录缺少 training/{name}")
+
+    def source_stage(name, script, *args):
+        stages.append({"name": name, "argv": [python, "-u", str(scripts / script),
+                                               *map(str, args)]})
+
     # 先在选定的训练环境里做完整校验：数据契约 + 依赖 + 按目录参数构建一次模型。
     stages.append({"name": "校验环境与数据", "argv": [python, "-u", "-c",
         "import sys, json; sys.path.insert(0, sys.argv[1]); "
@@ -238,13 +309,13 @@ def iq_plan(config, directory):
         "'参数量:', sum(p.numel() for p in model.parameters()), flush=True)",
         str(scripts), str(data), config["device"], arch,
         json.dumps(model_params(config, arch), ensure_ascii=False)]})
-    stage("训练与导出", "train_iq.py", "--data", data, "--arch", arch,
-          "--epochs", config["epochs"], "--batch-size", config["batch"],
-          "--learning-rate", config["lr"], "--seed", config["seed"],
-          "--device", config["device"], "--events", "--onnx-dir", out / "model",
-          *tuning,
-          *(["--save-checkpoint", out / "model" / "iq_checkpoint.pt"]
-            if config.get("save_checkpoint") else []))
-    stage("模型验收", "verify_iq.py", "--manifest", out / "model/iq_manifest.json",
-          "--data", data, "--json", out / "verification.json", "--threads", 1)
+    source_stage("训练与导出", "train_iq.py", "--data", data, "--arch", arch,
+                 "--epochs", config["epochs"], "--batch-size", config["batch"],
+                 "--learning-rate", config["lr"], "--seed", config["seed"],
+                 "--device", config["device"], "--events", "--onnx-dir", out / "model",
+                 *tuning,
+                 *(["--save-checkpoint", out / "model" / "iq_checkpoint.pt"]
+                   if config.get("save_checkpoint") else []))
+    source_stage("模型验收", "verify_iq.py", "--manifest", out / "model/iq_manifest.json",
+                 "--data", data, "--json", out / "verification.json", "--threads", 1)
     return stages

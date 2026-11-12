@@ -1,3 +1,8 @@
 include packaging/numeric_core.json
+include packaging/training_core.json
 include packaging/release.json
 recursive-include packaging/requirements *.txt
+recursive-include src/signal_analysis *.pyx *.pxd
+recursive-include src/signal_analysis/_native_training *.h *.pxi *.pxd
+recursive-include training *.py
+recursive-include custom *.py

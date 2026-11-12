@@ -95,14 +95,11 @@ def sha256_member(archive, member):
     return digest.hexdigest()
 
 
-def core_manifest(wheel):
-    """返回 8 个核心模块的 wheel 成员、文件名与哈希。"""
-    names = json.loads(
-        (ROOT / "packaging/numeric_core.json").read_text(encoding="utf-8"))
+def _module_manifest(wheel, modules):
     records = []
     with ZipFile(wheel) as archive:
         members = archive.namelist()
-        for module in names:
+        for module in modules:
             stem = module.replace(".", "/")
             matches = [name for name in members
                        if name.startswith(stem + ".") and name.endswith((".so", ".pyd"))]
@@ -113,6 +110,47 @@ def core_manifest(wheel):
                             "file": Path(member).name,
                             "sha256": sha256_member(archive, member)})
     return records
+
+
+def core_manifest(wheel):
+    """返回数值核心模块的 wheel 成员、文件名与哈希。"""
+    modules = json.loads(
+        (ROOT / "packaging/numeric_core.json").read_text(encoding="utf-8"))
+    return _module_manifest(wheel, modules)
+
+
+def training_manifest(wheel):
+    """返回训练扩展的 wheel 成员、文件名与哈希。"""
+    config = json.loads(
+        (ROOT / "packaging/training_core.json").read_text(encoding="utf-8"))
+    names = [item["module"] for item in config.get("modules", [])]
+    for package in config.get("packages", []):
+        source_root = ROOT / package["source_root"]
+        exclude = set(package.get("exclude", []))
+        for path in sorted(source_root.glob("*.py")):
+            if path.name not in exclude:
+                names.append(f"{package['package']}.{path.stem}")
+    return _module_manifest(wheel, names)
+
+
+def wheel_build_info(wheel):
+    """以实际加载扩展为准读取 edition / policy_version / 四项上限。"""
+    with tempfile.TemporaryDirectory(prefix="simusignal-policy-") as stage:
+        with ZipFile(wheel) as archive:
+            archive.extractall(stage)
+        env = os.environ.copy()
+        env["PYTHONPATH"] = stage
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import json; from signal_analysis._training_policy import get_build_info; "
+             "print(json.dumps(get_build_info(), ensure_ascii=False))"],
+            capture_output=True, text=True, env=env, cwd=stage)
+        if result.returncode != 0:
+            raise ReleaseError(f"无法从 wheel 读取构建身份：{(result.stderr or result.stdout).strip()}")
+        try:
+            return json.loads(result.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError) as exc:
+            raise ReleaseError(f"wheel 构建身份无法解析：{exc}") from exc
 
 
 def extract_core(wheel, destination):
@@ -135,21 +173,21 @@ def run(command, cwd=ROOT, env=None):
     return result
 
 
-def build_wheel(work):
+def build_wheel(work, edition):
     output = Path(work) / "wheels"
     shutil.rmtree(output, ignore_errors=True)
     run([sys.executable, ROOT / "scripts/build_wheels.py", "analysis",
-         "--compile-core", "--output", output])
+         "--compile-core", "--edition", edition, "--output", output])
     wheels = sorted(output.glob("*.whl"))
     if len(wheels) != 1:
         raise ReleaseError(f"预期 1 个 wheel，实际 {len(wheels)} 个：{wheels}")
     return wheels[0]
 
 
-def verify_wheel(wheel, work, skip_tests):
+def verify_wheel(wheel, work, skip_tests, edition):
     report = Path(work) / "reports/binary.xml"
     command = [sys.executable, ROOT / "scripts/check_binary.py", wheel,
-               "--junitxml", report]
+               "--junitxml", report, "--edition", edition]
     if skip_tests:
         command.append("--skip-tests")
     run(command)
@@ -221,8 +259,14 @@ def write_share(target, project, config, wheel, platform_key):
     return share
 
 
-def write_manifest(target, project, config, wheel, mode, version, platform_key, started):
+def write_manifest(target, project, config, wheel, mode, version, platform_key, started,
+                   edition):
     core = core_manifest(wheel)
+    training = training_manifest(wheel)
+    build_info = wheel_build_info(wheel)
+    if build_info.get("edition") != edition:
+        raise ReleaseError(
+            f"wheel 构建身份与请求不一致：请求 {edition} / 实际 {build_info.get('edition')}")
     entry_suffix = config["platforms"][platform_key]["exe_suffix"]
     entry = Path(target) / "bin" / (config["executable"] + entry_suffix)
     if mode == "system" and platform_key == "win32":
@@ -232,6 +276,14 @@ def write_manifest(target, project, config, wheel, mode, version, platform_key, 
         "project": project,
         "name": config["executable"],
         "version": version,
+        "edition": build_info.get("edition"),
+        "policy_version": build_info.get("policy_version"),
+        "training_limits": {
+            "max_train_samples": build_info.get("max_train_samples"),
+            "max_iq_samples": build_info.get("max_iq_samples"),
+            "max_model_parameters": build_info.get("max_model_parameters"),
+            "max_epochs": build_info.get("max_epochs"),
+        },
         "mode": mode,
         "platform": f"{platform_key}-{check_release_env.machine_key()}",
         "python": sys.version.split()[0],
@@ -247,6 +299,7 @@ def write_manifest(target, project, config, wheel, mode, version, platform_key, 
             "pyinstaller": check_release_env.installed_version("pyinstaller"),
         },
         "core_modules": core,
+        "training_modules": training,
         "wheel": {"file": Path(wheel).name, "sha256": sha256_file(wheel)},
         "entry": {"file": str(entry.relative_to(target)).replace(os.sep, "/"),
                   "sha256": sha256_file(entry) if entry.is_file() else None},
@@ -334,7 +387,8 @@ def smoke(target, config, mode, version, platform_key):
             raise ReleaseError(f"selftest 未通过：{result.stdout[-2000:]}")
 
 
-def assemble_portable(work, target, wheel, project, config, version, platform_key, started):
+def assemble_portable(work, target, wheel, project, config, version, platform_key, started,
+                      edition):
     source = build_portable(wheel, work) / config["executable"]
     if not source.is_dir():
         raise ReleaseError(f"PyInstaller 输出不存在：{source}")
@@ -346,17 +400,20 @@ def assemble_portable(work, target, wheel, project, config, version, platform_ke
     extract_core(wheel, target / "lib")
     write_share(target, project, config, wheel, platform_key)
     write_readme(target, project, config, "portable", version, platform_key)
-    write_manifest(target, project, config, wheel, "portable", version, platform_key, started)
+    write_manifest(target, project, config, wheel, "portable", version, platform_key, started,
+                   edition)
 
 
-def assemble_system(work, target, wheel, project, config, version, platform_key, started):
+def assemble_system(work, target, wheel, project, config, version, platform_key, started,
+                    edition):
     target = Path(target)
     target.mkdir(parents=True, exist_ok=True)
     build_system(wheel, target)
     extract_core(wheel, target / "lib")
     write_share(target, project, config, wheel, platform_key)
     write_readme(target, project, config, "system", version, platform_key)
-    write_manifest(target, project, config, wheel, "system", version, platform_key, started)
+    write_manifest(target, project, config, wheel, "system", version, platform_key, started,
+                   edition)
 
 
 def archive(target, platform_key, config):
@@ -378,15 +435,20 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("project", choices=("analysis",), nargs="?", default="analysis")
     parser.add_argument("--mode", choices=("portable", "system", "both"), default="portable")
+    parser.add_argument("--edition", choices=("trial", "full"), default="trial",
+                        help="构建身份：trial（默认，固定限额）或 full")
     parser.add_argument("--target", choices=("auto", "linux", "win32", "windows"), default="auto")
     parser.add_argument("--python", default=None, help="要求的 CPython 次版本")
-    parser.add_argument("--output", type=Path, default=ROOT / "dist/release")
+    parser.add_argument("--output", type=Path, default=None,
+                        help="默认 dist/<edition>/release")
     parser.add_argument("--work", type=Path, help="保留并使用指定构建目录（默认临时目录）")
     parser.add_argument("--skip-env-check", action="store_true")
     parser.add_argument("--skip-tests", action="store_true", help="跳过分发前的隔离 pytest")
     parser.add_argument("--no-archive", action="store_true")
     parser.add_argument("--keep-work", action="store_true")
     args = parser.parse_args(argv)
+    if args.output is None:
+        args.output = ROOT / "dist" / args.edition / "release"
     started = time.time()
     config = project_config(load_config(), args.project)
     target_key = check_release_env.platform_key()
@@ -412,9 +474,9 @@ def main(argv=None):
                  "--target", target_key, "--python", expected_python,
                  "--output", args.output, "--json", work / "reports/env.json", "--full"])
         log("2/6", "编译二进制核心 wheel")
-        wheel = build_wheel(work)
+        wheel = build_wheel(work, args.edition)
         log("3/6", "校验 wheel：核心扩展、明文排除与隔离回归")
-        verify_wheel(wheel, work, args.skip_tests)
+        verify_wheel(wheel, work, args.skip_tests, args.edition)
         modes = ("portable", "system") if args.mode == "both" else (args.mode,)
         results = []
         for index, mode in enumerate(modes, start=1):
@@ -425,10 +487,10 @@ def main(argv=None):
                 shutil.rmtree(target)
             if mode == "portable":
                 assemble_portable(work, target, wheel, args.project, config, version,
-                                  target_key, started)
+                                  target_key, started, args.edition)
             else:
                 assemble_system(work, target, wheel, args.project, config, version,
-                                target_key, started)
+                                target_key, started, args.edition)
             log("5/6", f"冒烟测试 {target.name}")
             smoke(target, config, mode, version, target_key)
             write_checksums(target)
@@ -440,7 +502,7 @@ def main(argv=None):
                             "archive_sha256": sha256_file(archive_path) if archive_path else None})
         log("6/6", "完成")
         summary = {"schema": "simusignal_release_result_v1", "project": args.project,
-                   "version": version, "platform": platform_label,
+                   "version": version, "edition": args.edition, "platform": platform_label,
                    "python": sys.version.split()[0], "wheel": str(wheel),
                    "wheel_sha256": sha256_file(wheel),
                    "duration_s": round(time.time() - started, 1),

@@ -41,6 +41,37 @@ sys.argv = [worker, experiment]
 runpy.run_path(worker, run_name="__main__")
 """
 
+#: 发布模式启动门：等 Windows Job Object 接管后再导入已安装的编译 worker。
+MODULE_BOOTSTRAP = r"""
+import ctypes
+import os
+import sys
+from ctypes import wintypes
+
+if os.name == "nt":
+    name = os.environ.pop("SIMUSIGNAL_TRAINING_GATE_EVENT")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenEventW.argtypes = [ctypes.c_ulong, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.OpenEventW.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, ctypes.c_ulong]
+    kernel32.WaitForSingleObject.restype = ctypes.c_ulong
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    event = kernel32.OpenEventW(0x00100000, False, name)
+    if not event:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        result = kernel32.WaitForSingleObject(event, 0xFFFFFFFF)
+        if result != 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel32.CloseHandle(event)
+
+from signal_analysis.training.worker import main
+
+sys.argv = ["signal_analysis.training.worker", *sys.argv[1:]]
+main()
+"""
+
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9

@@ -1,4 +1,4 @@
-"""AMC 训练模型实现注册表（torch 侧；**不随 wheel 分发**）。
+"""AMC 训练模型实现注册表（torch 侧；发布时随训练组件安装）。
 
 模型目录（spec）在 ``signal_analysis.algorithms.amc.ai_model``；本包按
 ``spec.implementation`` 解析实现模块。**本模块自身不导入 torch**，保证

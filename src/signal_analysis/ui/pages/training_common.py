@@ -8,7 +8,8 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
 
 from common.gui import TaskBanner, direct_entry
-from ...services.training_jobs import decode_worker_log, list_experiments
+from ...services.training_jobs import (build_info, check_epoch_limit, decode_worker_log,
+                                       list_experiments)
 from ..training_runner import TrainingRunner
 
 
@@ -95,6 +96,8 @@ class TrainingPageBase(QtWidgets.QWidget):
                                 and os.environ.get("SIMUSIGNAL_RELEASE") != "1")
         self._sidebar_collection_id = None
         self._path_rows = {}
+        self.build_info = build_info()
+        self.release_edition = self.build_info.get("edition") in ("trial", "full")
         self.runner = TrainingRunner(window, self, coordinator)
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -154,6 +157,22 @@ class TrainingPageBase(QtWidgets.QWidget):
         form.addRow(title, field)
         return field
 
+    def _update_limits_label(self):
+        info = self.build_info
+        if info.get("edition") == "trial":
+            text = (f"试用版：训练样本 ≤ {info['max_train_samples']:,}；"
+                    f"IQ 窗口 ≤ {info['max_iq_samples']:,}；"
+                    f"模型参数 ≤ {info['max_model_parameters']:,}；"
+                    f"每次训练 ≤ {info['max_epochs']} 轮。")
+            self.limits_label.setStyleSheet("color: #b00020;")
+        elif info.get("edition") == "full":
+            text = "正式版：不受试用版商业限额约束；数据契约与模型约束继续生效。"
+            self.limits_label.setStyleSheet("")
+        else:
+            text = "开发版：未启用试用限额；发布构建会替换为编译策略。"
+            self.limits_label.setStyleSheet("")
+        self.limits_label.setText(text)
+
     def build_training(self):
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
@@ -165,6 +184,18 @@ class TrainingPageBase(QtWidgets.QWidget):
         self.repository = self.path_field(form, "训练源码根目录", str(candidate))
         default_python = "" if getattr(sys, "frozen", False) else sys.executable
         self.python = self.path_field(form, "训练环境 Python", default_python, "file")
+        self.limits_label = QtWidgets.QLabel()
+        self.limits_label.setWordWrap(True)
+        self._update_limits_label()
+        form.addRow("版本限额", self.limits_label)
+        if self.release_edition:
+            # 发布版只使用训练环境中已安装的编译组件，不提供源码目录回退。
+            row = self._path_rows.pop("训练源码根目录")
+            label = form.labelForField(row)
+            if label is not None:
+                label.setVisible(False)
+            row.setVisible(False)
+            self.repository.setText("")
 
         self.arch = QtWidgets.QComboBox()
         self.arch.addItems(self.model_options())
@@ -197,7 +228,10 @@ class TrainingPageBase(QtWidgets.QWidget):
         self.device = QtWidgets.QComboBox()
         self.device.addItems(["cpu", "cuda"])
         form.addRow("训练设备", self.device)
-        self.epochs = self.spin(form, "轮数", 20, 1, 10000)
+        max_epochs = int(self.build_info.get("max_epochs") or 10000)
+        self.epochs = self.spin(form, "轮数", min(20, max_epochs), 1, max_epochs)
+        if max_epochs < 10000:
+            self.epochs.setToolTip(f"试用版每次训练最多 {max_epochs} 轮")
         self.batch = self.spin(form, "批大小", 8, 1, 65536)
         self.lr = QtWidgets.QDoubleSpinBox()
         self.lr.setDecimals(7)
@@ -283,7 +317,7 @@ class TrainingPageBase(QtWidgets.QWidget):
 
     def configuration(self):
         return {
-            "repository": self.repository.text().strip(),
+            "repository": "" if self.release_edition else self.repository.text().strip(),
             "python": self.python.text().strip(),
             "task": self.TASK,
             "arch": self.arch.currentText(),
@@ -437,6 +471,7 @@ class TrainingPageBase(QtWidgets.QWidget):
             raise ValueError(f"{self.TITLE} 只接受 {self.TASK} 训练任务")
         if config.get("arch") not in self.model_options():
             raise ValueError("请选择当前页面支持的模型")
+        check_epoch_limit(config.get("epochs"), self.build_info)
         train_id = config.get("train_collection_id")
         val_id = config.get("val_collection_id")
         if not train_id or not val_id:

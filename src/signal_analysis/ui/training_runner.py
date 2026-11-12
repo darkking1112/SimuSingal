@@ -6,14 +6,18 @@ import json
 import os
 from pathlib import Path
 import shutil
-import sys
+import subprocess
 import time
 import uuid
 
 from PySide6 import QtCore
 
-from ..services.training_jobs import save_record
-from .training_process import PROCESS_BOOTSTRAP, ProcessTree
+from ..services.training_jobs import build_info, save_record
+from .training_process import MODULE_BOOTSTRAP, PROCESS_BOOTSTRAP, ProcessTree
+
+_POLICY_QUERY = (
+    "import json; from signal_analysis._training_policy import get_build_info; "
+    "print(json.dumps(get_build_info(), ensure_ascii=False))")
 
 
 @dataclass
@@ -56,6 +60,7 @@ class TrainingRunner(QtCore.QObject):
         self.window = window
         self.page = page
         self.coordinator = coordinator
+        self.build_info = build_info()
         self._run = None
         self._last_record = None
         self._last_directory = None
@@ -98,10 +103,17 @@ class TrainingRunner(QtCore.QObject):
         try:
             validate_config(run.config)
             python = shutil.which(run.config["python"])
-            repository = Path(run.config["repository"]).expanduser().resolve()
-            worker = repository / "training" / "desktop_worker.py"
-            if not python or not worker.is_file():
-                raise ValueError("请选择有效的训练 Python 和包含 training/desktop_worker.py 的源码目录")
+            if not python:
+                raise ValueError("请选择有效的训练环境 Python")
+            release = self.build_info.get("edition") in ("trial", "full")
+            self._check_training_environment(python)
+            repository = None
+            worker = None
+            if not release:
+                repository = Path(run.config["repository"]).expanduser().resolve()
+                worker = repository / "training" / "desktop_worker.py"
+                if not worker.is_file():
+                    raise ValueError("请选择包含 training/desktop_worker.py 的训练源码目录")
 
             run.process_tree = ProcessTree()
             task, reason = self.window.start_job(
@@ -119,6 +131,8 @@ class TrainingRunner(QtCore.QObject):
             run.directory.mkdir(parents=True, exist_ok=False)
             run.record = {"id": run.identifier, "status": "running",
                           "config": run.config, "stage": "启动",
+                          "edition": self.build_info.get("edition"),
+                          "policy_version": self.build_info.get("policy_version"),
                           "metrics": [], "error": None,
                           "warnings": ([run.process_tree.warning]
                                        if run.process_tree.warning else [])}
@@ -127,7 +141,7 @@ class TrainingRunner(QtCore.QObject):
             process = QtCore.QProcess(self)
             run.process = process
             process.setProcessChannelMode(QtCore.QProcess.ProcessChannelMode.MergedChannels)
-            process.setWorkingDirectory(str(repository))
+            process.setWorkingDirectory(str(run.directory if release else repository))
             environment = QtCore.QProcessEnvironment.systemEnvironment()
             environment.insert("PYTHONUNBUFFERED", "1")
             environment.insert("OMP_NUM_THREADS", "2")
@@ -149,13 +163,46 @@ class TrainingRunner(QtCore.QObject):
             self._reset_monitor()
             if run.process_tree.warning:
                 self.log_line.emit(f"警告：{run.process_tree.warning}")
-            process.start(python, ["-u", "-c", PROCESS_BOOTSTRAP,
-                                   str(worker), str(run.directory / "experiment.json")])
+            if release:
+                arguments = ["-u", "-c", MODULE_BOOTSTRAP,
+                             str(run.directory / "experiment.json"),
+                             "--edition", str(self.build_info.get("edition")),
+                             "--policy-version", str(self.build_info.get("policy_version"))]
+            else:
+                arguments = ["-u", "-c", PROCESS_BOOTSTRAP,
+                             str(worker), str(run.directory / "experiment.json")]
+            process.start(python, arguments)
             self.state_changed.emit({"state": "running", "owner": owner})
             return True
         except Exception as exc:
             self._startup_failed(run, str(exc))
             return False
+
+    def _check_training_environment(self, python):
+        """发布模式启动前核对训练环境的编译身份；源码开发模式跳过。"""
+        info = self.build_info
+        if info.get("edition") not in ("trial", "full"):
+            return
+        try:
+            result = subprocess.run([python, "-c", _POLICY_QUERY],
+                                    capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError(f"无法在训练环境读取编译训练组件：{exc}") from exc
+        if result.returncode != 0:
+            lines = (result.stderr or result.stdout).strip().splitlines()
+            raise ValueError("训练环境缺少匹配的编译训练组件，请安装与界面同版本的 wheel："
+                             + (lines[-1] if lines else "未知错误"))
+        try:
+            payload = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
+        except (ValueError, IndexError) as exc:
+            raise ValueError(f"训练环境返回的构建身份无法解析：{exc}") from exc
+        if payload.get("edition") != info.get("edition"):
+            raise ValueError(f"构建身份不匹配：界面 {info.get('edition')} / "
+                             f"训练环境 {payload.get('edition')}；请安装对应版本的训练组件")
+        if int(payload.get("policy_version") or -1) != int(info.get("policy_version") or -1):
+            raise ValueError("训练组件策略版本不匹配，请安装与界面同版本的 wheel")
+        if payload.get("app_version") != info.get("app_version"):
+            raise ValueError("训练组件应用版本不匹配，请安装与界面同版本的 wheel")
 
     def _process_started(self, run_id):
         run = self._current(run_id)
@@ -404,6 +451,7 @@ class TrainingRunner(QtCore.QObject):
             if run.unexpected_children:
                 errors.append("训练 worker 退出时仍有子进程；已终止残留进程")
             run.record["error"] = "；".join(errors) or None
+            self._merge_training_record(run)
             try:
                 self._save_record(run)
             except OSError as exc:
@@ -432,6 +480,23 @@ class TrainingRunner(QtCore.QObject):
                                               error=run.record.get("error") if run.record else run.error)
         self.coordinator.release(run.token)
         self.run_finished.emit(record or {"status": task_state, "config": run.config})
+
+    def _merge_training_record(self, run):
+        """把编译训练内核写出的实际规模字段合并进实验记录。"""
+        if run.record is None or run.directory is None:
+            return
+        manifest = run.directory / "model" / "iq_manifest.json"
+        if not manifest.is_file():
+            return
+        try:
+            training = json.loads(manifest.read_text(encoding="utf-8")).get("training") or {}
+        except (OSError, ValueError, TypeError):
+            return
+        for key in ("edition", "policy_version", "train_samples", "val_samples",
+                    "iq_samples_actual", "model_parameters_actual",
+                    "epochs_requested", "epochs_run"):
+            if key in training:
+                run.record[key] = training[key]
 
     def _save_record(self, run):
         if run.record is None or run.directory is None:

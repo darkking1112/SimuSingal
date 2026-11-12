@@ -272,11 +272,16 @@ Windows PowerShell 先设置 `$env:QT_QPA_PLATFORM="offscreen"`。该设置**只
 分别构建两个 wheel，源码从总览约定的 `src` 目录收集，项目元数据读取各自 `apps/.../pyproject.toml`：
 
 ```bash
-python scripts/build_wheels.py analysis --compile-core
+# 试用版：编译期固定四项训练上限（2,000 样本 / 1,024 点 / 100 万参数 / 20 轮）
+python scripts/build_wheels.py analysis --compile-core --edition trial
+# 正式版：不启用试用商业限额
+python scripts/build_wheels.py analysis --compile-core --edition full
 python scripts/build_wheels.py simulation
 ```
 
-分析 wheel 包含 `common + signal_analysis`，按 `packaging/numeric_core.json` 将八个算法模块（`algorithms.*`，语义命名）编译为扩展并排除核心明文；仿真 wheel 包含 `common + communication_sim`，不依赖 SimPy 以外的业务计算库。GUI 依赖单独声明。建议在独立虚拟环境安装和升级各项目的 wheel；共用源码随各自 wheel 分发。
+分析 wheel 包含 `common + signal_analysis`，按 `packaging/numeric_core.json` 将八个算法模块（`algorithms.*`，语义命名）编译为扩展并排除核心明文；训练入口与四项检查按 `packaging/training_core.json` 编译为 `signal_analysis._training_policy`、`signal_analysis.training.{worker,iq_runtime,detection_runtime}`，并移除同名源码与仅开发用的 Python 训练循环。仿真 wheel 包含 `common + communication_sim`，不依赖 SimPy 以外的业务计算库。GUI 依赖单独声明。建议在独立虚拟环境安装和升级各项目的 wheel；共用源码随各自 wheel 分发。
+
+`--edition` 是构建期参数；成品运行时不读取 `SIMUSIGNAL_BUILD_EDITION`。训练环境需安装与界面同版本、同 edition 的 wheel，再安装 `.[train]`（或直接安装 torch/onnx 等训练依赖）。发布模式下 GUI 不再选择训练源码目录，训练任务由已安装的编译 worker 执行。
 
 ### 一键发布（signal_analysis）
 
@@ -289,6 +294,12 @@ python scripts/check_release_env.py --stage build --full
 然后按需要选择产物模式：
 
 ```bash
+# 试用版（默认 edition=trial，固定四项训练上限）
+python scripts/release.py analysis --mode portable --edition trial
+
+# 正式版（不启用试用商业限额）
+python scripts/release.py analysis --mode portable --edition full
+
 # 自包含：bin/SignalAnalysis（Windows 为 SignalAnalysis.exe），目标机不需要 Python
 python scripts/release.py analysis --mode portable
 
@@ -299,7 +310,7 @@ python scripts/release.py analysis --mode system
 python scripts/release.py analysis --mode both
 ```
 
-Linux 产物为 `dist/release/SignalAnalysis-<版本>-cp312-linux-x86_64[-system]/` 与 `.tar.gz`；Windows 为 `...zip`。包内含 `bin/` 入口、`lib/` 核心 `.pyd/.so`、`share/manifest.json`（核心模块与 wheel 哈希）、`share/packaging/requirements/` 依赖清单、`share/scripts/check_release_env.py` 目标机自检脚本和 `SHA256SUMS`。
+Linux 产物默认写入 `dist/<edition>/release/SignalAnalysis-<版本>-cp312-linux-x86_64[-system]/` 与 `.tar.gz`；Windows 为 `...zip`。包内含 `bin/` 入口、`lib/` 核心 `.pyd/.so`、`share/manifest.json`（edition、policy_version、四项训练上限、数值/训练扩展与 wheel 哈希）、`share/packaging/requirements/` 依赖清单、`share/scripts/check_release_env.py` 目标机自检脚本和 `SHA256SUMS`。
 
 目标机验证：
 
@@ -308,7 +319,7 @@ python share/scripts/check_release_env.py --stage runtime --output .
 bin/SignalAnalysis selftest --expect-binary
 ```
 
-`selftest` 会加载八个核心二进制模块、内置 AMC 模型，并跑一次 IQ 生成/分析/检测闭环。Python 扩展不能交叉编译：Windows 版必须在 Windows + MSVC 的 “x64 Native Tools Command Prompt for VS 2022” 中构建，Linux 版必须在目标 glibc 基线或更低版本的系统上构建。`share/packaging/requirements/` 中的版本清单可直接用于目标机 `pip install -r`；`system` 模式可用 `SIMUSIGNAL_PYTHON` 指定解释器。Windows 首次验证后可用 `python scripts/check_release_env.py --stage build --freeze packaging/requirements/build-win32-py312.txt` 固化本机版本。
+`selftest` 会加载八个核心二进制模块、内置 AMC 模型，并跑一次 IQ 生成/分析/检测闭环；输出中的 `training` 字段报告实际加载到的 edition、policy_version 与四项上限。Python 扩展不能交叉编译：Windows 版必须在 Windows + MSVC 的 “x64 Native Tools Command Prompt for VS 2022” 中构建，Linux 版必须在目标 glibc 基线或更低版本的系统上构建。`share/packaging/requirements/` 中的版本清单可直接用于目标机 `pip install -r`；`system` 模式可用 `SIMUSIGNAL_PYTHON` 指定解释器。Windows 首次验证后可用 `python scripts/check_release_env.py --stage build --freeze packaging/requirements/build-win32-py312.txt` 固化本机版本。
 
 旧的底层命令仍可单独使用：
 

@@ -11,6 +11,9 @@ dependencies = ["numpy>=1.26,<3", "sigmf==1.11.1"]
 
 [project.optional-dependencies]
 gui = ["PySide6>=6.6,<7", "pyqtgraph>=0.13,<0.15"]
+# 独立训练环境：安装同一个编译 wheel 后再装该 extra；桌面冻结包不使用它。
+train = ["torch>=2.2,<3", "torchvision>=0.17,<1", "onnx>=1.16,<2",
+         "onnxruntime>=1.17,<2"]
 
 [project.scripts]
 signal-analysis = "signal_analysis.cli:main"

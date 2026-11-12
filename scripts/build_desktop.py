@@ -41,7 +41,10 @@ def main():
                         "--target", str(stage), str(wheel)], check=True)
         env = os.environ.copy()
         env["PYTHONPATH"] = str(stage)
-        exclusions = [arg for package in config["exclude"] for arg in ("--exclude-module", package)]
+        # 项目隔离（exclude）与 GUI 冻结排除（desktop_exclude）分开：wheel 中必须
+        # 包含编译训练扩展，桌面冻结包则不能把 signal_analysis.training 收进去。
+        frozen_exclude = list(config["exclude"]) + list(config.get("desktop_exclude", []))
+        exclusions = [arg for package in frozen_exclude for arg in ("--exclude-module", package)]
         collections = [arg for package in config.get("collect_all", []) for arg in ("--collect-all", package)]
         # ``--collect-submodules`` 只收 Python 模块，包内数据文件（如调制识别的内置模型
         # JSON）必须单独声明，否则冻结后运行时才报找不到模型。

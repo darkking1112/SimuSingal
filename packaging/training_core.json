@@ -1,0 +1,33 @@
+{
+  "modules": [
+    {
+      "module": "signal_analysis._training_policy",
+      "source": "src/signal_analysis/_training_policy.pyx"
+    },
+    {
+      "module": "signal_analysis.training.worker",
+      "source": "src/signal_analysis/training/worker.pyx"
+    },
+    {
+      "module": "signal_analysis.training.iq_runtime",
+      "source": "src/signal_analysis/training/iq_runtime.pyx"
+    },
+    {
+      "module": "signal_analysis.training.detection_runtime",
+      "source": "src/signal_analysis/training/detection_runtime.pyx"
+    }
+  ],
+  "source_only": [
+    "signal_analysis.training._iq_train_python"
+  ],
+  "packages": [
+    {
+      "package": "signal_analysis.training.amc_models",
+      "source_root": "training/amc_models",
+      "exclude": [
+        "__init__.py",
+        "_template.py"
+      ]
+    }
+  ]
+}

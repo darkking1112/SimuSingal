@@ -10,8 +10,11 @@ import importlib.util
 import sys
 from pathlib import Path
 
-#: 第三方模型源码目录（``<repo>/custom``）
-CUSTOM_ROOT = Path(__file__).resolve().parents[2] / "custom"
+#: 第三方模型源码目录：源码树为 ``<repo>/custom``，训练 wheel 为
+#: ``signal_analysis/training/custom``。
+_CANDIDATES = (Path(__file__).resolve().parents[2] / "custom",
+               Path(__file__).resolve().parents[1] / "custom")
+CUSTOM_ROOT = next((path for path in _CANDIDATES if path.is_dir()), _CANDIDATES[0])
 
 
 def load_custom_module(name: str):
